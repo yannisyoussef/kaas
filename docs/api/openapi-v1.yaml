@@ -1,0 +1,47 @@
+openapi: 3.1.0
+info:
+  title: KaaS API
+  version: 1.0.0
+  description: Versioned control-plane API foundation.
+servers:
+  - url: http://localhost:8080
+paths:
+  /api/v1/projects:
+    get:
+      summary: List projects
+      responses:
+        '200': {description: Project page}
+    post:
+      summary: Create project
+      responses:
+        '201': {description: Project created}
+  /api/v1/projects/{projectId}/runs:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: string, format: uuid}}]
+    post:
+      summary: Create an asynchronous run
+      parameters: [{name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8}}]
+      responses:
+        '202': {description: Run accepted}
+        '409': {description: Idempotency conflict}
+        '422': {description: Validation error}
+  /api/v1/runs/{runId}:
+    get:
+      summary: Get run status and summary
+      parameters: [{name: runId, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {description: Run details}}
+  /api/v1/runs/{runId}/events:
+    get:
+      summary: Stream ordered run events
+      parameters: [{name: runId, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {description: Server-sent events, content: {text/event-stream: {schema: {type: string}}}}}
+components:
+  schemas:
+    ProblemDetail:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: {type: string, format: uri}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        instance: {type: string, format: uri}
