@@ -1,21 +1,42 @@
 # ADR-002: Modular monolith
 
-- **Status:** Accepted for bootstrap
+## Status
+
+IMPLEMENTED
 
 ## Context
-KaaS needs a maintainable, observable platform while keeping the MVP small and preventing untrusted test execution from entering the control plane.
+
+The control plane will coordinate projects, immutable feature revisions, configuration, runs, results, and artifact metadata. These capabilities share transactions and invariants during the MVP. User-controlled test definitions are executable content and must not run in the control-plane process.
 
 ## Decision
-Use one Spring Boot control-plane deployment with module boundaries; keep runner separately deployable.
 
-## Alternatives
-A larger set of microservices, a different persistence/transport/runtime choice, or deferring the concern were considered and rejected for the MVP unless noted in the security review.
+Implement the control plane as one Spring Boot deployable organized by business capability. Keep external infrastructure behind narrow adapters where a real substitution or test boundary exists. Keep the runner as a separate process/deployable with no code path that executes tests in the API.
+
+## Alternatives considered
+
+- A microservice per control-plane capability.
+- One process containing both the API and Karate execution.
+- A flat controller/service/repository package layout.
+
+## Why alternatives were rejected
+
+Microservices add distributed transactions and operations without current scale or team boundaries. In-process execution violates the primary trust boundary. A flat technical-layer layout makes capability ownership and dependency rules harder to preserve.
 
 ## Advantages
-Clear ownership, independently testable boundaries, straightforward local development, and a migration path when scale or operational requirements justify change.
+
+- Simple deployment and transactional consistency for the MVP.
+- Capability-focused code remains testable and extractable if evidence later supports it.
+- The execution trust boundary is visible at process and module level.
 
 ## Disadvantages
-The initial design carries some operational and interface complexity, and the chosen technology introduces its ecosystem's maintenance costs.
+
+- Module boundaries require architecture tests and review discipline.
+- A single control-plane deployable scales and releases as one unit.
 
 ## Consequences
-Implementations must preserve the control-plane/execution-plane separation, version contracts, record decisions in tests, and avoid leaking infrastructure into domain logic.
+
+The Project/FeatureRevision slice proves inward dependency direction using domain, application, API, and infrastructure packages. ArchUnit prevents domain-to-framework, API-to-persistence, and control-plane-to-runner/Karate dependencies. This ADR does not approve the execution protocol or Docker security design.
+
+## Validation and revisit conditions
+
+Validated by the Project/FeatureRevision slice and architecture tests. Revisit only after measured scaling, availability, ownership, or release-cadence constraints justify extraction.

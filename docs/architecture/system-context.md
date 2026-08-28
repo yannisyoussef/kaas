@@ -1,5 +1,7 @@
 # System Context
 
+**Status: PROPOSED PRODUCT CONTEXT.** Only the API, web, and non-executing runner scaffolds exist today.
+
 ```mermaid
 flowchart TB
   Human[Engineer] --> Client[Web or API client]
@@ -16,4 +18,4 @@ flowchart TB
   Worker --> Telemetry
 ```
 
-The control plane is the trust boundary for configuration and orchestration. The sandbox is a lower-trust boundary for user-provided executable test content. Workers exchange only versioned contracts and never expose database credentials to the sandbox.
+The intended control plane is the trust boundary for configuration and orchestration. A future sandbox would be a lower-trust boundary for user-provided executable content. Worker contracts, credential isolation, and sandbox enforcement are not implemented.

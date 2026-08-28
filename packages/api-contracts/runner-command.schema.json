@@ -1,1 +1,212 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://kaas.dev/contracts/v1/runner-command.schema.json","title":"RunnerCommand","type":"object","required":["contractVersion","runId","projectId","featureRevision","timeoutSeconds","artifactPolicy"],"properties":{"contractVersion":{"const":"v1"},"runId":{"type":"string","format":"uuid"},"projectId":{"type":"string","format":"uuid"},"featureRevision":{"type":"string"},"target":{"type":"object","properties":{"featureUri":{"type":"string"},"scenario":{"type":"string"},"tags":{"type":"string"}},"additionalProperties":false},"variables":{"type":"object","additionalProperties":{"type":"string"}},"secretReferences":{"type":"array","items":{"type":"string"}},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600},"artifactPolicy":{"type":"object","required":["htmlReport","jsonResults","logs"],"properties":{"htmlReport":{"type":"boolean"},"jsonResults":{"type":"boolean"},"logs":{"type":"boolean"}},"additionalProperties":false}},"additionalProperties":false}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kaas.dev/contracts/v1/runner-command.schema.json",
+  "title": "ExecutionCommand",
+  "description": "Immutable, tenant-bound command for one KaaS execution attempt. This contract contains no raw secrets, host paths, transport headers, or runtime-specific launcher configuration.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "messageId",
+    "messageType",
+    "commandId",
+    "occurredAt",
+    "producer",
+    "organizationId",
+    "projectId",
+    "runId",
+    "runVersion",
+    "attemptId",
+    "attemptNumber",
+    "assignmentEpoch",
+    "correlationId",
+    "causationId",
+    "deadline",
+    "payload"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0",
+      "description": "Major/minor schema version. Consumers reject unsupported major versions."
+    },
+    "messageId": {"type": "string", "format": "uuid", "description": "Stable publication identity retained across broker redelivery."},
+    "messageType": {"const": "EXECUTION_COMMAND"},
+    "commandId": {"type": "string", "format": "uuid", "description": "Immutable business-command identity for this execution attempt."},
+    "occurredAt": {"type": "string", "format": "date-time"},
+    "producer": {"type": "string", "pattern": "^[a-z][a-z0-9.-]{1,63}$"},
+    "organizationId": {"type": "string", "format": "uuid"},
+    "projectId": {"type": "string", "format": "uuid"},
+    "runId": {"type": "string", "format": "uuid"},
+    "runVersion": {"type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "Optimistic version against which the attempt was issued."},
+    "attemptId": {"type": "string", "format": "uuid"},
+    "attemptNumber": {"type": "integer", "minimum": 1, "maximum": 1000},
+    "assignmentEpoch": {"type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "Monotonic fencing token for the current claim. Stale workers cannot mutate state with an older epoch."},
+    "correlationId": {"type": "string", "format": "uuid"},
+    "causationId": {"type": "string", "format": "uuid"},
+    "deadline": {"type": "string", "format": "date-time", "description": "Absolute latest time at which execution may continue."},
+    "payload": {"$ref": "#/$defs/payload"}
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?![A-Za-z][A-Za-z0-9+.-]*:)(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\\\)[A-Za-z0-9._~ -]+(?:/[A-Za-z0-9._~ -]+)*$",
+      "description": "Workspace-relative logical path; absolute paths, backslashes, traversal segments, and control characters are forbidden."
+    },
+    "scalar": {
+      "oneOf": [
+        {"type": "string", "maxLength": 4096},
+        {"type": "number"},
+        {"type": "boolean"},
+        {"type": "null"}
+      ]
+    },
+    "featureRevision": {
+      "type": "object",
+      "required": ["featureId", "revisionId", "logicalPath", "contentDigest"],
+      "properties": {
+        "featureId": {"type": "string", "format": "uuid"},
+        "revisionId": {"type": "string", "format": "uuid"},
+        "logicalPath": {"$ref": "#/$defs/logicalPath"},
+        "contentDigest": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "sourceBundle": {
+      "type": "object",
+      "required": ["reference", "contentDigest", "features"],
+      "properties": {
+        "reference": {
+          "type": "string",
+          "pattern": "^source-bundle:[A-Za-z0-9._~-]{8,240}$",
+          "description": "Opaque immutable source-bundle reference, never a URL or host path."
+        },
+        "contentDigest": {"$ref": "#/$defs/digest"},
+        "features": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {"$ref": "#/$defs/featureRevision"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "secretCapability": {
+      "type": "object",
+      "required": ["capabilityId", "provider", "referenceId", "allowedUse", "expiresAt"],
+      "properties": {
+        "capabilityId": {"type": "string", "format": "uuid"},
+        "provider": {"type": "string", "pattern": "^[a-z][a-z0-9.-]{1,63}$"},
+        "referenceId": {"type": "string", "pattern": "^secret-ref:[A-Za-z0-9._~-]{8,240}$", "description": "Opaque identifier that reveals no provider path and grants no access by possession."},
+        "version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "allowedUse": {"type": "string", "enum": ["VARIABLE", "HTTP_AUTH"]},
+        "targetName": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,127}$"},
+        "expiresAt": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "engine",
+        "sourceBundle",
+        "configurationSnapshot",
+        "secretCapabilities",
+        "environmentSnapshot",
+        "selection",
+        "parallelism",
+        "scenarioRetry",
+        "executionTimeoutSeconds",
+        "artifactPolicy",
+        "networkPolicy"
+      ],
+      "properties": {
+        "engine": {
+          "type": "object",
+          "required": ["type", "version"],
+          "properties": {
+            "type": {"const": "KARATE"},
+            "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"}
+          },
+          "additionalProperties": false
+        },
+        "sourceBundle": {"$ref": "#/$defs/sourceBundle"},
+        "configurationSnapshot": {
+          "type": "object",
+          "maxProperties": 500,
+          "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,127}$"},
+          "additionalProperties": {"$ref": "#/$defs/scalar"},
+          "description": "Resolved non-secret scalar configuration captured at run creation."
+        },
+        "secretCapabilities": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {"$ref": "#/$defs/secretCapability"}
+        },
+        "environmentSnapshot": {
+          "type": "object",
+          "required": ["environmentId", "name", "version", "digest"],
+          "properties": {
+            "environmentId": {"type": "string", "format": "uuid"},
+            "name": {"type": "string", "minLength": 1, "maxLength": 128},
+            "version": {"type": "integer", "minimum": 1},
+            "digest": {"$ref": "#/$defs/digest"}
+          },
+          "additionalProperties": false
+        },
+        "selection": {
+          "type": "object",
+          "properties": {
+            "scenarioIds": {"type": "array", "maxItems": 1000, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
+            "tags": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"type": "string", "pattern": "^@[A-Za-z0-9_.:-]{1,127}$"}}
+          },
+          "additionalProperties": false
+        },
+        "parallelism": {"type": "integer", "minimum": 1, "maximum": 32},
+        "scenarioRetry": {
+          "type": "object",
+          "required": ["maxAttempts", "delayMilliseconds"],
+          "properties": {
+            "maxAttempts": {"type": "integer", "minimum": 1, "maximum": 5},
+            "delayMilliseconds": {"type": "integer", "minimum": 0, "maximum": 30000}
+          },
+          "additionalProperties": false,
+          "description": "Test-level scenario retry inside this execution attempt; it never creates a new infrastructure attempt."
+        },
+        "executionTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "artifactPolicy": {
+          "type": "object",
+          "required": ["types", "maxArtifactBytes", "maxTotalBytes"],
+          "properties": {
+            "types": {
+              "type": "array",
+              "maxItems": 4,
+              "uniqueItems": true,
+              "items": {"enum": ["KARATE_HTML_REPORT", "RAW_RESULT", "EXECUTION_LOG", "OTHER"]}
+            },
+            "maxArtifactBytes": {"type": "integer", "minimum": 0, "maximum": 104857600},
+            "maxTotalBytes": {"type": "integer", "minimum": 0, "maximum": 524288000}
+          },
+          "additionalProperties": false
+        },
+        "networkPolicy": {
+          "type": "object",
+          "required": ["policyId", "version", "digest"],
+          "properties": {
+            "policyId": {"type": "string", "format": "uuid"},
+            "version": {"type": "integer", "minimum": 1},
+            "digest": {"$ref": "#/$defs/digest"}
+          },
+          "additionalProperties": false,
+          "description": "Reference to a separately enforced, immutable network policy; not launcher configuration."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

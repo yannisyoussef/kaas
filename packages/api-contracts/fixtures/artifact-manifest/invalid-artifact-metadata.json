@@ -1,0 +1,1 @@
+{"schemaVersion":"1.0","messageId":"13131313-1313-4313-8313-131313131313","messageType":"ARTIFACT_MANIFEST","artifacts":[{"artifactId":"not-a-uuid","type":"RAW_RESULT","contentType":"invalid","sizeBytes":-1,"sha256":"sha256:1234","objectReferenceId":"https://storage.example/object","createdAt":"not-a-date"}]}

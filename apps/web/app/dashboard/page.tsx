@@ -1,3 +1,3 @@
 export default function Dashboard() {
-  return <main><p className="eyebrow">Workspace</p><h1>Dashboard</h1><p>Your execution overview will appear here.</p></main>;
+  return <main><p className="eyebrow">Scaffold</p><h1>Dashboard</h1><p>No product data is implemented yet. The first vertical slice will replace this placeholder.</p></main>;
 }

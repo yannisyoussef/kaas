@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "1.0",
+  "messageId": "12121212-1212-4212-8212-121212121212",
+  "messageType": "EXECUTION_RESULT",
+  "occurredAt": "2026-08-27T18:05:02Z",
+  "producer": "kaas-runner",
+  "correlationId": "77777777-7777-4777-8777-777777777777",
+  "causationId": "66666666-6666-4666-8666-666666666666",
+  "resultId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+  "commandId": "66666666-6666-4666-8666-666666666666",
+  "organizationId": "11111111-1111-4111-8111-111111111111",
+  "projectId": "22222222-2222-4222-8222-222222222222",
+  "runId": "33333333-3333-4333-8333-333333333333",
+  "runVersion": 6,
+  "attemptId": "44444444-4444-4444-8444-444444444444",
+  "attemptNumber": 1,
+  "assignmentEpoch": 7,
+  "startedAt": "2026-08-27T18:00:02Z",
+  "finishedAt": "2026-08-27T18:05:00Z",
+  "testOutcome": "PASSED",
+  "infrastructureOutcome": "SUCCEEDED",
+  "resultCompleteness": "COMPLETE",
+  "timings": {
+    "provisioning": {"durationMilliseconds": 2000},
+    "execution": {"durationMilliseconds": 295000},
+    "reporting": {"durationMilliseconds": 1000}
+  },
+  "summary": {
+    "features": {"total": 1, "passed": 1, "failed": 0, "skipped": 0, "aborted": 0},
+    "scenarios": {"total": 1, "passed": 1, "failed": 0, "skipped": 0, "aborted": 0},
+    "steps": {"total": 3, "passed": 3, "failed": 0, "skipped": 0, "aborted": 0}
+  },
+  "features": [
+    {
+      "featureId": "99999999-9999-4999-8999-999999999999",
+      "revisionId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "displayName": "Create order",
+      "logicalPath": "features/orders/create-order.feature",
+      "status": "PASSED",
+      "durationMilliseconds": 294000,
+      "scenarios": [
+        {
+          "id": "create-order-outline:examples-success:row-0",
+          "scenarioDefinitionId": "create-order-outline",
+          "scenarioKind": "OUTLINE_EXAMPLE",
+          "name": "Create a valid order",
+          "tags": ["@smoke"],
+          "outlineExample": {"index": 0, "rowId": "examples-success:row-0", "rowDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+          "status": "PASSED",
+          "durationMilliseconds": 294000,
+          "attempts": [
+            {
+              "attemptNumber": 1,
+              "status": "FAILED",
+              "durationMilliseconds": 1000,
+              "steps": [
+                {"id": "background-1", "kind": "BACKGROUND", "keyword": "Given", "text": "an authenticated client", "status": "PASSED", "durationMilliseconds": 100},
+                {"id": "step-1", "kind": "SCENARIO", "keyword": "When", "text": "the order is submitted", "status": "FAILED", "durationMilliseconds": 900, "error": {"code": "ASSERTION_MISMATCH", "category": "ASSERTION", "message": "Expected status 201 but received 503", "diagnosticReference": "diag:first_attempt_failure"}}
+              ],
+              "errorSummary": {"code": "ASSERTION_MISMATCH", "category": "ASSERTION", "message": "Scenario attempt failed", "diagnosticReference": "diag:first_attempt_failure"}
+            },
+            {
+              "attemptNumber": 2,
+              "status": "PASSED",
+              "durationMilliseconds": 293000,
+              "steps": [
+                {"id": "background-1", "kind": "BACKGROUND", "keyword": "Given", "text": "an authenticated client", "status": "PASSED", "durationMilliseconds": 100},
+                {"id": "step-1", "kind": "SCENARIO", "keyword": "When", "text": "the order is submitted", "status": "PASSED", "durationMilliseconds": 292800},
+                {"id": "after-scenario", "kind": "HOOK", "hookPhase": "AFTER_SCENARIO", "keyword": "After", "text": "scenario cleanup", "status": "PASSED", "durationMilliseconds": 100}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "artifactManifestReference": {
+    "manifestId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    "objectReferenceId": "object-ref:manifest_33333333_44444444",
+    "sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  }
+}

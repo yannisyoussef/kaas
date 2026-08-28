@@ -1,1 +1,258 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://kaas.dev/contracts/v1/runner-result.schema.json","title":"RunnerResult","type":"object","required":["contractVersion","runId","outcome","startedAt","finishedAt","features","artifacts"],"properties":{"contractVersion":{"const":"v1"},"runId":{"type":"string","format":"uuid"},"outcome":{"enum":["PASSED","TEST_FAILED","EXECUTION_FAILED","TIMED_OUT","CANCELLED"]},"startedAt":{"type":"string","format":"date-time"},"finishedAt":{"type":"string","format":"date-time"},"exitCode":{"type":["integer","null"]},"error":{"type":["string","null"]},"features":{"type":"array","items":{"$ref":"#/$defs/feature"}},"artifacts":{"type":"array","items":{"$ref":"#/$defs/artifact"}}},"$defs":{"feature":{"type":"object","required":["uri","name","status","scenarios"],"properties":{"uri":{"type":"string"},"name":{"type":"string"},"status":{"enum":["PASSED","FAILED","SKIPPED"]},"durationMs":{"type":"integer","minimum":0},"scenarios":{"type":"array","items":{"type":"object"}}}},"artifact":{"type":"object","required":["kind","objectKey"],"properties":{"kind":{"enum":["HTML_REPORT","JSON_RESULTS","LOGS"]},"objectKey":{"type":"string"},"contentType":{"type":"string"}}}}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kaas.dev/contracts/v1/runner-result.schema.json",
+  "title": "ExecutionResult",
+  "description": "Structured evidence produced by one execution attempt. Quality-gate evaluation is intentionally excluded and remains a control-plane concern.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "messageId",
+    "messageType",
+    "occurredAt",
+    "producer",
+    "correlationId",
+    "causationId",
+    "resultId",
+    "commandId",
+    "organizationId",
+    "projectId",
+    "runId",
+    "runVersion",
+    "attemptId",
+    "attemptNumber",
+    "assignmentEpoch",
+    "startedAt",
+    "finishedAt",
+    "testOutcome",
+    "infrastructureOutcome",
+    "resultCompleteness",
+    "timings",
+    "summary",
+    "features",
+    "artifactManifestReference"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "1.0"},
+    "messageId": {"type": "string", "format": "uuid", "description": "Stable publication identity retained across redelivery."},
+    "messageType": {"const": "EXECUTION_RESULT"},
+    "occurredAt": {"type": "string", "format": "date-time"},
+    "producer": {"type": "string", "pattern": "^[a-z][a-z0-9.-]{1,63}$"},
+    "correlationId": {"type": "string", "format": "uuid"},
+    "causationId": {"type": "string", "format": "uuid"},
+    "resultId": {"type": "string", "format": "uuid"},
+    "commandId": {"type": "string", "format": "uuid"},
+    "organizationId": {"type": "string", "format": "uuid"},
+    "projectId": {"type": "string", "format": "uuid"},
+    "runId": {"type": "string", "format": "uuid"},
+    "runVersion": {"type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "Run version expected by the result processor."},
+    "attemptId": {"type": "string", "format": "uuid"},
+    "attemptNumber": {"type": "integer", "minimum": 1, "maximum": 1000},
+    "assignmentEpoch": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "startedAt": {"type": "string", "format": "date-time"},
+    "finishedAt": {"type": "string", "format": "date-time"},
+    "testOutcome": {"enum": ["PASSED", "FAILED", "NOT_AVAILABLE"]},
+    "infrastructureOutcome": {"enum": ["SUCCEEDED", "FAILED", "TIMED_OUT", "CANCELLED"]},
+    "resultCompleteness": {"enum": ["COMPLETE", "PARTIAL", "NONE"]},
+    "timings": {"$ref": "#/$defs/timings"},
+    "summary": {"$ref": "#/$defs/executionSummary"},
+    "features": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {"$ref": "#/$defs/featureResult"}
+    },
+    "infrastructureError": {"$ref": "#/$defs/structuredError"},
+    "artifactManifestReference": {"$ref": "#/$defs/artifactManifestReference"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"infrastructureOutcome": {"const": "SUCCEEDED"}}, "required": ["infrastructureOutcome"]},
+      "then": {
+        "properties": {
+          "testOutcome": {"enum": ["PASSED", "FAILED"]},
+          "resultCompleteness": {"const": "COMPLETE"},
+          "infrastructureError": false
+        }
+      },
+      "else": {"properties": {"testOutcome": {"const": "NOT_AVAILABLE"}}}
+    },
+    {
+      "if": {"properties": {"infrastructureOutcome": {"enum": ["FAILED", "TIMED_OUT"]}}, "required": ["infrastructureOutcome"]},
+      "then": {"required": ["infrastructureError"], "properties": {"infrastructureError": {"$ref": "#/$defs/structuredError"}}}
+    }
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?![A-Za-z][A-Za-z0-9+.-]*:)(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\\\)[A-Za-z0-9._~ -]+(?:/[A-Za-z0-9._~ -]+)*$"
+    },
+    "structuredError": {
+      "type": "object",
+      "required": ["code", "category", "message", "retryable", "phase"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
+        "category": {"enum": ["VALIDATION", "PROVISIONING", "EXECUTION", "TIMEOUT", "RESOURCE_LIMIT", "RESULT_COLLECTION", "RESULT_PROCESSING", "ARTIFACT", "INTERNAL"]},
+        "message": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "Sanitized human-readable message with no secrets, credentials, host paths, or stack traces."},
+        "retryable": {"type": "boolean"},
+        "phase": {"enum": ["QUEUE", "CLAIM", "PROVISIONING", "EXECUTION", "RESULT_COLLECTION", "RESULT_PROCESSING", "ARTIFACT_UPLOAD", "CANCELLATION"]},
+        "diagnosticReference": {"type": "string", "pattern": "^diag:[A-Za-z0-9._~-]{8,240}$"}
+      },
+      "additionalProperties": false
+    },
+    "testError": {
+      "type": "object",
+      "required": ["code", "category", "message"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
+        "category": {"enum": ["ASSERTION", "SCRIPT", "DATA", "HOOK", "INTERNAL_TEST"]},
+        "message": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "diagnosticReference": {"type": "string", "pattern": "^diag:[A-Za-z0-9._~-]{8,240}$"}
+      },
+      "additionalProperties": false
+    },
+    "duration": {
+      "type": "object",
+      "required": ["durationMilliseconds"],
+      "properties": {"durationMilliseconds": {"type": "integer", "minimum": 0, "maximum": 86400000}},
+      "additionalProperties": false
+    },
+    "timings": {
+      "type": "object",
+      "required": ["provisioning", "execution", "reporting"],
+      "properties": {
+        "provisioning": {"$ref": "#/$defs/duration"},
+        "execution": {"$ref": "#/$defs/duration"},
+        "reporting": {"$ref": "#/$defs/duration"}
+      },
+      "additionalProperties": false
+    },
+    "countSummary": {
+      "type": "object",
+      "required": ["total", "passed", "failed", "skipped", "aborted"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "passed": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "skipped": {"type": "integer", "minimum": 0},
+        "aborted": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false,
+      "description": "Processors additionally verify that category counts sum to total."
+    },
+    "executionSummary": {
+      "type": "object",
+      "required": ["features", "scenarios", "steps"],
+      "properties": {
+        "features": {"$ref": "#/$defs/countSummary"},
+        "scenarios": {"$ref": "#/$defs/countSummary"},
+        "steps": {"$ref": "#/$defs/countSummary"}
+      },
+      "additionalProperties": false
+    },
+    "outlineExample": {
+      "type": "object",
+      "required": ["index", "rowId", "rowDigest"],
+      "properties": {
+        "index": {"type": "integer", "minimum": 0},
+        "rowId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "rowDigest": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false,
+      "description": "Deterministic outline-row identity without copying potentially sensitive example values."
+    },
+    "stepResult": {
+      "type": "object",
+      "required": ["id", "kind", "keyword", "text", "status", "durationMilliseconds"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "kind": {"enum": ["BACKGROUND", "SCENARIO", "HOOK"]},
+        "hookPhase": {"enum": ["BEFORE_FEATURE", "AFTER_FEATURE", "BEFORE_SCENARIO", "AFTER_SCENARIO"]},
+        "keyword": {"type": "string", "minLength": 1, "maxLength": 64},
+        "text": {"type": "string", "maxLength": 8192},
+        "status": {"enum": ["PASSED", "FAILED", "SKIPPED", "ABORTED"]},
+        "durationMilliseconds": {"type": "integer", "minimum": 0, "maximum": 86400000},
+        "error": {"$ref": "#/$defs/testError"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "HOOK"}}, "required": ["kind"]},
+          "then": {"required": ["hookPhase"], "properties": {"hookPhase": {"enum": ["BEFORE_FEATURE", "AFTER_FEATURE", "BEFORE_SCENARIO", "AFTER_SCENARIO"]}}},
+          "else": {"properties": {"hookPhase": false}}
+        },
+        {
+          "if": {"properties": {"status": {"const": "FAILED"}}, "required": ["status"]},
+          "then": {"required": ["error"], "properties": {"error": {"$ref": "#/$defs/testError"}}},
+          "else": {"properties": {"error": false}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "scenarioAttempt": {
+      "type": "object",
+      "required": ["attemptNumber", "status", "durationMilliseconds", "steps"],
+      "properties": {
+        "attemptNumber": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Test-level scenario retry index; unrelated to infrastructure attemptNumber."},
+        "status": {"enum": ["PASSED", "FAILED", "SKIPPED", "ABORTED"]},
+        "durationMilliseconds": {"type": "integer", "minimum": 0, "maximum": 86400000},
+        "steps": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/stepResult"}},
+        "errorSummary": {"$ref": "#/$defs/testError"}
+      },
+      "additionalProperties": false
+    },
+    "scenarioResult": {
+      "type": "object",
+      "required": ["id", "scenarioDefinitionId", "scenarioKind", "name", "tags", "status", "durationMilliseconds", "attempts"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "scenarioDefinitionId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "scenarioKind": {"enum": ["SCENARIO", "OUTLINE_EXAMPLE"]},
+        "name": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "tags": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"type": "string", "pattern": "^@[A-Za-z0-9_.:-]{1,127}$"}},
+        "outlineExample": {"$ref": "#/$defs/outlineExample"},
+        "status": {"enum": ["PASSED", "FAILED", "SKIPPED", "ABORTED"]},
+        "durationMilliseconds": {"type": "integer", "minimum": 0, "maximum": 86400000},
+        "attempts": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"$ref": "#/$defs/scenarioAttempt"}},
+        "errorSummary": {"$ref": "#/$defs/testError"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"scenarioKind": {"const": "OUTLINE_EXAMPLE"}}, "required": ["scenarioKind"]},
+          "then": {"required": ["outlineExample"], "properties": {"outlineExample": {"$ref": "#/$defs/outlineExample"}}},
+          "else": {"properties": {"outlineExample": false}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "featureResult": {
+      "type": "object",
+      "required": ["featureId", "revisionId", "displayName", "logicalPath", "status", "durationMilliseconds", "scenarios"],
+      "properties": {
+        "featureId": {"type": "string", "format": "uuid"},
+        "revisionId": {"type": "string", "format": "uuid"},
+        "displayName": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "logicalPath": {"$ref": "#/$defs/logicalPath"},
+        "status": {"enum": ["PASSED", "FAILED", "SKIPPED", "ABORTED"]},
+        "durationMilliseconds": {"type": "integer", "minimum": 0, "maximum": 86400000},
+        "scenarios": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/scenarioResult"}}
+      },
+      "additionalProperties": false
+    },
+    "artifactManifestReference": {
+      "type": "object",
+      "required": ["manifestId", "objectReferenceId", "sha256"],
+      "properties": {
+        "manifestId": {"type": "string", "format": "uuid"},
+        "objectReferenceId": {
+          "type": "string",
+          "pattern": "^object-ref:[A-Za-z0-9._~-]{8,240}$",
+          "description": "Opaque control-plane-issued storage reference, not a URL, bucket key, or host path."
+        },
+        "sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

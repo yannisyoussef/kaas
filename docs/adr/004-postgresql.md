@@ -1,21 +1,42 @@
-# ADR-004: Postgresql
+# ADR-004: PostgreSQL for control-plane persistence
 
-- **Status:** Accepted for bootstrap
+## Status
+
+IMPLEMENTED
 
 ## Context
-KaaS needs a maintainable, observable platform while keeping the MVP small and preventing untrusted test execution from entering the control plane.
+
+The next vertical slice needs tenant-scoped projects, immutable feature revisions, constraints, audit timestamps, and transactional consistency. Later run orchestration will need atomic state changes and outbox records. No persistence adapter or schema exists yet.
 
 ## Decision
-Use PostgreSQL as the authoritative metadata and result store.
 
-## Alternatives
-A larger set of microservices, a different persistence/transport/runtime choice, or deferring the concern were considered and rejected for the MVP unless noted in the security review.
+Use PostgreSQL as the system of record for implemented Project, Feature, FeatureRevision, tenant-anchor, and idempotency metadata. Store large report/log/artifact bytes outside PostgreSQL. Future run persistence remains outside this implemented slice.
+
+## Alternatives considered
+
+- An embedded or local file store for the first slice.
+- A document database.
+- PostgreSQL JSON columns for the entire domain model.
+
+## Why alternatives were rejected
+
+Local files do not prove tenant constraints, transactions, or production-like migrations. The current domain is relational and benefits from foreign keys and uniqueness constraints. Storing every aggregate as opaque JSON would weaken database-enforced invariants and queryability.
 
 ## Advantages
-Clear ownership, independently testable boundaries, straightforward local development, and a migration path when scale or operational requirements justify change.
+
+- Strong transactions and mature relational constraints.
+- Good support in Spring and Testcontainers.
+- Supports relational data with selective JSON use when justified.
 
 ## Disadvantages
-The initial design carries some operational and interface complexity, and the chosen technology introduces its ecosystem's maintenance costs.
+
+- Requires migrations, operational maintenance, and integration tests.
+- Horizontal write scaling is more complex than with some distributed stores.
 
 ## Consequences
-Implementations must preserve the control-plane/execution-plane separation, version contracts, record decisions in tests, and avoid leaking infrastructure into domain logic.
+
+The first migration must define tenant scope, identity, immutability, constraints, and actual query indexes. Persistence entities must not become public API DTOs. Broker publication must eventually use an outbox rather than a dual write.
+
+## Validation and revisit conditions
+
+Validated structurally by Flyway migrations, JPA schema validation, composite tenant foreign keys, direct database invariant tests, and PostgreSQL Testcontainers. Runtime container evidence depends on Docker availability. Revisit only if measured data shape, scale, availability, or operational constraints make PostgreSQL unsuitable.

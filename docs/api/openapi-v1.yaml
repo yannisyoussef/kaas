@@ -1,47 +1,1039 @@
 openapi: 3.1.0
 info:
-  title: KaaS API
+  title: KaaS Control Plane API
   version: 1.0.0
-  description: Versioned control-plane API foundation.
+  description: >-
+    Project and immutable FeatureRevision operations are implemented. Run operations remain proposed contracts only.
+    Authentication and tenant authorization are required; arbitrary execution remains disabled. Implemented JSON
+    mutation requests are limited to 1048576 encoded bytes, and decoded Feature source is limited to 524288 UTF-8 bytes.
+  license:
+    name: All rights reserved
+    identifier: LicenseRef-Proprietary
 servers:
-  - url: http://localhost:8080
+  - url: /
+security:
+  - bearerAuth: []
+tags:
+  - name: Projects
+    description: Implemented organization-scoped project operations.
+  - name: Features
+    description: Implemented logical feature and immutable revision operations. Source is opaque and never executed here.
+  - name: Runs
+    description: Proposed asynchronous run operations. Every lookup is authorized against trusted organization/project ownership.
 paths:
   /api/v1/projects:
     get:
-      summary: List projects
+      tags: [Projects]
+      operationId: listProjects
+      summary: List projects in the authenticated organization
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
       responses:
-        '200': {description: Project page}
+        '200':
+          description: Authenticated organization projects in stable newest-first order.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProjectPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
     post:
-      summary: Create project
+      tags: [Projects]
+      operationId: createProject
+      summary: Create an organization-scoped project
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateProjectRequest'}
       responses:
-        '201': {description: Project created}
+        '201':
+          description: Project created, or the original successful response replayed.
+          headers:
+            Location: {$ref: '#/components/headers/ResourceLocation'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Project'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Projects]
+      operationId: getProject
+      summary: Get one tenant-scoped project
+      responses:
+        '200':
+          description: Tenant-scoped project.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Project'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/features:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Features]
+      operationId: listFeatures
+      summary: List logical features in a project
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Tenant- and project-scoped logical features.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FeaturePage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+    post:
+      tags: [Features]
+      operationId: createFeature
+      summary: Create a feature and immutable revision 1
+      description: Atomically creates a logical Feature and immutable revision 1. Source is stored as opaque text and is not parsed or executed.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateFeatureRequest'}
+      responses:
+        '201':
+          description: Feature and initial revision created, or the original success replayed.
+          headers:
+            Location: {$ref: '#/components/headers/ResourceLocation'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreatedFeature'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/features/{featureId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/FeatureId'
+    get:
+      tags: [Features]
+      operationId: getFeature
+      summary: Get logical feature metadata
+      responses:
+        '200':
+          description: Logical feature metadata.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Feature'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/features/{featureId}/revisions:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/FeatureId'
+    get:
+      tags: [Features]
+      operationId: listFeatureRevisions
+      summary: List immutable feature revision metadata
+      description: Lists revision metadata only; source is returned only by the item endpoint.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Immutable revision history in descending revision-number order.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FeatureRevisionPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+    post:
+      tags: [Features]
+      operationId: createFeatureRevision
+      summary: Append the next immutable feature revision
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateFeatureRevisionRequest'}
+      responses:
+        '201':
+          description: Next immutable revision created, or the original success replayed.
+          headers:
+            Location: {$ref: '#/components/headers/ResourceLocation'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FeatureRevision'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/features/{featureId}/revisions/{revisionId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/FeatureId'
+      - $ref: '#/components/parameters/RevisionId'
+    get:
+      tags: [Features]
+      operationId: getFeatureRevision
+      summary: Get one exact immutable feature revision
+      responses:
+        '200':
+          description: One exact immutable source revision.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FeatureRevision'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
   /api/v1/projects/{projectId}/runs:
-    parameters: [{name: projectId, in: path, required: true, schema: {type: string, format: uuid}}]
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
     post:
+      tags: [Runs]
+      operationId: createRun
       summary: Create an asynchronous run
-      parameters: [{name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8}}]
+      description: >-
+        Atomically records a CREATED run, its immutable input intent, and the scoped idempotency record. The
+        response does not imply that a command was published or that the run reached QUEUED. An identical replay
+        within the 24-hour key-retention window returns the original status, body, Location, and ETag. Reusing the
+        same key in the same authenticated organization, operation, and project scope with a different normalized
+        request fingerprint returns an idempotency conflict.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRunRequest'
       responses:
-        '202': {description: Run accepted}
-        '409': {description: Idempotency conflict}
-        '422': {description: Validation error}
+        '202':
+          description: Run intent was durably accepted; scheduling may not have started.
+          headers:
+            Location:
+              $ref: '#/components/headers/RunLocation'
+            ETag:
+              $ref: '#/components/headers/RunEtag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /api/v1/runs/{runId}:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
     get:
-      summary: Get run status and summary
-      parameters: [{name: runId, in: path, required: true, schema: {type: string, format: uuid}}]
-      responses: {'200': {description: Run details}}
+      tags: [Runs]
+      operationId: getRun
+      summary: Get the canonical run representation
+      responses:
+        '200':
+          description: Current run state and independent outcome dimensions.
+          headers:
+            ETag:
+              $ref: '#/components/headers/RunEtag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/runs/{runId}/cancellations:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+    post:
+      tags: [Runs]
+      operationId: cancelRun
+      summary: Request cancellation without deleting the run
+      description: >-
+        Creates the single cancellation intent for a run. Repeating an accepted request is idempotent. CREATED or
+        QUEUED may complete cancellation immediately; an active worker phase transitions toward STOPPING. A request
+        after result processing has begun is a lifecycle conflict because accepted evidence wins the race.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancellationRequest'
+      responses:
+        '200':
+          description: Cancellation was immediate or had already been acknowledged.
+          headers:
+            Location:
+              $ref: '#/components/headers/RunLocation'
+            ETag:
+              $ref: '#/components/headers/RunEtag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '202':
+          description: Cancellation was durably requested and worker termination is pending.
+          headers:
+            Location:
+              $ref: '#/components/headers/RunLocation'
+            ETag:
+              $ref: '#/components/headers/RunEtag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/LifecycleConflict'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /api/v1/runs/{runId}/events:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
     get:
-      summary: Stream ordered run events
-      parameters: [{name: runId, in: path, required: true, schema: {type: string, format: uuid}}]
-      responses: {'200': {description: Server-sent events, content: {text/event-stream: {schema: {type: string}}}}}
+      tags: [Runs]
+      operationId: streamRunEvents
+      summary: Stream durable low-volume run events
+      description: >-
+        Authentication and run authorization are re-evaluated for every connection. Last-Event-ID is the decimal
+        per-run sequence last processed by the client; replay starts strictly after it. Heartbeats are comment frames
+        with no id. A retained terminal event is delivered before the server closes the stream. Query-string access
+        tokens are forbidden.
+      parameters:
+        - $ref: '#/components/parameters/LastEventId'
+      responses:
+        '200':
+          description: >-
+            SSE frames whose event field is a RunLiveEvent eventType, id field is its decimal sequence, and data field
+            is one JSON RunLiveEvent. The stream has bounded retention and connection duration.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Serialized SSE frames validated from RunLiveEvent objects.
+              examples:
+                stateChange:
+                  summary: One serialized durable event
+                  value: |-
+                    id: 1
+                    event: RUN_STATE_CHANGED
+                    data: {"schemaVersion":"1.0","eventId":"16161616-1616-4616-8616-161616161616","runId":"33333333-3333-4333-8333-333333333333","runVersion":3,"sequence":1,"occurredAt":"2026-08-27T18:00:00Z","eventType":"RUN_STATE_CHANGED","payload":{"previousState":"CREATED","state":"QUEUED","cancellationStatus":"NOT_REQUESTED"}}
+        '204':
+          description: The supplied cursor is already beyond the retained terminal event; the client must not reconnect.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/EventHistoryGap'
+        '422':
+          $ref: '#/components/responses/ValidationProblem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/runs/{runId}/results:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+    get:
+      tags: [Runs]
+      operationId: getRunResults
+      summary: Get canonical structured results and control-plane quality evaluation
+      responses:
+        '200':
+          description: Accepted execution evidence plus separately evaluated quality-gate status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResults'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/ResultNotReady'
+  /api/v1/runs/{runId}/artifacts:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+    get:
+      tags: [Runs]
+      operationId: listRunArtifacts
+      summary: List verified artifact metadata
+      description: Returns metadata only. Authorized, expiring download capabilities are minted separately and never supplied by the runner.
+      responses:
+        '200':
+          description: Verified artifacts; the list may be empty.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunArtifacts'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: API-client authentication; the token is never accepted in a query string.
+  parameters:
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    FeatureId:
+      name: featureId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    RevisionId:
+      name: revisionId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    Page:
+      name: page
+      in: query
+      required: false
+      schema: {type: integer, minimum: 0, default: 0}
+    Size:
+      name: size
+      in: query
+      required: false
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Opaque client key scoped to authenticated organization, principal, operation, and target resource path. Implemented Project/Feature keys currently have no expiry; proposed Run operations define retention separately.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+        pattern: '^[A-Za-z0-9._~-]+$'
+    LastEventId:
+      name: Last-Event-ID
+      in: header
+      required: false
+      description: Untrusted decimal sequence last processed; replay resumes strictly after it.
+      schema:
+        type: string
+        pattern: '^[1-9][0-9]{0,15}$'
+  headers:
+    ResourceLocation:
+      description: Canonical created resource path.
+      schema: {type: string, maxLength: 512}
+    IdempotencyReplayed:
+      description: Whether this response replays an earlier committed success.
+      schema: {type: string, enum: ['true', 'false']}
+    RunLocation:
+      description: Canonical run resource.
+      schema:
+        type: string
+        pattern: '^/api/v1/runs/[0-9a-fA-F-]{36}$'
+    RunEtag:
+      description: Strong representation tag derived from runVersion, for example "run-3".
+      schema:
+        type: string
+    RetryAfter:
+      description: Seconds before retrying a rate-limited request.
+      schema:
+        type: integer
+        minimum: 1
+  responses:
+    BadRequest:
+      description: JSON syntax, duplicate keys, or request encoding is invalid.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetail'}
+    Unauthorized:
+      description: Authentication is missing or invalid.
+      headers:
+        WWW-Authenticate:
+          description: Bearer authentication challenge.
+          schema: {type: string, const: Bearer}
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    Forbidden:
+      description: The authenticated principal is not allowed to perform the operation. Deployments may use 404 to avoid existence disclosure.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    NotFound:
+      description: The authorized resource does not exist, or existence is intentionally concealed.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    IdempotencyConflict:
+      description: The scoped key was already used with a different normalized request fingerprint.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    Conflict:
+      description: Idempotency or database uniqueness conflict.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetail'}
+    LifecycleConflict:
+      description: The requested lifecycle operation lost a race, is invalid from the current state, or the run is already terminal.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    ResultNotReady:
+      description: Canonical result processing has not completed.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    EventHistoryGap:
+      description: The Last-Event-ID predates retained history. The problem extensions provide earliestSequence and latestSequence; refetch run/results/artifacts.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/EventHistoryGapProblem'
+    ValidationProblem:
+      description: Request validation failed. Submitted values are never echoed.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ValidationProblem'
+    PayloadTooLarge:
+      description: The encoded or decoded request exceeds the contractual size limit.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    RateLimited:
+      description: Principal, organization, project, or concurrency quota was exceeded.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
   schemas:
+    CreateProjectRequest:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 120}
+      additionalProperties: false
+    Project:
+      type: object
+      required: [projectId, name, version, createdBy, createdAt, updatedBy, updatedAt]
+      properties:
+        projectId: {type: string, format: uuid}
+        name: {type: string, minLength: 1, maxLength: 120}
+        version: {type: integer, minimum: 0}
+        createdBy: {type: string, minLength: 1, maxLength: 255}
+        createdAt: {type: string, format: date-time}
+        updatedBy: {type: string, minLength: 1, maxLength: 255}
+        updatedAt: {type: string, format: date-time}
+      additionalProperties: false
+    ProjectPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMetadata'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/Project'}
+    CreateFeatureRequest:
+      type: object
+      required: [name, logicalPath, source]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 160}
+        logicalPath:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: '^(?!/)(?!.*//)(?!.*(?:^|/)\.{1,2}(?:/|$))(?!.*\\)[A-Za-z0-9._~ -]+(?:/[A-Za-z0-9._~ -]+)*\.feature$'
+        source:
+          type: string
+          minLength: 1
+          description: Opaque source, at most 524288 UTF-8 bytes after JSON decoding. NUL and disallowed C0 controls are rejected; no newline or Unicode normalization occurs.
+      additionalProperties: false
+    Feature:
+      type: object
+      required: [featureId, projectId, name, logicalPath, createdBy, createdAt]
+      properties:
+        featureId: {type: string, format: uuid}
+        projectId: {type: string, format: uuid}
+        name: {type: string, minLength: 1, maxLength: 160}
+        logicalPath: {type: string, minLength: 1, maxLength: 512}
+        createdBy: {type: string, minLength: 1, maxLength: 255}
+        createdAt: {type: string, format: date-time}
+      additionalProperties: false
+    CreatedFeature:
+      type: object
+      required: [feature, initialRevision]
+      properties:
+        feature: {$ref: '#/components/schemas/Feature'}
+        initialRevision: {$ref: '#/components/schemas/FeatureRevision'}
+      additionalProperties: false
+    FeaturePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMetadata'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/Feature'}
+    CreateFeatureRevisionRequest:
+      type: object
+      required: [source]
+      properties:
+        source:
+          type: string
+          minLength: 1
+          description: Exact opaque source, limited to 524288 UTF-8 bytes after decoding.
+      additionalProperties: false
+    FeatureRevision:
+      type: object
+      required: [revisionId, featureId, projectId, revisionNumber, source, sourceDigest, createdBy, createdAt]
+      properties:
+        revisionId: {type: string, format: uuid}
+        featureId: {type: string, format: uuid}
+        projectId: {type: string, format: uuid}
+        revisionNumber: {type: integer, minimum: 1}
+        source: {type: string, minLength: 1}
+        sourceDigest:
+          type: string
+          pattern: '^sha256:[a-f0-9]{64}$'
+          description: SHA-256 of the exact stored source encoded as UTF-8.
+        createdBy: {type: string, minLength: 1, maxLength: 255}
+        createdAt: {type: string, format: date-time}
+      additionalProperties: false
+    FeatureRevisionSummary:
+      type: object
+      required: [revisionId, featureId, revisionNumber, sourceDigest, createdBy, createdAt]
+      properties:
+        revisionId: {type: string, format: uuid}
+        featureId: {type: string, format: uuid}
+        revisionNumber: {type: integer, minimum: 1}
+        sourceDigest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        createdBy: {type: string, minLength: 1, maxLength: 255}
+        createdAt: {type: string, format: date-time}
+      additionalProperties: false
+    FeatureRevisionPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMetadata'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/FeatureRevisionSummary'}
+    PageMetadata:
+      type: object
+      required: [items, page, size, totalElements, totalPages]
+      properties:
+        page: {type: integer, minimum: 0}
+        size: {type: integer, minimum: 1, maximum: 100}
+        totalElements: {type: integer, minimum: 0}
+        totalPages: {type: integer, minimum: 0}
+      additionalProperties: true
+    CreateRunRequest:
+      type: object
+      required: [featureRevisionIds, environmentId, parallelism, scenarioRetry, executionTimeoutSeconds, artifactPolicy, networkPolicyId]
+      properties:
+        featureRevisionIds:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+        environmentId:
+          type: string
+          format: uuid
+        runProfileId:
+          type: [string, 'null']
+          format: uuid
+        selection:
+          $ref: '#/components/schemas/RunSelection'
+        parallelism:
+          type: integer
+          minimum: 1
+          maximum: 32
+        scenarioRetry:
+          $ref: '#/components/schemas/ScenarioRetry'
+        executionTimeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+        artifactPolicy:
+          $ref: '#/components/schemas/ArtifactPolicy'
+        networkPolicyId:
+          type: string
+          format: uuid
+      additionalProperties: false
+    CancellationRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          const: USER_REQUESTED
+      additionalProperties: false
+    RunSelection:
+      type: object
+      properties:
+        scenarioIds:
+          type: array
+          maxItems: 1000
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+        tags:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            pattern: '^@[A-Za-z0-9_.:-]{1,127}$'
+      additionalProperties: false
+    ScenarioRetry:
+      type: object
+      required: [maxAttempts, delayMilliseconds]
+      properties:
+        maxAttempts:
+          type: integer
+          minimum: 1
+          maximum: 5
+        delayMilliseconds:
+          type: integer
+          minimum: 0
+          maximum: 30000
+      additionalProperties: false
+      description: Karate scenario retry inside one execution attempt; never an orchestration retry.
+    ArtifactPolicy:
+      type: object
+      required: [types, maxArtifactBytes, maxTotalBytes]
+      properties:
+        types:
+          type: array
+          maxItems: 4
+          uniqueItems: true
+          items:
+            enum: [KARATE_HTML_REPORT, RAW_RESULT, EXECUTION_LOG, OTHER]
+        maxArtifactBytes:
+          type: integer
+          minimum: 0
+          maximum: 104857600
+        maxTotalBytes:
+          type: integer
+          minimum: 0
+          maximum: 524288000
+      additionalProperties: false
+    Run:
+      type: object
+      required: [runId, projectId, runVersion, lifecycleState, cancellation, outcomes, createdAt, updatedAt, queueDeadlineAt, links]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+        runVersion:
+          type: integer
+          minimum: 1
+        lifecycleState:
+          enum: [CREATED, QUEUED, CLAIMED, PROVISIONING, RUNNING, COLLECTING_RESULTS, PROCESSING_RESULTS, STOPPING, COMPLETED]
+        cancellation:
+          $ref: '#/components/schemas/Cancellation'
+        outcomes:
+          $ref: '#/components/schemas/RunOutcomes'
+        currentAttempt:
+          oneOf:
+            - $ref: '#/components/schemas/AttemptReference'
+            - type: 'null'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        queueDeadlineAt:
+          type: string
+          format: date-time
+        links:
+          $ref: '#/components/schemas/RunLinks'
+      additionalProperties: false
+    Cancellation:
+      type: object
+      required: [status]
+      properties:
+        status:
+          enum: [NOT_REQUESTED, REQUESTED, ACKNOWLEDGED]
+        requestedAt:
+          type: string
+          format: date-time
+        acknowledgedAt:
+          type: string
+          format: date-time
+        stopCause:
+          enum: [USER_REQUESTED, PROVISIONING_TIMEOUT, EXECUTION_TIMEOUT, RESULT_COLLECTION_TIMEOUT]
+      additionalProperties: false
+    AttemptReference:
+      type: object
+      required: [attemptId, attemptNumber, assignmentEpoch]
+      properties:
+        attemptId:
+          type: string
+          format: uuid
+        attemptNumber:
+          type: integer
+          minimum: 1
+        assignmentEpoch:
+          type: integer
+          minimum: 1
+      additionalProperties: false
+    RunOutcomes:
+      type: object
+      required: [testOutcome, infrastructureOutcome, qualityGate]
+      properties:
+        testOutcome:
+          type: [string, 'null']
+          enum: [PASSED, FAILED, NOT_AVAILABLE, null]
+        infrastructureOutcome:
+          type: [string, 'null']
+          enum: [SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, null]
+        qualityGate:
+          $ref: '#/components/schemas/QualityGateEvaluation'
+      additionalProperties: false
+    QualityGateEvaluation:
+      type: object
+      required: [status, evaluationVersion, checks]
+      properties:
+        status:
+          enum: [PASSED, FAILED, NOT_EVALUATED]
+        evaluationVersion:
+          type: integer
+          minimum: 1
+        evaluatedAt:
+          type: [string, 'null']
+          format: date-time
+        policyVersion:
+          type: [string, 'null']
+          maxLength: 128
+        checks:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/QualityGateCheck'
+      additionalProperties: false
+    QualityGateCheck:
+      type: object
+      required: [name, actual, operator, expected, status]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        actual:
+          oneOf:
+            - type: number
+            - type: boolean
+        operator:
+          enum: [EQ, NE, LT, LTE, GT, GTE]
+        expected:
+          oneOf:
+            - type: number
+            - type: boolean
+        status:
+          enum: [PASSED, FAILED]
+      additionalProperties: false
+    RunLinks:
+      type: object
+      required: [self, events, results, artifacts, cancellations]
+      properties:
+        self:
+          type: string
+        events:
+          type: string
+        results:
+          type: string
+        artifacts:
+          type: string
+        cancellations:
+          type: string
+      additionalProperties: false
+    RunResults:
+      type: object
+      required: [executionResult, qualityGate]
+      properties:
+        executionResult:
+          $ref: '../../packages/api-contracts/runner-result.schema.json'
+        qualityGate:
+          $ref: '#/components/schemas/QualityGateEvaluation'
+      additionalProperties: false
+    RunArtifacts:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/Artifact'
+      additionalProperties: false
+    Artifact:
+      type: object
+      required: [artifactId, type, contentType, sizeBytes, sha256, createdAt]
+      properties:
+        artifactId:
+          type: string
+          format: uuid
+        type:
+          enum: [KARATE_HTML_REPORT, RAW_RESULT, EXECUTION_LOG, OTHER]
+        contentType:
+          type: string
+          maxLength: 255
+        sizeBytes:
+          type: integer
+          minimum: 0
+          maximum: 104857600
+        sha256:
+          type: string
+          pattern: '^sha256:[a-f0-9]{64}$'
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+      description: Verified metadata only. HTML and OTHER remain untrusted download-only content unless separately sanitized and isolated.
     ProblemDetail:
       type: object
-      required: [type, title, status]
+      required: [type, title, status, code, detail, instance, requestId]
       properties:
-        type: {type: string, format: uri}
-        title: {type: string}
-        status: {type: integer}
-        detail: {type: string}
-        instance: {type: string, format: uri}
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+          maxLength: 128
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          enum: [UNAUTHENTICATED, FORBIDDEN, NOT_FOUND, VALIDATION_FAILED, IDEMPOTENCY_CONFLICT, PROJECT_NAME_CONFLICT, FEATURE_PATH_CONFLICT, CONFLICT, LIFECYCLE_CONFLICT, RESULT_NOT_READY, UNSUPPORTED_OPERATION, PAYLOAD_TOO_LARGE, RATE_LIMITED, EVENT_HISTORY_GAP, INTERNAL_ERROR]
+        detail:
+          type: string
+          maxLength: 2048
+        instance:
+          type: string
+          format: uri-reference
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 128
+      additionalProperties: true
+      description: RFC 9457-style problem details. Extensions must never expose submitted values, secrets, stack traces, host paths, or concealed tenant identity.
+    ValidationProblem:
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          required: [errors]
+          properties:
+            errors:
+              type: array
+              maxItems: 100
+              items:
+                type: object
+                required: [pointer, message]
+                properties:
+                  pointer:
+                    type: string
+                    pattern: '^(/([^/~]|~[01])*)*$'
+                    maxLength: 512
+                  message:
+                    type: string
+                    maxLength: 512
+                additionalProperties: false
+    EventHistoryGapProblem:
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          required: [earliestSequence, latestSequence, resync]
+          properties:
+            earliestSequence:
+              type: integer
+              minimum: 1
+            latestSequence:
+              type: integer
+              minimum: 1
+            resync:
+              type: string
+              pattern: '^/api/v1/runs/[0-9a-fA-F-]{36}$'

@@ -1,7 +1,34 @@
 {
   "name": "@kaas/web",
   "private": true,
-  "scripts": { "dev": "next dev", "build": "next build", "lint": "next lint", "start": "next start" },
-  "dependencies": { "next": "14.2.30", "react": "18.3.1", "react-dom": "18.3.1" },
-  "devDependencies": { "@types/node": "22.15.3", "@types/react": "18.3.20", "@types/react-dom": "18.3.7", "typescript": "5.8.3" }
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "lint": "eslint . --max-warnings=0",
+    "start": "next start",
+    "test": "node --import tsx --test test/**/*.test.tsx",
+    "typecheck": "next typegen && tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "16.3.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@next/eslint-plugin-next": "16.3.3",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "eslint": "10.9.1",
+    "tsx": "4.23.12",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.68.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true
+  }
 }

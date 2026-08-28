@@ -1,1 +1,87 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://kaas.dev/contracts/v1/live-event.schema.json","title":"RunLiveEvent","type":"object","required":["contractVersion","runId","sequence","occurredAt","type"],"properties":{"contractVersion":{"const":"v1"},"runId":{"type":"string","format":"uuid"},"sequence":{"type":"integer","minimum":0},"occurredAt":{"type":"string","format":"date-time"},"type":{"enum":["STATE_CHANGED","LOG_LINE","STEP_REPORTED","ARTIFACT_AVAILABLE","COMPLETED"]},"payload":{"type":"object"}},"additionalProperties":false}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kaas.dev/contracts/v1/live-event.schema.json",
+  "title": "RunLiveEvent",
+  "description": "Low-volume durable event exposed by the proposed run SSE stream. The decimal sequence is the SSE id; heartbeats are unsequenced comments and are not this contract.",
+  "type": "object",
+  "required": ["schemaVersion", "eventId", "runId", "runVersion", "sequence", "occurredAt", "eventType", "payload"],
+  "properties": {
+    "schemaVersion": {"const": "1.0"},
+    "eventId": {"type": "string", "format": "uuid"},
+    "runId": {"type": "string", "format": "uuid"},
+    "runVersion": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "attemptId": {"type": "string", "format": "uuid"},
+    "sequence": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "occurredAt": {"type": "string", "format": "date-time"},
+    "eventType": {"enum": ["RUN_STATE_CHANGED", "EXECUTION_STARTED", "PROGRESS", "ARTIFACT_AVAILABLE", "EXECUTION_COMPLETED"]},
+    "payload": {"type": "object"}
+  },
+  "allOf": [
+    {"if": {"properties": {"eventType": {"const": "RUN_STATE_CHANGED"}}, "required": ["eventType"]}, "then": {"properties": {"payload": {"$ref": "#/$defs/runStateChanged"}}}},
+    {"if": {"properties": {"eventType": {"const": "EXECUTION_STARTED"}}, "required": ["eventType"]}, "then": {"required": ["attemptId"], "properties": {"attemptId": {"type": "string", "format": "uuid"}, "payload": {"$ref": "#/$defs/executionStarted"}}}},
+    {"if": {"properties": {"eventType": {"const": "PROGRESS"}}, "required": ["eventType"]}, "then": {"required": ["attemptId"], "properties": {"attemptId": {"type": "string", "format": "uuid"}, "payload": {"$ref": "#/$defs/progress"}}}},
+    {"if": {"properties": {"eventType": {"const": "ARTIFACT_AVAILABLE"}}, "required": ["eventType"]}, "then": {"required": ["attemptId"], "properties": {"attemptId": {"type": "string", "format": "uuid"}, "payload": {"$ref": "#/$defs/artifactAvailable"}}}},
+    {"if": {"properties": {"eventType": {"const": "EXECUTION_COMPLETED"}}, "required": ["eventType"]}, "then": {"required": ["attemptId"], "properties": {"attemptId": {"type": "string", "format": "uuid"}, "payload": {"$ref": "#/$defs/executionCompleted"}}}}
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "runStateChanged": {
+      "type": "object",
+      "required": ["previousState", "state", "cancellationStatus"],
+      "properties": {
+        "previousState": {"enum": ["CREATED", "QUEUED", "CLAIMED", "PROVISIONING", "RUNNING", "COLLECTING_RESULTS", "PROCESSING_RESULTS", "STOPPING", "COMPLETED"]},
+        "state": {"enum": ["CREATED", "QUEUED", "CLAIMED", "PROVISIONING", "RUNNING", "COLLECTING_RESULTS", "PROCESSING_RESULTS", "STOPPING", "COMPLETED"]},
+        "cancellationStatus": {"enum": ["NOT_REQUESTED", "REQUESTED", "ACKNOWLEDGED"]},
+        "stopCause": {"enum": ["USER_REQUESTED", "PROVISIONING_TIMEOUT", "EXECUTION_TIMEOUT", "RESULT_COLLECTION_TIMEOUT"]}
+      },
+      "additionalProperties": false
+    },
+    "executionStarted": {
+      "type": "object",
+      "required": ["startedAt"],
+      "properties": {"startedAt": {"type": "string", "format": "date-time"}},
+      "additionalProperties": false
+    },
+    "progress": {
+      "type": "object",
+      "required": ["completedScenarios", "totalScenarios"],
+      "properties": {
+        "completedScenarios": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "totalScenarios": {"type": "integer", "minimum": 0, "maximum": 1000000}
+      },
+      "additionalProperties": false,
+      "description": "Coalesced progress. Consumers also validate completedScenarios <= totalScenarios."
+    },
+    "artifactAvailable": {
+      "type": "object",
+      "required": ["artifactId", "type", "sizeBytes", "sha256"],
+      "properties": {
+        "artifactId": {"type": "string", "format": "uuid"},
+        "type": {"enum": ["KARATE_HTML_REPORT", "RAW_RESULT", "EXECUTION_LOG", "OTHER"]},
+        "sizeBytes": {"type": "integer", "minimum": 0, "maximum": 104857600},
+        "sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false,
+      "description": "Emitted only after the control plane has verified stored size and digest and applied artifact policy."
+    },
+    "executionCompleted": {
+      "type": "object",
+      "required": ["resultId", "finishedAt", "testOutcome", "infrastructureOutcome"],
+      "properties": {
+        "resultId": {"type": "string", "format": "uuid"},
+        "finishedAt": {"type": "string", "format": "date-time"},
+        "testOutcome": {"enum": ["PASSED", "FAILED", "NOT_AVAILABLE"]},
+        "infrastructureOutcome": {"enum": ["SUCCEEDED", "FAILED", "TIMED_OUT", "CANCELLED"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"infrastructureOutcome": {"const": "SUCCEEDED"}}, "required": ["infrastructureOutcome"]},
+          "then": {"properties": {"testOutcome": {"enum": ["PASSED", "FAILED"]}}},
+          "else": {"properties": {"testOutcome": {"const": "NOT_AVAILABLE"}}}
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,80 +1,104 @@
 # Implementation Status
 
-## Created
+Status date: 2026-08-27
 
-- Product vision and constrained MVP scope.
-- System context, container architecture, execution lifecycle, domain model, and security boundaries.
-- Threat model and ADRs for the major architectural choices.
-- Versioned API, runner-command, runner-result, and live-event contracts.
-- Monorepo directories for web, API, runner, contracts, infrastructure, tests, and documentation.
-- Minimal Next.js web application.
-- Minimal Spring Boot API application with health endpoint and Problem Details-style error shape.
-- Runner worker bootstrap that consumes only a typed command and performs no user test execution.
-- Docker Compose configuration for PostgreSQL, RabbitMQ, Redis, and MinIO.
-- GitHub Actions validation workflow and repository hygiene files.
+This document describes repository reality after the Project/FeatureRevision vertical slice. Product vision and run architecture do not imply runtime capability.
 
-## Decisions made
+## Implemented and validated
 
-- A modular monolith is the initial control plane; execution is a separate worker boundary.
-- Java 21/Spring Boot is the backend foundation; Next.js/TypeScript is the frontend foundation.
-- PostgreSQL is the system of record; object storage holds generated artifacts.
-- RabbitMQ is hidden behind an application port so the transport can change later.
-- SSE is the initial live-log transport.
-- Test outcome and infrastructure outcome are separate dimensions; `TEST_FAILED` is distinct from `EXECUTION_FAILED`.
-- Secrets are references to an external provider, never values in API responses or logs.
-- No arbitrary feature file is executed by the API or the bootstrap worker.
+- Java 25 multi-module build using the pinned Gradle 9.7.1 wrapper and distribution checksum.
+- Spring Boot 4.1.1 API bootstrap.
+- Real Actuator health, liveness, and readiness endpoints, verified over HTTP in an application test.
+- Non-executing runner bootstrap with a behavioral test of its disabled-execution message.
+- Next.js 16.3.3 / React 19.2.8 scaffold with deterministic ESLint, TypeScript checking, a server-rendered page test, production build, lockfile, and production audit.
+- Strict Draft 2020-12 compilation for execution command/result, artifact manifest, and live-event schemas, with canonical/minimal/negative fixtures and named semantic contract checks.
+- Zero-warning linting of the proposed run-focused OpenAPI contract using pinned Redocly tooling.
+- CI jobs for JVM, web, contracts, and Compose validation with explicit read-only permissions and timeouts.
+- Spring Security OAuth2 resource-server authentication with RS256, issuer, audience, time, `sub`, and UUID `org_id` validation.
+- Trusted-claim tenant context, implicit member authorization, tenant-scoped repository predicates, and concealed cross-tenant 404 behavior.
+- Project create/get/list with exact per-organization name uniqueness, audit fields, JPA version, and transactional idempotency.
+- Atomic Feature plus revision 1 creation, Feature get/list, immutable revision append/get/history, and concurrency-safe contiguous numbering.
+- Exact UTF-8 source preservation and SHA-256, 512 KiB source validation, 1 MiB streaming request limit, NUL/control/malformed-Unicode rejection, and no Karate parsing.
+- Flyway-managed PostgreSQL schema, JPA `ddl-auto=validate`, composite tenant/parent FKs, indexes, uniqueness/check constraints, and revision UPDATE/DELETE trigger.
+- RFC 9457 Problem Details across MVC and security filters, request/trace correlation context, safe structured mutation logs, and Actuator HTTP metrics.
+- Signed-JWT HTTP, tenant-IDOR, concurrent idempotency, PostgreSQL Testcontainers, database immutability, transport/content boundaries, concurrent revision, and ArchUnit tests; independent Docker-backed run passed 13/13.
 
-## Assumptions
+## Scaffolded, not product functionality
 
-- Initial tenancy is organization/project scoped, with authentication integration deferred behind an identity port.
-- A project owns immutable feature revisions for reproducibility; the first implementation slice may use a local revision store before full persistence.
-- Run creation accepts an idempotency key and returns the existing run for a matching request.
-- Environment/profile resolution is deterministic: global, project, environment, profile, then explicit run override; later layers win.
-- The first runner implementation uses a safe no-op/bootstrap task until sandbox review is complete.
+- The runner prints a status message and cannot execute Karate, shell commands, or external processes.
+- The web application contains a landing page and placeholder dashboard with no API client or product data.
+- Run OpenAPI paths and execution JSON Schemas remain proposed contracts. Project/Feature OpenAPI paths describe implemented runtime behavior.
+- Docker Compose PostgreSQL is configured for the API. RabbitMQ and MinIO are not connected to feature lifecycle.
+- Docker Compose binds PostgreSQL, RabbitMQ, and MinIO to loopback and defines development health checks. Configuration validation passes; container startup was not verified because the local Docker daemon was unavailable.
 
-## Commands
+## Designed or proposed
 
-With Java 21 and Docker installed:
+- Future control-plane capabilities beyond Project/FeatureRevision and a separately deployable execution plane.
+- PostgreSQL schemas for future run orchestration and result metadata.
+- Per-run container isolation as a candidate only; it is not approved as a sufficient hostile-code boundary.
+- Product concepts such as projects, immutable feature revisions, environments, profiles, asynchronous runs, results, artifacts, and quality gates.
+- Orthogonal run lifecycle, cancellation, test outcome, infrastructure outcome, and quality-gate semantics.
+- Optimistic run concurrency, attempt/assignment fencing, phase deadlines, at-least-once outbox/inbox semantics, retries/DLQ classification, structured results/artifacts, and bounded SSE replay.
+
+## Planned and intentionally absent
+
+- RabbitMQ publishers/consumers, topology, retries, DLQ, or idempotency behavior.
+- Redis.
+- SSE implementation.
+- Object-storage integration.
+- Secret storage, resolution, or injection.
+- Karate dependencies, runner images, container launchers, or arbitrary test execution.
+- OpenTelemetry instrumentation.
+- Run semantic validation, execution outbox/inbox tables, lease reconciliation, quality evaluation, and durable event storage.
+
+## Toolchain decisions
+
+- Java 25 is the project compilation, test, and runtime target.
+- Gradle 9.7.1 is the current stable wrapper version selected on 2026-08-27. Gradle 9.8 is a milestone and is not used.
+- Spring Boot 4.1.1 explicitly supports Java 25 and Gradle 9.x.
+- Node.js 24 LTS is the frontend and contract-tooling baseline. Node.js 20 is end-of-life and is not supported by this repository.
+- Next.js 16.3.3 is the patched Active LTS foundation selected after the August 2026 security release.
+
+See `docs/adr/003-java-spring-boot.md` for tradeoffs and revisit conditions.
+
+## Verification commands
 
 ```text
-./gradlew test
+./gradlew clean check
 npm --prefix apps/web ci
+npm --prefix apps/web run lint
+npm --prefix apps/web run typecheck
+npm --prefix apps/web test
 npm --prefix apps/web run build
-docker compose -f infrastructure/local/docker-compose.yml up -d
+npm --prefix apps/web audit --omit=dev
+npm --prefix packages/api-contracts ci
+npm --prefix packages/api-contracts run validate:schemas
+npm --prefix packages/api-contracts run lint:openapi
+docker compose -f infrastructure/local/docker-compose.yml config
+git diff --check
 ```
 
-The API runs on `http://localhost:8080`; the web app runs on `http://localhost:3000`.
+Exact results for this repair are recorded in `FOUNDATION_REPAIR_REPORT.md`.
 
-## Test commands
+## Contract/lifecycle architecture completed as design
 
-- API: `./gradlew :apps:api:test`
-- Runner: `./gradlew :services:runner:test`
-- Web: `npm --prefix apps/web run lint` and `npm --prefix apps/web run build`
-- Contract validation: `npm --prefix packages/api-contracts test`
+This iteration resolves KAA-003, KAA-007, KAA-013, and KAA-015 at the **proposed contract/design level only**:
 
-## Structure
+- Four strict contracts plus adversarial fixtures are machine-validated.
+- The transition/race/timeout/lease model and transport-neutral at-least-once protocol are documented.
+- Run creation/read/cancellation/events/results/artifacts and RFC 9457-style errors are specified in OpenAPI.
+- Result, artifact, quality-gate, SSE replay, observability propagation, compatibility, and contract threat mitigations are documented.
 
-See [README.md](README.md) and [docs/architecture/container-architecture.md](docs/architecture/container-architecture.md).
+No item above is runtime behavior. KAA-004 remains open: Docker/host/daemon/network/secret/artifact isolation still needs a dedicated hostile-execution security architecture and executable release gate.
 
-## Remaining MVP work
+## Current vertical slice
 
-1. Add authentication, organization/project authorization, and persistent project/configuration APIs.
-2. Add feature revision storage and validation without executing content in the API.
-3. Implement queue-backed run state transitions and idempotent run creation.
-4. Build and review the hardened Docker runner: non-root user, read-only filesystem, dropped capabilities, resource/time limits, network policy, and explicit artifact egress.
-5. Parse runner output into structured feature/scenario/step results and persist immutable run snapshots.
-6. Add encrypted secret-provider integration and redaction tests.
-7. Add SSE event publication, artifact upload, run history, dashboard, and accessible editor UI.
-8. Add Testcontainers integration, Karate API dogfooding, accessibility checks, and end-to-end tests.
+Authenticated, organization-scoped Project and immutable FeatureRevision creation/retrieval is implemented. The Docker-backed suite is mandatory and not auto-skipped; the primary agent's daemon was unavailable, while the independent backend/database review executed the same suite successfully with 13/13 tests. Run persistence/orchestration should follow only after the domain contracts and hostile-execution release gate are validated.
 
-## Security concerns
+## Security gate
 
-The runner is not production-ready and must not be connected to arbitrary user content. Before enabling execution, complete the threat-model controls in `docs/security/threat-model.md`, perform dependency/image scanning, define network egress policy, validate tenant isolation, and add hostile-input/container escape tests.
+Arbitrary execution remains disabled. Do not add Karate or a container launcher until the proposed execution security ADR has enforceable controls and adversarial tests for host isolation, egress, secrets, resources, timeouts, logs, artifacts, and cleanup.
 
-## Recommended next slice
+See `CONTRACT_LIFECYCLE_ARCHITECTURE_REPORT.md` for the decisions, adversarial review, changed files, verification evidence, and deferred implementation work.
 
-Implement project and feature-revision persistence plus authenticated, authorization-checked API contracts. Keep run creation as a persisted `CREATED` record only; do not launch Karate until the hardened runner contract and security review are complete.
-
-## Validation note
-
-This bootstrap was created in an environment without Java, Gradle, or Docker binaries. Node.js is available; dependency installation/build validation should be run in CI or a development environment with the prerequisites listed above.
+See `PROJECT_FEATURE_SLICE_REPORT.md` for the implemented API/schema decisions, verification evidence, residual risks, and independent specialist reviews.

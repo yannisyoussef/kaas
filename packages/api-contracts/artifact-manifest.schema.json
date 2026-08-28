@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kaas.dev/contracts/v1/artifact-manifest.schema.json",
+  "title": "ArtifactManifest",
+  "description": "Integrity-protected metadata for bounded artifact bytes stored outside messages and results. Storage references are opaque keys, never runner-supplied URLs.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "messageId",
+    "messageType",
+    "occurredAt",
+    "producer",
+    "correlationId",
+    "causationId",
+    "manifestId",
+    "commandId",
+    "organizationId",
+    "projectId",
+    "runId",
+    "runVersion",
+    "attemptId",
+    "attemptNumber",
+    "assignmentEpoch",
+    "createdAt",
+    "artifacts"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "1.0"},
+    "messageId": {"type": "string", "format": "uuid"},
+    "messageType": {"const": "ARTIFACT_MANIFEST"},
+    "occurredAt": {"type": "string", "format": "date-time"},
+    "producer": {"type": "string", "pattern": "^[a-z][a-z0-9.-]{1,63}$"},
+    "correlationId": {"type": "string", "format": "uuid"},
+    "causationId": {"type": "string", "format": "uuid"},
+    "manifestId": {"type": "string", "format": "uuid"},
+    "commandId": {"type": "string", "format": "uuid"},
+    "organizationId": {"type": "string", "format": "uuid"},
+    "projectId": {"type": "string", "format": "uuid"},
+    "runId": {"type": "string", "format": "uuid"},
+    "runVersion": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "attemptId": {"type": "string", "format": "uuid"},
+    "attemptNumber": {"type": "integer", "minimum": 1, "maximum": 1000},
+    "assignmentEpoch": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "artifacts": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {"$ref": "#/$defs/artifact"}
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "artifact": {
+      "type": "object",
+      "required": ["artifactId", "type", "contentType", "sizeBytes", "sha256", "objectReferenceId", "createdAt"],
+      "properties": {
+        "artifactId": {"type": "string", "format": "uuid"},
+        "type": {"enum": ["KARATE_HTML_REPORT", "RAW_RESULT", "EXECUTION_LOG", "OTHER"]},
+        "contentType": {
+          "type": "string",
+          "pattern": "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+(?:;[a-z0-9!#$&^_.+\\-= ]+)?$",
+          "maxLength": 255
+        },
+        "sizeBytes": {"type": "integer", "minimum": 0, "maximum": 104857600},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "objectReferenceId": {
+          "type": "string",
+          "pattern": "^object-ref:[A-Za-z0-9._~-]{8,240}$",
+          "description": "Opaque control-plane-issued storage reference. It is not a URL, bucket key, host path, or bearer credential."
+        },
+        "createdAt": {"type": "string", "format": "date-time"}
+      },
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "KARATE_HTML_REPORT"}}}, "then": {"properties": {"contentType": {"const": "text/html"}}}},
+        {"if": {"properties": {"type": {"const": "RAW_RESULT"}}}, "then": {"properties": {"contentType": {"const": "application/json"}}}},
+        {"if": {"properties": {"type": {"const": "EXECUTION_LOG"}}}, "then": {"properties": {"contentType": {"enum": ["text/plain", "application/x-ndjson"]}}}}
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
