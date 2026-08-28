@@ -11,10 +11,12 @@ import java.util.UUID;
 
 public interface RunSchedulingRepository {
     /**
-     * Bounded, deterministically ordered batch of runs awaiting their first scheduling transition. Reading is
-     * lock-free: the compare-and-set in {@link #persistSchedule} is what makes concurrent schedulers safe.
+     * Bounded batch of runs awaiting their first scheduling transition, round-robined across organizations and
+     * skipping any organization already at {@code queuedCapacity}. Reading is lock-free and advisory: the count
+     * under the organization lock is what actually decides admission, and the compare-and-set in
+     * {@link #persistSchedule} is what makes concurrent schedulers safe.
      */
-    List<SchedulableRun> findSchedulable(int batchSize);
+    List<SchedulableRun> findSchedulable(int batchSize, int queuedCapacity);
 
     Optional<TestRun> lockCreated(UUID organizationId, UUID runId, long expectedRunVersion);
 

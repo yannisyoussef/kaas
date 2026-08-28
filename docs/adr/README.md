@@ -16,7 +16,8 @@
 | [016](016-test-run-intent-and-immutable-snapshot.md) | CREATED TestRun intent with a sealed immutable execution snapshot | IMPLEMENTED |
 | [017](017-transactional-scheduling-and-outbox.md) | Transactional CREATED to QUEUED scheduling with execution attempt, queue-time dispatch intent, and outbox | IMPLEMENTED |
 | [018](018-outbox-relay-and-rabbitmq-publication.md) | Outbox relay with at-least-once RabbitMQ publication, database-owned retry, and a production scheduling trigger | IMPLEMENTED |
+| [019](019-tenant-admission-and-durable-scheduler-backoff.md) | Per-organization run admission, queued-run ceiling, durable scheduler backoff, and migration-upgrade testing | IMPLEMENTED |
 
-Deferred topics without active decisions remain: consumer inbox, worker claim and lease fencing, concrete object-storage/upload adapter, secret delivery mechanism, hostile-execution runtime, outbox retention policy, and OpenTelemetry implementation. This iteration decides transport-neutral reliability, SSE replay, lifecycle/outcomes, and result/artifact semantics only.
+Deferred topics without active decisions remain: consumer inbox, worker claim and lease fencing, concrete object-storage/upload adapter, secret delivery mechanism, hostile-execution runtime, outbox and CREATED-run retention policy, self-service quarantine recovery, and OpenTelemetry implementation. This iteration decides transport-neutral reliability, SSE replay, lifecycle/outcomes, and result/artifact semantics only.
 
 `IMPLEMENTED` means verified by repository code or tooling. `PROPOSED` means design intent only. `DEFERRED` means no decision is active and implementation must not assume one.

@@ -23,6 +23,11 @@ public final class ApiException extends RuntimeException {
         return new ApiException(HttpStatus.CONFLICT, code, detail, List.of());
     }
 
+    /** Admission control. The detail deliberately states no counts, capacities, or other tenants' usage. */
+    public static ApiException tooManyRequests(String code, String detail) {
+        return new ApiException(HttpStatus.TOO_MANY_REQUESTS, code, detail, List.of());
+    }
+
     public static ApiException validation(String pointer, String detail) {
         return new ApiException(
                 HttpStatus.UNPROCESSABLE_CONTENT,

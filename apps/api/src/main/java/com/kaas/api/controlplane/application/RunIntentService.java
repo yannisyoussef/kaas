@@ -1,6 +1,7 @@
 package com.kaas.api.controlplane.application;
 
 import com.kaas.api.controlplane.application.IdempotencyRepository.Scope;
+import com.kaas.api.controlplane.domain.AdmissionPolicy;
 import com.kaas.api.controlplane.domain.EngineDescriptor;
 import com.kaas.api.controlplane.domain.PageResult;
 import com.kaas.api.controlplane.domain.RunSnapshot;
@@ -9,6 +10,8 @@ import com.kaas.api.controlplane.domain.RunSnapshotPolicy.DuplicateFeatureSelect
 import com.kaas.api.controlplane.domain.TestRun;
 import com.kaas.api.security.TenantPrincipal;
 import com.kaas.api.shared.ApiException;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.HashSet;
@@ -31,20 +34,33 @@ public class RunIntentService {
     private final RunIntentRepository runs;
     private final ConfigurationRepository configuration;
     private final IdempotencyRepository idempotency;
+    private final AdmissionRepository admission;
+    private final AdmissionPolicy admissionPolicy;
     private final Clock clock;
     private final EngineDescriptor engine;
+    private final Counter rejectedRuns;
 
     public RunIntentService(
             RunIntentRepository runs,
             ConfigurationRepository configuration,
             IdempotencyRepository idempotency,
+            AdmissionRepository admission,
+            MeterRegistry meters,
             Clock clock,
-            @Value("${kaas.engine.karate-version}") String karateVersion) {
+            @Value("${kaas.engine.karate-version}") String karateVersion,
+            @Value("${kaas.admission.max-active-runs-per-organization}") int maxActiveRuns,
+            @Value("${kaas.admission.max-queued-runs-per-organization}") int maxQueuedRuns) {
         this.runs = runs;
         this.configuration = configuration;
         this.idempotency = idempotency;
+        this.admission = admission;
+        this.admissionPolicy = new AdmissionPolicy(maxActiveRuns, maxQueuedRuns);
         this.clock = clock;
         this.engine = new EngineDescriptor("KARATE", karateVersion);
+        // Dimensioned by reason only. Tenant, project, and run identity would be unbounded label cardinality.
+        this.rejectedRuns = Counter.builder("kaas.run.admission.rejected")
+                .tag("reason", "ACTIVE_RUN_CAPACITY")
+                .register(meters);
     }
 
     @Transactional
@@ -116,6 +132,32 @@ public class RunIntentService {
             throw ApiException.validation(
                     "/featureRevisionIds", "Only one revision of each feature and logical path may be selected.");
         }
+        // Admission is checked only on this path, after the replay above has already returned. A successful
+        // replay must keep working when the organization is at its ceiling: it creates no new work, and failing
+        // it would make a retry-safe client worse off than one that never retried. A new key is new work and
+        // obeys the current policy.
+        //
+        // The lock is taken here rather than earlier so the critical section is the decision plus the write, not
+        // the revision lookups and snapshot materialisation before them. Every request blocked on this lock holds
+        // a pooled connection, so a long critical section would let one busy organization exhaust the pool and
+        // stall reads for every other tenant. It is still taken after the per-key idempotency lock, and only ever
+        // in that order, so concurrent creates cannot deadlock. Holding it across the count and the insert is
+        // what makes the count decisive: twenty simultaneous requests at the limit would otherwise each observe
+        // the same pre-insert count and all be admitted.
+        admission.lockOrganization(principal.organizationId());
+        if (!admissionPolicy.admitsAnotherActiveRun(admission.countActiveRuns(principal.organizationId()))) {
+            rejectedRuns.increment();
+            LOGGER.atWarn()
+                    .addKeyValue("event", "RUN_ADMISSION_REJECTED")
+                    .addKeyValue("organizationId", principal.organizationId())
+                    .addKeyValue("projectId", projectId)
+                    .addKeyValue("reason", "ACTIVE_RUN_CAPACITY")
+                    .log("Refused a run that would exceed the organization's active capacity");
+            throw ApiException.tooManyRequests(
+                    "RUN_QUOTA_EXCEEDED",
+                    "This organization already holds the maximum number of runs that are not yet complete.");
+        }
+
         Instant now = clock.instant();
         TestRun run = TestRun.created(runId, projectId, snapshot.snapshotDigest(), principal.principalId(), now);
         runs.insert(principal.organizationId(), run, snapshot);

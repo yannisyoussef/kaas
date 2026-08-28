@@ -20,6 +20,9 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | Run scheduling, attempt, and outbox | IMPLEMENTED + VALIDATED | Internal CREATED to QUEUED compare-and-set, ExecutionAttempt #1, immutable queue-time DispatchIntent, sealed V4 aggregate, 10-scheduler concurrency coverage |
 | Outbox relay and RabbitMQ publication | IMPLEMENTED + VALIDATED | Generalized typed outbox, database-owned retry/backoff, relay claim with SKIP LOCKED and lease expiry, publisher confirms, mandatory/unroutable handling, terminal dispositions, at-least-once with an explicit duplicate window; real RabbitMQ Testcontainers coverage |
 | Production run scheduler | IMPLEMENTED + VALIDATED | Bounded, deterministically ordered batch invoking the established ScheduleRun use case; safe across replicas via compare-and-set |
+| Tenant admission control | IMPLEMENTED + VALIDATED | Per-organization ceilings on active and queued runs, enforced under an advisory lock so concurrent creates cannot overshoot; 429 RUN_QUOTA_EXCEEDED; idempotent replay still succeeds at capacity |
+| Durable scheduler backoff | IMPLEMENTED + VALIDATED | PostgreSQL-owned retry delay and quarantine that survive a restart and are shared across replicas; never mutates run lifecycle or version |
+| Migration-upgrade testing | IMPLEMENTED + VALIDATED | Every migration verified against an empty database and against a populated previous-version database with its triggers installed |
 | Runner bootstrap | SCAFFOLDED + VALIDATED | Reports that execution is disabled; launches no external process |
 | Next.js web scaffold | IMPLEMENTED + VALIDATED | Next.js 16.3.3; lint, typecheck, render test, build, production audit |
 | Contract tooling | IMPLEMENTED + VALIDATED | Strict AJV schemas/fixtures plus semantic checks; proposed contracts only |
@@ -118,9 +121,11 @@ The checked-in values are local-development defaults, not production secret mana
 - [Scheduling/outbox slice report](SCHEDULING_OUTBOX_SLICE_REPORT.md)
 - [Implemented outbox relay/RabbitMQ architecture](docs/architecture/outbox-relay-rabbitmq-slice.md)
 - [Outbox relay/RabbitMQ slice report](RABBITMQ_OUTBOX_RELAY_SLICE_REPORT.md)
+- [Implemented admission/scheduler hardening](docs/architecture/admission-scheduler-hardening.md)
+- [Admission/scheduler hardening report](ADMISSION_SCHEDULER_HARDENING_REPORT.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Security release requirements](docs/security/threat-model.md)
 
 ## Scope discipline
 
-This slice publishes already-durable dispatch intents to RabbitMQ and adds the production trigger that moves runs from CREATED to QUEUED. It deliberately does not implement a consumer, a consumer inbox, worker claim, assignment epochs, leases, ExecutionCommand production, SSE, secret values/storage/redemption/capabilities, source bundles or capabilities, object storage, Karate parsing/execution, a container launcher, network enforcement, results/artifacts, quality-gate execution, or full OpenTelemetry infrastructure. The queue may hold published dispatch intents that nothing consumes; that is intentional.
+This slice bounds tenant amplification and makes scheduler retry durable. It deliberately does not implement a consumer, a consumer inbox, worker claim, assignment epochs, leases, ExecutionCommand production, SSE, secret values/storage/redemption/capabilities, source bundles or capabilities, object storage, Karate parsing/execution, a container launcher, network enforcement, results/artifacts, quality-gate execution, or full OpenTelemetry infrastructure. The queue may hold published dispatch intents that nothing consumes; that is intentional.

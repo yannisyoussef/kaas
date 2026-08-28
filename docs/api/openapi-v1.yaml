@@ -566,6 +566,9 @@ paths:
       summary: Persist a CREATED test-run intent and immutable snapshot
       x-kaas-implementation-status: IMPLEMENTED
       description: >-
+        Subject to a server-controlled per-organization admission limit on runs that are not yet complete; the
+        limit is configuration and cannot be influenced by the request. An already-successful idempotent replay is
+        resolved before admission and therefore still succeeds at the limit, because it creates no new work.
         Atomically records a CREATED run, its immutable execution snapshot, and the scoped idempotency record. The
         response does not imply that a command was generated or published, or that the run reached QUEUED. An
         identical replay returns the original status and Location together with the run's CURRENT representation
@@ -609,6 +612,14 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/ValidationProblem'
+        '429':
+          description: >-
+            The organization already holds the maximum number of runs that are not yet complete. The response
+            states no counts, capacities, or other tenants' usage, and carries no Retry-After because no truthful
+            duration exists: capacity frees when the organization's own runs complete.
+          content:
+            application/problem+json:
+              schema: {$ref: '#/components/schemas/ProblemDetail'}
     get:
       tags: [Runs]
       operationId: listProjectRuns

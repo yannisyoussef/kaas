@@ -30,21 +30,45 @@ class JdbcRunSchedulingRepository implements RunSchedulingRepository {
     }
 
     @Override
-    public List<SchedulableRun> findSchedulable(int batchSize) {
+    public List<SchedulableRun> findSchedulable(int batchSize, int queuedCapacity) {
         // Ordering matches ix_test_runs_created, so the batch is reproducible across replicas. The index does
         // not cover cancellation_status or run_version, so this still reads the heap.
         return jdbc.query(
                 """
-                select organization_id, run_id, run_version
-                  from test_runs
-                 where lifecycle_state = 'CREATED' and cancellation_status = 'NOT_REQUESTED'
-                 order by created_at, run_id
+                with saturated as (
+                    -- An organization already at its queue ceiling contributes nothing this pass. Without this
+                    -- its runs stay at the head of a globally ordered batch and starve every other tenant.
+                    select organization_id
+                      from test_runs
+                     where lifecycle_state = 'QUEUED'
+                     group by organization_id
+                    having count(*) >= ?
+                ),
+                eligible as (
+                    select r.organization_id, r.project_id, r.run_id, r.run_version, r.created_at,
+                           row_number() over (
+                               partition by r.organization_id order by r.created_at, r.run_id) as rank_in_org
+                      from test_runs r
+                      left join run_scheduling_control c on c.run_id = r.run_id
+                     where r.lifecycle_state = 'CREATED' and r.cancellation_status = 'NOT_REQUESTED'
+                       -- Eligible when the run has never failed, or when its durable delay has elapsed. A
+                       -- quarantined run is withheld entirely until an operator clears its control row.
+                       and (c.run_id is null or (c.quarantined_at is null and c.next_attempt_at <= now()))
+                       and r.organization_id not in (select organization_id from saturated)
+                )
+                select organization_id, project_id, run_id, run_version
+                  from eligible
+                 -- Round robin: each organization's oldest run before any organization's second, so one tenant
+                 -- with a large backlog cannot occupy the whole window. Ordering stays deterministic.
+                 order by rank_in_org, created_at, run_id
                  limit ?
                 """,
                 (resultSet, rowNumber) -> new SchedulableRun(
                         resultSet.getObject("organization_id", UUID.class),
+                        resultSet.getObject("project_id", UUID.class),
                         resultSet.getObject("run_id", UUID.class),
                         resultSet.getLong("run_version")),
+                queuedCapacity,
                 batchSize);
     }
 

@@ -20,11 +20,17 @@ class JdbcIdempotencyRepository implements IdempotencyRepository {
         this.jdbc = jdbc;
     }
 
+    /** Advisory lock class for idempotency. Disjoint from the admission class, so the two can never collide. */
+    private static final int LOCK_CLASS = 1;
+
     @Override
     public void lock(Scope scope) {
         jdbc.query(
-                "select pg_advisory_xact_lock(?)",
-                preparedStatement -> preparedStatement.setLong(1, lockIdentity(scope)),
+                "select pg_advisory_xact_lock(?, ?)",
+                preparedStatement -> {
+                    preparedStatement.setInt(1, LOCK_CLASS);
+                    preparedStatement.setInt(2, lockIdentity(scope));
+                },
                 resultSet -> null);
     }
 
@@ -72,7 +78,7 @@ class JdbcIdempotencyRepository implements IdempotencyRepository {
                 Timestamp.from(now));
     }
 
-    private static long lockIdentity(Scope scope) {
+    private static int lockIdentity(Scope scope) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             update(digest, scope.organizationId().toString());
@@ -80,7 +86,7 @@ class JdbcIdempotencyRepository implements IdempotencyRepository {
             update(digest, scope.operation());
             update(digest, scope.scopePath());
             update(digest, scope.key());
-            return ByteBuffer.wrap(digest.digest()).getLong();
+            return ByteBuffer.wrap(digest.digest()).getInt();
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException("SHA-256 is unavailable", impossible);
         }

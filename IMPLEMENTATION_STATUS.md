@@ -2,7 +2,7 @@
 
 Status date: 2026-08-28
 
-This document describes repository reality after the outbox relay and RabbitMQ publication vertical slice. Product vision and execution architecture do not imply runtime capability.
+This document describes repository reality after the tenant admission and durable scheduler hardening slice. Product vision and execution architecture do not imply runtime capability.
 
 ## Implemented and validated
 
@@ -41,7 +41,12 @@ This document describes repository reality after the outbox relay and RabbitMQ p
 - At-least-once publication with an explicit, tested crash-after-confirm duplicate window; stable message identity and semantic digest make duplicates safe for a future consumer.
 - Production run scheduler moving CREATED to QUEUED in bounded, deterministically ordered batches through the established use case, safe across replicas.
 - Idempotent run-create replay now returns the run's current canonical representation and ETag rather than a reconstructed CREATED view, so one resource never advertises two strong validators.
-- Final Java 25/Gradle 9.7.1 clean verification: 82 API tests plus 1 runner test passed with zero failures/skips using PostgreSQL and RabbitMQ Testcontainers; contract, web, audit, Compose, and whitespace gates also passed.
+- Per-organization admission control: ceilings on active (CREATED or QUEUED) and queued runs, enforced under an organization-scoped PostgreSQL advisory lock so concurrent creates cannot overshoot, answered by a partial index rather than a full scan.
+- Admission returns 429 RUN_QUOTA_EXCEEDED with no counts, capacities, other tenants, or fabricated Retry-After. An already-successful idempotent replay is resolved before admission and still succeeds at capacity; a new key does not.
+- Queued-run ceiling enforced by the scheduler rather than at creation, so a burst is held at CREATED instead of becoming attempts, dispatches, outbox rows, and broker messages.
+- Durable scheduler backoff and quarantine in PostgreSQL, replacing a per-process in-memory cooldown: the delay survives a restart, is shared across replicas, and never mutates run lifecycle, version, or outcome.
+- Migration-upgrade testing as a permanent gate: every migration is verified against an empty database and against a populated previous-version database with that version's triggers installed.
+- Final Java 25/Gradle 9.7.1 clean verification: 102 API tests plus 1 runner test passed with zero failures/skips using PostgreSQL and RabbitMQ Testcontainers; contract, web, audit, Compose, and whitespace gates also passed.
 
 ## Scaffolded, not product functionality
 
@@ -113,7 +118,7 @@ No item above is runtime behavior. KAA-004 remains open: Docker/host/daemon/netw
 
 ## Current vertical slice
 
-Authenticated, organization-scoped Project/FeatureRevision and Environment/RunProfile lifecycles, TestRun/RunSnapshot persistence, the single CREATED to QUEUED scheduling transition, and at-least-once publication of the resulting dispatch intent to RabbitMQ are implemented. A background scheduler triggers the transition and a separate relay loop publishes the outbox; PostgreSQL remains authoritative for run state, attempt identity, dispatch intent, and delivery state. Queue-time dispatch intent is deliberately not a claim-time execution command: no assignment epoch, lease, or runtime capability exists yet. Worker claim, consumption, and execution remain disabled until their separate protocol and hostile-execution release gates are implemented and validated.
+Authenticated, organization-scoped Project/FeatureRevision and Environment/RunProfile lifecycles, TestRun/RunSnapshot persistence, the single CREATED to QUEUED scheduling transition, at-least-once publication of the resulting dispatch intent to RabbitMQ, and per-organization admission control with durable scheduler backoff are implemented. A background scheduler triggers the transition and a separate relay loop publishes the outbox; PostgreSQL remains authoritative for run state, attempt identity, dispatch intent, and delivery state. Queue-time dispatch intent is deliberately not a claim-time execution command: no assignment epoch, lease, or runtime capability exists yet. Worker claim, consumption, and execution remain disabled until their separate protocol and hostile-execution release gates are implemented and validated.
 
 ## Security gate
 
@@ -128,5 +133,7 @@ See `ENVIRONMENT_RUN_PROFILE_SLICE_REPORT.md` for the versioned-configuration mo
 See `TEST_RUN_INTENT_SLICE_REPORT.md` for the CREATED-only lifecycle boundary, snapshot canonicalization/persistence, API contract, security evidence, runner-command mapping, and independent reviews.
 
 See `SCHEDULING_OUTBOX_SLICE_REPORT.md` for the recovered scheduling slice: the queue-time/claim-time protocol correction, transactional bundle, compare-and-set concurrency evidence, persistence guards, contract changes, security review, and independent reviews.
+
+See `ADMISSION_SCHEDULER_HARDENING_REPORT.md` for the admission and scheduler hardening slice: the amplification rationale, admission and concurrency model, idempotency interaction, queue admission, durable backoff and quarantine, migration-upgrade strategy, security review, and independent reviews.
 
 See `RABBITMQ_OUTBOX_RELAY_SLICE_REPORT.md` for the relay slice: the generalized outbox decision, delivery-scheduling model, relay claim protocol, publisher confirms, retry and terminal policy, at-least-once crash-window analysis, scheduler trigger, health and observability, security review, and independent reviews.
