@@ -32,12 +32,25 @@ tasks.withType<Test>().configureEach {
 
 val verifyNoExecutionDependencies = tasks.register("verifyNoExecutionDependencies") {
     group = "verification"
-    description = "Fails if the control plane acquires Karate or runner execution dependencies."
+    description = "Fails if the control plane acquires execution, broker, object-store, or secret-provider dependencies."
     doLast {
         val forbidden = configurations.runtimeClasspath.get().resolvedConfiguration.resolvedArtifacts
             .map { "${it.moduleVersion.id.group}:${it.name}" }
-            .filter { it.startsWith("com.intuit.karate:") || it.contains("kaas:runner") }
-        check(forbidden.isEmpty()) { "Execution dependencies are forbidden in apps/api: $forbidden" }
+            .filter {
+                it.startsWith("com.intuit.karate:") ||
+                    it.contains("kaas:runner") ||
+                    it.startsWith("org.springframework.amqp:") ||
+                    it.startsWith("com.rabbitmq:") ||
+                    it.startsWith("io.minio:") ||
+                    it.startsWith("com.github.docker-java:") ||
+                    it.startsWith("org.springframework.vault:") ||
+                    it.startsWith("com.bettercloud:") ||
+                    it.startsWith("software.amazon.awssdk:secretsmanager") ||
+                    it.startsWith("com.amazonaws:aws-java-sdk-secretsmanager") ||
+                    it.startsWith("com.azure:azure-security-keyvault") ||
+                    it.startsWith("com.google.cloud:google-cloud-secretmanager")
+            }
+        check(forbidden.isEmpty()) { "Forbidden control-plane dependencies found in apps/api: $forbidden" }
     }
 }
 

@@ -24,7 +24,7 @@
     },
     "configurationSnapshot": {},
     "secretCapabilities": [],
-    "environmentSnapshot": {"environmentId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "name": "default", "version": 1, "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    "environmentSnapshot": {"environmentId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "environmentRevisionId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "name": "default", "revisionNumber": 1, "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
     "selection": {},
     "parallelism": 1,
     "scenarioRetry": {"maxAttempts": 1, "delayMilliseconds": 0},

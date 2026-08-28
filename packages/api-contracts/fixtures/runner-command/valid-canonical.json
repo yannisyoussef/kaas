@@ -43,8 +43,9 @@
     ],
     "environmentSnapshot": {
       "environmentId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "environmentRevisionId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
       "name": "staging",
-      "version": 12,
+      "revisionNumber": 12,
       "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     },
     "selection": {"scenarioIds": ["create-order#happy-path"], "tags": ["@smoke"]},

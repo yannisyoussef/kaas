@@ -59,10 +59,9 @@
     },
     "scalar": {
       "oneOf": [
-        {"type": "string", "maxLength": 4096},
-        {"type": "number"},
-        {"type": "boolean"},
-        {"type": "null"}
+        {"type": "string", "maxLength": 4096, "pattern": "^[^\\u0000-\\u001F\\u007F]*$"},
+        {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+        {"type": "boolean"}
       ]
     },
     "featureRevision": {
@@ -149,14 +148,16 @@
         },
         "environmentSnapshot": {
           "type": "object",
-          "required": ["environmentId", "name", "version", "digest"],
+          "required": ["environmentId", "environmentRevisionId", "name", "revisionNumber", "digest"],
           "properties": {
             "environmentId": {"type": "string", "format": "uuid"},
+            "environmentRevisionId": {"type": "string", "format": "uuid", "description": "Exact immutable EnvironmentRevision used to assemble the snapshot."},
             "name": {"type": "string", "minLength": 1, "maxLength": 128},
-            "version": {"type": "integer", "minimum": 1},
+            "revisionNumber": {"type": "integer", "minimum": 1},
             "digest": {"$ref": "#/$defs/digest"}
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "description": "Resolved execution input pinned to one implemented immutable EnvironmentRevision; it never follows the logical Environment identity."
         },
         "selection": {
           "type": "object",

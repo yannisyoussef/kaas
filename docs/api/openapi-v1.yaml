@@ -3,9 +3,10 @@ info:
   title: KaaS Control Plane API
   version: 1.0.0
   description: >-
-    Project and immutable FeatureRevision operations are implemented. Run operations remain proposed contracts only.
-    Authentication and tenant authorization are required; arbitrary execution remains disabled. Implemented JSON
-    mutation requests are limited to 1048576 encoded bytes, and decoded Feature source is limited to 524288 UTF-8 bytes.
+    Project, immutable FeatureRevision, SecretReference metadata, immutable EnvironmentRevision, and immutable
+    RunProfileRevision operations are implemented. Run operations remain proposed contracts only. Authentication and
+    tenant authorization are required; arbitrary execution remains disabled. Implemented JSON mutation requests are
+    limited to 1048576 encoded bytes, and decoded Feature source is limited to 524288 UTF-8 bytes.
   license:
     name: All rights reserved
     identifier: LicenseRef-Proprietary
@@ -18,6 +19,12 @@ tags:
     description: Implemented organization-scoped project operations.
   - name: Features
     description: Implemented logical feature and immutable revision operations. Source is opaque and never executed here.
+  - name: Secret References
+    description: Implemented logical metadata only. No secret value, provider location, or redeemable capability is stored.
+  - name: Environments
+    description: Implemented project-scoped Environment identities and immutable typed configuration revisions.
+  - name: Run Profiles
+    description: Implemented project-scoped RunProfile identities whose immutable revisions pin EnvironmentRevisions.
   - name: Runs
     description: Proposed asynchronous run operations. Every lookup is authorized against trusted organization/project ownership.
 paths:
@@ -203,6 +210,349 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/FeatureRevision'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/secret-references:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Secret References]
+      operationId: listSecretReferences
+      summary: List project-scoped logical secret-reference metadata
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Safe logical metadata only; no value or provider data exists.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretReferencePage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+    post:
+      tags: [Secret References]
+      operationId: createSecretReference
+      summary: Create logical secret-reference metadata
+      description: >-
+        Creates a non-capability project-scoped identity. The API cannot accept, store, reveal, or redeem a secret value,
+        provider, provider path, URI, token, ciphertext, or credential.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateSecretReferenceRequest'}
+      responses:
+        '201':
+          description: Logical metadata created, or the original success replayed.
+          headers:
+            Location: {$ref: '#/components/headers/ResourceLocation'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretReference'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/secret-references/{secretReferenceId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/SecretReferenceId'
+    get:
+      tags: [Secret References]
+      operationId: getSecretReference
+      summary: Get logical secret-reference metadata
+      responses:
+        '200':
+          description: Safe logical metadata only.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretReference'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/environments:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Environments]
+      operationId: listEnvironments
+      summary: List logical Environments in a project
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Tenant- and project-scoped logical Environments.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EnvironmentPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+    post:
+      tags: [Environments]
+      operationId: createEnvironment
+      summary: Create an Environment and immutable revision 1
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateEnvironmentRequest'}
+      responses:
+        '201':
+          description: Environment and initial revision created, or the original success replayed.
+          headers:
+            Location: {$ref: '#/components/headers/ResourceLocation'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreatedEnvironment'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/environments/{environmentId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/EnvironmentId'
+    get:
+      tags: [Environments]
+      operationId: getEnvironment
+      summary: Get logical Environment metadata
+      responses:
+        '200':
+          description: Stable logical Environment metadata.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Environment'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/environments/{environmentId}/revisions:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/EnvironmentId'
+    get:
+      tags: [Environments]
+      operationId: listEnvironmentRevisions
+      summary: List immutable Environment revision metadata
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Revision metadata only, newest revision number first.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EnvironmentRevisionPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+    post:
+      tags: [Environments]
+      operationId: createEnvironmentRevision
+      summary: Append the next immutable Environment revision
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateEnvironmentRevisionRequest'}
+      responses:
+        '201':
+          description: Next immutable revision created, or the original success replayed.
+          headers:
+            Location: {$ref: '#/components/headers/ResourceLocation'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EnvironmentRevision'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/environments/{environmentId}/revisions/{revisionId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/EnvironmentId'
+      - $ref: '#/components/parameters/RevisionId'
+    get:
+      tags: [Environments]
+      operationId: getEnvironmentRevision
+      summary: Get one immutable Environment revision
+      responses:
+        '200':
+          description: Exact typed variables and logical secret bindings for this revision.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EnvironmentRevision'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/run-profiles:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Run Profiles]
+      operationId: listRunProfiles
+      summary: List logical RunProfiles in a project
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Tenant- and project-scoped logical RunProfiles.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunProfilePage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+    post:
+      tags: [Run Profiles]
+      operationId: createRunProfile
+      summary: Create a RunProfile and immutable revision 1
+      description: The initial revision pins one exact EnvironmentRevision and cannot silently follow later changes.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateRunProfileRequest'}
+      responses:
+        '201':
+          description: RunProfile and initial revision created, or the original success replayed.
+          headers:
+            Location: {$ref: '#/components/headers/ResourceLocation'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreatedRunProfile'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/run-profiles/{runProfileId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RunProfileId'
+    get:
+      tags: [Run Profiles]
+      operationId: getRunProfile
+      summary: Get logical RunProfile metadata
+      responses:
+        '200':
+          description: Stable logical RunProfile metadata.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunProfile'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/run-profiles/{runProfileId}/revisions:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RunProfileId'
+    get:
+      tags: [Run Profiles]
+      operationId: listRunProfileRevisions
+      summary: List immutable RunProfile revision metadata
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Revision metadata only, newest revision number first.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunProfileRevisionPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+    post:
+      tags: [Run Profiles]
+      operationId: createRunProfileRevision
+      summary: Append the next immutable RunProfile revision
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateRunProfileRevisionRequest'}
+      responses:
+        '201':
+          description: Next immutable revision created, or the original success replayed.
+          headers:
+            Location: {$ref: '#/components/headers/ResourceLocation'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunProfileRevision'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/run-profiles/{runProfileId}/revisions/{revisionId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RunProfileId'
+      - $ref: '#/components/parameters/RevisionId'
+    get:
+      tags: [Run Profiles]
+      operationId: getRunProfileRevision
+      summary: Get one immutable RunProfile revision
+      responses:
+        '200':
+          description: Exact settings and the pinned EnvironmentRevision identity.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunProfileRevision'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
         '422': {$ref: '#/components/responses/ValidationProblem'}
@@ -438,6 +788,21 @@ components:
       in: path
       required: true
       schema: {type: string, format: uuid}
+    EnvironmentId:
+      name: environmentId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    RunProfileId:
+      name: runProfileId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    SecretReferenceId:
+      name: secretReferenceId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
     RevisionId:
       name: revisionId
       in: path
@@ -464,7 +829,7 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      description: Opaque client key scoped to authenticated organization, principal, operation, and target resource path. Implemented Project/Feature keys currently have no expiry; proposed Run operations define retention separately.
+      description: Opaque client key scoped to authenticated organization, principal, operation, and target resource path. Implemented creation keys currently have no expiry; proposed Run operations define retention separately.
       schema:
         type: string
         minLength: 8
@@ -485,6 +850,9 @@ components:
     IdempotencyReplayed:
       description: Whether this response replays an earlier committed success.
       schema: {type: string, enum: ['true', 'false']}
+    CacheControlNoStore:
+      description: Tenant-sensitive configuration metadata must not be stored by shared or private caches.
+      schema: {type: string, const: no-store}
     RunLocation:
       description: Canonical run resource.
       schema:
@@ -692,6 +1060,297 @@ components:
             items:
               type: array
               items: {$ref: '#/components/schemas/FeatureRevisionSummary'}
+    CreateSecretReferenceRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          pattern: '^[A-Za-z][A-Za-z0-9._-]{0,127}$'
+          description: Portable logical name only; it cannot contain a provider path or URI.
+      additionalProperties: false
+    SecretReference:
+      type: object
+      description: Logical metadata only. This UUID is not a capability and no secret value or provider location is stored or redeemable.
+      required: [secretReferenceId, projectId, name, createdBy, createdAt]
+      properties:
+        secretReferenceId: {type: string, format: uuid}
+        projectId: {type: string, format: uuid}
+        name: {type: string, pattern: '^[A-Za-z][A-Za-z0-9._-]{0,127}$'}
+        createdBy: {type: string, minLength: 1, maxLength: 255}
+        createdAt: {type: string, format: date-time}
+      additionalProperties: false
+    SecretReferencePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMetadata'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/SecretReference'}
+    ConfigurationVariable:
+      oneOf:
+        - $ref: '#/components/schemas/StringConfigurationVariable'
+        - $ref: '#/components/schemas/IntegerConfigurationVariable'
+        - $ref: '#/components/schemas/BooleanConfigurationVariable'
+      discriminator:
+        propertyName: type
+        mapping:
+          STRING: '#/components/schemas/StringConfigurationVariable'
+          INTEGER: '#/components/schemas/IntegerConfigurationVariable'
+          BOOLEAN: '#/components/schemas/BooleanConfigurationVariable'
+    StringConfigurationVariable:
+      type: object
+      required: [key, type, value]
+      properties:
+        key: {$ref: '#/components/schemas/ConfigurationKey'}
+        type: {const: STRING}
+        value:
+          type: string
+          description: Exact control-free, well-formed Unicode; at most 4096 UTF-8 bytes with no normalization.
+      additionalProperties: false
+    IntegerConfigurationVariable:
+      type: object
+      required: [key, type, value]
+      properties:
+        key: {$ref: '#/components/schemas/ConfigurationKey'}
+        type: {const: INTEGER}
+        value:
+          type: integer
+          minimum: -9007199254740991
+          maximum: 9007199254740991
+      additionalProperties: false
+    BooleanConfigurationVariable:
+      type: object
+      required: [key, type, value]
+      properties:
+        key: {$ref: '#/components/schemas/ConfigurationKey'}
+        type: {const: BOOLEAN}
+        value: {type: boolean}
+      additionalProperties: false
+    ConfigurationKey:
+      type: string
+      pattern: '^[A-Za-z_][A-Za-z0-9_.-]{0,127}$'
+      description: Exact case-sensitive portable key; duplicate plain/secret keys in one revision are rejected.
+    SecretBinding:
+      type: object
+      description: Binds a key to non-capability SecretReference metadata. It contains no secret value.
+      required: [key, secretReferenceId]
+      properties:
+        key: {$ref: '#/components/schemas/ConfigurationKey'}
+        secretReferenceId: {type: string, format: uuid}
+      additionalProperties: false
+    CreateEnvironmentRequest:
+      type: object
+      required: [name, variables, secretBindings]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        variables:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/ConfigurationVariable'}
+        secretBindings:
+          type: array
+          maxItems: 50
+          items: {$ref: '#/components/schemas/SecretBinding'}
+      additionalProperties: false
+    CreateEnvironmentRevisionRequest:
+      type: object
+      required: [variables, secretBindings]
+      properties:
+        variables:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/ConfigurationVariable'}
+        secretBindings:
+          type: array
+          maxItems: 50
+          items: {$ref: '#/components/schemas/SecretBinding'}
+      additionalProperties: false
+    Environment:
+      type: object
+      required: [environmentId, projectId, name, createdBy, createdAt]
+      properties:
+        environmentId: {type: string, format: uuid}
+        projectId: {type: string, format: uuid}
+        name: {type: string, minLength: 1, maxLength: 128}
+        createdBy: {type: string, minLength: 1, maxLength: 255}
+        createdAt: {type: string, format: date-time}
+      additionalProperties: false
+    CreatedEnvironment:
+      type: object
+      required: [environment, initialRevision]
+      properties:
+        environment: {$ref: '#/components/schemas/Environment'}
+        initialRevision: {$ref: '#/components/schemas/EnvironmentRevision'}
+      additionalProperties: false
+    EnvironmentRevision:
+      type: object
+      required: [revisionId, environmentId, projectId, revisionNumber, variables, secretBindings, contentDigest, createdBy, createdAt]
+      properties:
+        revisionId: {type: string, format: uuid}
+        environmentId: {type: string, format: uuid}
+        projectId: {type: string, format: uuid}
+        revisionNumber: {type: integer, minimum: 1}
+        variables:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/ConfigurationVariable'}
+        secretBindings:
+          type: array
+          maxItems: 50
+          items: {$ref: '#/components/schemas/SecretBinding'}
+        contentDigest: {$ref: '#/components/schemas/Sha256Digest'}
+        createdBy: {type: string, minLength: 1, maxLength: 255}
+        createdAt: {type: string, format: date-time}
+      additionalProperties: false
+    EnvironmentRevisionSummary:
+      type: object
+      required: [revisionId, environmentId, revisionNumber, contentDigest, createdBy, createdAt]
+      properties:
+        revisionId: {type: string, format: uuid}
+        environmentId: {type: string, format: uuid}
+        revisionNumber: {type: integer, minimum: 1}
+        contentDigest: {$ref: '#/components/schemas/Sha256Digest'}
+        createdBy: {type: string, minLength: 1, maxLength: 255}
+        createdAt: {type: string, format: date-time}
+      additionalProperties: false
+    EnvironmentPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMetadata'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/Environment'}
+    EnvironmentRevisionPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMetadata'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/EnvironmentRevisionSummary'}
+    CreateRunProfileRequest:
+      type: object
+      required: [name, environmentRevisionId, selection, parallelism, scenarioRetry, executionTimeoutSeconds, artifactPolicy, configurationOverrides]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        environmentRevisionId: {type: string, format: uuid}
+        selection: {$ref: '#/components/schemas/ProfileSelection'}
+        parallelism: {type: integer, minimum: 1, maximum: 32}
+        scenarioRetry: {$ref: '#/components/schemas/ScenarioRetry'}
+        executionTimeoutSeconds: {type: integer, minimum: 1, maximum: 3600}
+        artifactPolicy: {$ref: '#/components/schemas/ArtifactPolicy'}
+        configurationOverrides:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/ConfigurationVariable'}
+      additionalProperties: false
+    CreateRunProfileRevisionRequest:
+      type: object
+      required: [environmentRevisionId, selection, parallelism, scenarioRetry, executionTimeoutSeconds, artifactPolicy, configurationOverrides]
+      properties:
+        environmentRevisionId: {type: string, format: uuid}
+        selection: {$ref: '#/components/schemas/ProfileSelection'}
+        parallelism: {type: integer, minimum: 1, maximum: 32}
+        scenarioRetry: {$ref: '#/components/schemas/ScenarioRetry'}
+        executionTimeoutSeconds: {type: integer, minimum: 1, maximum: 3600}
+        artifactPolicy: {$ref: '#/components/schemas/ArtifactPolicy'}
+        configurationOverrides:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/ConfigurationVariable'}
+      additionalProperties: false
+    ProfileSelection:
+      type: object
+      required: [tags]
+      properties:
+        tags:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items: {type: string, pattern: '^@[A-Za-z0-9_.:-]{1,127}$'}
+      additionalProperties: false
+    RunProfile:
+      type: object
+      required: [runProfileId, projectId, name, createdBy, createdAt]
+      properties:
+        runProfileId: {type: string, format: uuid}
+        projectId: {type: string, format: uuid}
+        name: {type: string, minLength: 1, maxLength: 128}
+        createdBy: {type: string, minLength: 1, maxLength: 255}
+        createdAt: {type: string, format: date-time}
+      additionalProperties: false
+    CreatedRunProfile:
+      type: object
+      required: [runProfile, initialRevision]
+      properties:
+        runProfile: {$ref: '#/components/schemas/RunProfile'}
+        initialRevision: {$ref: '#/components/schemas/RunProfileRevision'}
+      additionalProperties: false
+    RunProfileRevision:
+      type: object
+      required: [revisionId, runProfileId, projectId, revisionNumber, environmentRevisionId, selection, parallelism, scenarioRetry, executionTimeoutSeconds, artifactPolicy, configurationOverrides, contentDigest, createdBy, createdAt]
+      properties:
+        revisionId: {type: string, format: uuid}
+        runProfileId: {type: string, format: uuid}
+        projectId: {type: string, format: uuid}
+        revisionNumber: {type: integer, minimum: 1}
+        environmentRevisionId:
+          type: string
+          format: uuid
+          description: Exact immutable EnvironmentRevision pinned by this profile revision.
+        selection: {$ref: '#/components/schemas/ProfileSelection'}
+        parallelism: {type: integer, minimum: 1, maximum: 32}
+        scenarioRetry: {$ref: '#/components/schemas/ScenarioRetry'}
+        executionTimeoutSeconds: {type: integer, minimum: 1, maximum: 3600}
+        artifactPolicy: {$ref: '#/components/schemas/ArtifactPolicy'}
+        configurationOverrides:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/ConfigurationVariable'}
+        contentDigest: {$ref: '#/components/schemas/Sha256Digest'}
+        createdBy: {type: string, minLength: 1, maxLength: 255}
+        createdAt: {type: string, format: date-time}
+      additionalProperties: false
+    RunProfileRevisionSummary:
+      type: object
+      required: [revisionId, runProfileId, revisionNumber, environmentRevisionId, contentDigest, createdBy, createdAt]
+      properties:
+        revisionId: {type: string, format: uuid}
+        runProfileId: {type: string, format: uuid}
+        revisionNumber: {type: integer, minimum: 1}
+        environmentRevisionId: {type: string, format: uuid}
+        contentDigest: {$ref: '#/components/schemas/Sha256Digest'}
+        createdBy: {type: string, minLength: 1, maxLength: 255}
+        createdAt: {type: string, format: date-time}
+      additionalProperties: false
+    RunProfilePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMetadata'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/RunProfile'}
+    RunProfileRevisionPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMetadata'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/RunProfileRevisionSummary'}
+    Sha256Digest:
+      type: string
+      pattern: '^sha256:[a-f0-9]{64}$'
+      description: Server-computed digest of the documented versioned canonical content representation.
     PageMetadata:
       type: object
       required: [items, page, size, totalElements, totalPages]
@@ -703,7 +1362,10 @@ components:
       additionalProperties: true
     CreateRunRequest:
       type: object
-      required: [featureRevisionIds, environmentId, parallelism, scenarioRetry, executionTimeoutSeconds, artifactPolicy, networkPolicyId]
+      description: >-
+        PROPOSED profile-based run intent. The immutable RunProfileRevision supplies its pinned EnvironmentRevision and
+        execution settings. Explicit-mode run creation remains unresolved and is not represented here.
+      required: [featureRevisionIds, runProfileRevisionId]
       properties:
         featureRevisionIds:
           type: array
@@ -713,27 +1375,7 @@ components:
           items:
             type: string
             format: uuid
-        environmentId:
-          type: string
-          format: uuid
-        runProfileId:
-          type: [string, 'null']
-          format: uuid
-        selection:
-          $ref: '#/components/schemas/RunSelection'
-        parallelism:
-          type: integer
-          minimum: 1
-          maximum: 32
-        scenarioRetry:
-          $ref: '#/components/schemas/ScenarioRetry'
-        executionTimeoutSeconds:
-          type: integer
-          minimum: 1
-          maximum: 3600
-        artifactPolicy:
-          $ref: '#/components/schemas/ArtifactPolicy'
-        networkPolicyId:
+        runProfileRevisionId:
           type: string
           format: uuid
       additionalProperties: false
@@ -743,25 +1385,6 @@ components:
       properties:
         reason:
           const: USER_REQUESTED
-      additionalProperties: false
-    RunSelection:
-      type: object
-      properties:
-        scenarioIds:
-          type: array
-          maxItems: 1000
-          uniqueItems: true
-          items:
-            type: string
-            minLength: 1
-            maxLength: 256
-        tags:
-          type: array
-          maxItems: 100
-          uniqueItems: true
-          items:
-            type: string
-            pattern: '^@[A-Za-z0-9_.:-]{1,127}$'
       additionalProperties: false
     ScenarioRetry:
       type: object
@@ -988,7 +1611,7 @@ components:
           minimum: 400
           maximum: 599
         code:
-          enum: [UNAUTHENTICATED, FORBIDDEN, NOT_FOUND, VALIDATION_FAILED, IDEMPOTENCY_CONFLICT, PROJECT_NAME_CONFLICT, FEATURE_PATH_CONFLICT, CONFLICT, LIFECYCLE_CONFLICT, RESULT_NOT_READY, UNSUPPORTED_OPERATION, PAYLOAD_TOO_LARGE, RATE_LIMITED, EVENT_HISTORY_GAP, INTERNAL_ERROR]
+          enum: [UNAUTHENTICATED, FORBIDDEN, NOT_FOUND, VALIDATION_FAILED, IDEMPOTENCY_CONFLICT, PROJECT_NAME_CONFLICT, FEATURE_PATH_CONFLICT, SECRET_REFERENCE_NAME_CONFLICT, ENVIRONMENT_NAME_CONFLICT, RUN_PROFILE_NAME_CONFLICT, CONFLICT, LIFECYCLE_CONFLICT, RESULT_NOT_READY, UNSUPPORTED_OPERATION, PAYLOAD_TOO_LARGE, RATE_LIMITED, EVENT_HISTORY_GAP, INTERNAL_ERROR]
         detail:
           type: string
           maxLength: 2048

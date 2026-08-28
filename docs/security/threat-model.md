@@ -17,8 +17,11 @@ Client → API; API → broker; broker → worker; worker → ephemeral sandbox;
 | Arbitrary code escapes API | API has no Karate runtime; execution is a separate process and container |
 | Container escape | non-root, no privileged flags, dropped capabilities, read-only filesystem, patched pinned images, runtime scanning, seccomp/AppArmor review |
 | SSRF/data exfiltration | explicit egress policy, DNS/IP controls, proxy, per-project network policy, audit logs |
-| Secret leakage | provider references, short-lived injection, redaction, no secrets in events/artifacts, rotation |
-| Tenant IDOR | authorization at service and repository layers, opaque IDs, negative tests |
+| Secret leakage | implemented APIs accept metadata-only SecretReferences and never values/provider paths; future delivery requires short-lived capabilities, redaction, no secrets in events/artifacts, and rotation |
+| Tenant IDOR | authorization at service and repository layers, full parent scoping, composite ownership constraints, concealed 404s, and negative tests |
+| Configuration time-of-check/time-of-use drift | RunProfileRevision pins an exact immutable EnvironmentRevision; future TestRun must pin RunProfileRevision and FeatureRevision IDs, never mutable logical identities |
+| Late aggregate mutation | transactional revision sealing, deferred commit checks, and PostgreSQL rejection of later parent/child inserts, updates, and deletes |
+| Metadata-as-authority confusion | SecretReference UUID/name has no provider location or redemption authority; a future secret broker must independently authorize and mint bounded capabilities |
 | Resource exhaustion | queue quotas, concurrency limits, CPU/memory/PID/output/time limits |
 | Result tampering | immutable run snapshot, signed/traceable lifecycle events, restricted artifact writes |
 | Poisoned messages | schema validation, authenticated broker, bounded payloads, idempotent consumers |

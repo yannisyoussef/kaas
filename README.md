@@ -2,7 +2,7 @@
 
 > **Execute. Automate. Assure.**
 
-KaaS is intended to become a self-service quality engineering platform for isolated, asynchronous Karate execution and structured results. The repository now implements the first control-plane vertical slice: authenticated, organization-scoped Projects, logical Features, and immutable FeatureRevisions backed by PostgreSQL.
+KaaS is intended to become a self-service quality engineering platform for isolated, asynchronous Karate execution and structured results. The repository implements authenticated, organization-scoped Projects, logical Features with immutable FeatureRevisions, and reproducible versioned execution configuration through Environments, RunProfiles, and metadata-only SecretReferences backed by PostgreSQL.
 
 Arbitrary test execution is disabled. No user-supplied feature runs in the API or runner scaffold.
 
@@ -11,18 +11,21 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | Capability | Status | Evidence / boundary |
 |---|---|---|
 | Java multi-module build | IMPLEMENTED + VALIDATED | Java 25, Gradle 9.7.1 wrapper, `./gradlew clean check` |
-| Spring Boot control plane | IMPLEMENTED | JWT resource server, RFC 9457 errors, Project/FeatureRevision API, Flyway/JPA/PostgreSQL |
+| Spring Boot control plane | IMPLEMENTED | JWT resource server, RFC 9457 errors, Project/FeatureRevision and versioned-configuration APIs, Flyway/JPA/JDBC/PostgreSQL |
 | Project and immutable feature revisions | IMPLEMENTED + VALIDATED | Signed-JWT HTTP and PostgreSQL Testcontainers suite passed 13/13 in independent backend review; primary local daemon was unavailable |
+| Environment and immutable revisions | IMPLEMENTED + VALIDATED | Typed scalar variables, metadata-only secret bindings, canonical digests, sealed relational aggregates, and 10-writer concurrency coverage |
+| RunProfile and immutable revisions | IMPLEMENTED + VALIDATED | Exact EnvironmentRevision pinning, bounded execution intent, same-type plain overrides, canonical digests, and 10-writer concurrency coverage |
+| SecretReference metadata | IMPLEMENTED + VALIDATED | Project-scoped identity/name/audit only; no value, provider/path, credential, resolve, reveal, or redemption capability |
 | Runner bootstrap | SCAFFOLDED + VALIDATED | Reports that execution is disabled; launches no external process |
 | Next.js web scaffold | IMPLEMENTED + VALIDATED | Next.js 16.3.3; lint, typecheck, render test, build, production audit |
 | Contract tooling | IMPLEMENTED + VALIDATED | Strict AJV schemas/fixtures plus semantic checks; proposed contracts only |
-| OpenAPI contract | IMPLEMENTED + PROPOSED | Project/Feature operations are implemented; preserved Run operations remain proposed |
+| OpenAPI contract | IMPLEMENTED + PROPOSED | Project/Feature/configuration operations are implemented; preserved Run operations remain proposed |
 | Local PostgreSQL/RabbitMQ/MinIO definitions | SCAFFOLDED | Loopback-only Compose config with development health checks |
 | Modular control-plane boundaries | IMPLEMENTED | Capability packages with inward ports and ArchUnit enforcement |
 | PostgreSQL persistence | IMPLEMENTED | Flyway schema, JPA validation, tenant composite FKs, immutable-revision trigger, query indexes |
 | RabbitMQ, SSE, object storage integration | PLANNED | No publisher, consumer, stream, or storage adapter exists |
 | Docker execution sandbox | DESIGNED, NOT APPROVED | ADR-006 is proposed; no launcher or runner image exists |
-| Authentication and product APIs | IMPLEMENTED FOR FIRST SLICE | External OIDC-compatible bearer JWT; trusted tenant claims only; cross-tenant concealment |
+| Authentication and product APIs | IMPLEMENTED FOR CURRENT SLICES | External OIDC-compatible bearer JWT; trusted tenant claims only; full-parent scoping and cross-tenant concealment |
 | Run lifecycle/results/messaging/SSE semantics | DESIGNED + VALIDATED | Proposed ADRs, canonical docs, strict schemas, fixtures, and OpenAPI; no runtime adapters |
 | Karate execution | PLANNED + DISABLED | No dependency, launcher, consumer, or arbitrary execution path |
 
@@ -45,7 +48,7 @@ The diagram is a target, not a deployment claim. The control plane must never ex
 
 ## Repository layout
 
-- `apps/api` — JWT-secured Project/FeatureRevision control plane, Flyway/JPA persistence, and tests
+- `apps/api` — JWT-secured Project/FeatureRevision and versioned-configuration control plane, Flyway/JPA/JDBC persistence, and tests
 - `apps/web` — Next.js frontend scaffold and render test
 - `services/runner` — non-executing runner bootstrap
 - `packages/api-contracts` — JSON Schemas, fixtures, and OpenAPI validation tooling
@@ -103,10 +106,12 @@ The checked-in values are local-development defaults, not production secret mana
 - [Foundation repair report](FOUNDATION_REPAIR_REPORT.md)
 - [Contract and lifecycle architecture report](CONTRACT_LIFECYCLE_ARCHITECTURE_REPORT.md)
 - [Project/Feature slice report](PROJECT_FEATURE_SLICE_REPORT.md)
+- [Environment/RunProfile slice report](ENVIRONMENT_RUN_PROFILE_SLICE_REPORT.md)
 - [Implemented Project/Feature architecture](docs/architecture/project-feature-slice.md)
+- [Implemented Environment/RunProfile architecture](docs/architecture/environment-run-profile-slice.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Security release requirements](docs/security/threat-model.md)
 
 ## Scope discipline
 
-This slice deliberately does not implement TestRun, RabbitMQ messaging, outbox/inbox execution records, SSE, environments/profiles, secret management, object storage, Karate parsing, runner execution, a container launcher, quality-gate execution, or full OpenTelemetry infrastructure. Git integrations, scheduling, Kubernetes, multi-framework execution, billing, advanced RBAC, and AI generation also remain outside scope.
+This slice deliberately does not implement TestRun, RabbitMQ messaging, outbox/inbox execution records, SSE, secret values/storage/redemption, object storage, Karate parsing, runner execution, a container launcher, network enforcement, quality-gate execution, or full OpenTelemetry infrastructure. Git integrations, scheduling, Kubernetes, multi-framework execution, billing, advanced RBAC, and AI generation also remain outside scope.

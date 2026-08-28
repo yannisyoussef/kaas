@@ -69,6 +69,7 @@ function validateSemanticInvariants(fixtures) {
   const events = fixtures.get("live-event").map(({ value }) => value).sort((left, right) => left.sequence - right.sequence);
 
   assert.ok(Date.parse(command.occurredAt) < Date.parse(command.deadline), "command deadline must follow creation");
+  assert.notEqual(command.payload.environmentSnapshot.environmentId, command.payload.environmentSnapshot.environmentRevisionId, "environment identity and revision identity must remain distinct");
   assert.ok(Date.parse(result.startedAt) <= Date.parse(result.finishedAt), "result start must not follow finish");
   assert.ok(Date.parse(result.finishedAt) <= Date.parse(result.occurredAt), "result publication must not precede finish");
 

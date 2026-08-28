@@ -36,13 +36,23 @@ class ControlPlaneArchitectureTest {
     }
 
     @Test
-    void controlPlaneCannotDependOnRunnerOrKarate() {
+    void controlPlaneCannotDependOnExecutionBrokerStorageOrSecretProviders() {
         noClasses()
                 .that()
                 .resideInAPackage("..controlplane..")
                 .should()
                 .dependOnClassesThat()
-                .resideInAnyPackage("com.kaas.runner..", "com.intuit.karate..")
+                .resideInAnyPackage(
+                        "com.kaas.runner..",
+                        "com.intuit.karate..",
+                        "org.springframework.amqp..",
+                        "com.rabbitmq..",
+                        "io.minio..",
+                        "com.github.dockerjava..",
+                        "org.springframework.vault..",
+                        "software.amazon.awssdk.services.secretsmanager..",
+                        "com.azure.security.keyvault..",
+                        "com.google.cloud.secretmanager..")
                 .allowEmptyShould(true)
                 .check(classes);
     }

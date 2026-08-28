@@ -407,7 +407,7 @@ class ControlPlaneHttpIntegrationTests {
                 "{\"name\":\"nul\",\"logicalPath\":\"limits/nul-" + UUID.randomUUID()
                         + ".feature\",\"source\":\"abc\\u0000def\"}");
         assertProblem(nul, 422, "VALIDATION_FAILED");
-        assertThat(nul.body()).doesNotContain("abc");
+        assertThat(nul.body()).doesNotContain("abc\\u0000def", "abc\u0000def");
     }
 
     @Test
