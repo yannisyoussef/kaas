@@ -88,11 +88,13 @@ public class RunIntentService {
                 throw ApiException.conflict(
                         "IDEMPOTENCY_CONFLICT", "The idempotency key was already used for a different request.");
             }
+            // The replay returns the CURRENT canonical representation rather than a reconstructed CREATED one.
+            // Rebuilding it would advertise ETag "run-1" for a run the origin now serves as "run-2", putting two
+            // strong validators in circulation for one resource. Durable identity, Location, and the original
+            // creation semantics are unchanged, and no second run or snapshot is created.
             TestRun stored = runs.findRun(principal.organizationId(), record.resourceId())
                     .orElseThrow(ApiException::notFound);
-            TestRun original = TestRun.created(
-                    stored.runId(), stored.projectId(), stored.snapshotDigest(), stored.createdBy(), stored.createdAt());
-            return new Creation<>(original, record.location(), true);
+            return new Creation<>(stored, record.location(), true);
         }
 
         var profile = configuration

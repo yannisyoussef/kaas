@@ -2,7 +2,7 @@
 
 > **Execute. Automate. Assure.**
 
-KaaS is intended to become a self-service quality engineering platform for isolated, asynchronous Karate execution and structured results. The repository implements authenticated, organization-scoped Projects, immutable FeatureRevisions, versioned execution configuration, TestRun intent with a sealed immutable execution snapshot, and transactional CREATED to QUEUED scheduling that durably records an execution attempt, a queue-time dispatch intent, and an outbox message, backed by PostgreSQL.
+KaaS is intended to become a self-service quality engineering platform for isolated, asynchronous Karate execution and structured results. The repository implements authenticated, organization-scoped Projects, immutable FeatureRevisions, versioned execution configuration, TestRun intent with a sealed immutable execution snapshot, transactional CREATED to QUEUED scheduling, and an outbox relay that publishes queue-time dispatch intents to RabbitMQ with at-least-once semantics, publisher confirms, and database-owned retry. PostgreSQL remains the source of truth; RabbitMQ is transport.
 
 Arbitrary test execution is disabled. No user-supplied feature runs in the API or runner scaffold.
 
@@ -17,7 +17,9 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | RunProfile and immutable revisions | IMPLEMENTED + VALIDATED | Exact EnvironmentRevision pinning, bounded execution intent, same-type plain overrides, canonical digests, and 10-writer concurrency coverage |
 | SecretReference metadata | IMPLEMENTED + VALIDATED | Project-scoped identity/name/audit only; no value, provider/path, credential, resolve, reveal, or redemption capability |
 | TestRun intent and immutable RunSnapshot | IMPLEMENTED + VALIDATED | 202 create, get/list/snapshot, semantic idempotency, exact initial dimensions, canonical digest, sealed V3 aggregate |
-| Run scheduling, attempt, and outbox | IMPLEMENTED + VALIDATED | Internal CREATED to QUEUED compare-and-set, ExecutionAttempt #1, immutable queue-time DispatchIntent, unpublished outbox row, sealed V4 aggregate, 10-scheduler concurrency coverage; no broker, worker, claim, or execution |
+| Run scheduling, attempt, and outbox | IMPLEMENTED + VALIDATED | Internal CREATED to QUEUED compare-and-set, ExecutionAttempt #1, immutable queue-time DispatchIntent, sealed V4 aggregate, 10-scheduler concurrency coverage |
+| Outbox relay and RabbitMQ publication | IMPLEMENTED + VALIDATED | Generalized typed outbox, database-owned retry/backoff, relay claim with SKIP LOCKED and lease expiry, publisher confirms, mandatory/unroutable handling, terminal dispositions, at-least-once with an explicit duplicate window; real RabbitMQ Testcontainers coverage |
+| Production run scheduler | IMPLEMENTED + VALIDATED | Bounded, deterministically ordered batch invoking the established ScheduleRun use case; safe across replicas via compare-and-set |
 | Runner bootstrap | SCAFFOLDED + VALIDATED | Reports that execution is disabled; launches no external process |
 | Next.js web scaffold | IMPLEMENTED + VALIDATED | Next.js 16.3.3; lint, typecheck, render test, build, production audit |
 | Contract tooling | IMPLEMENTED + VALIDATED | Strict AJV schemas/fixtures plus semantic checks; proposed contracts only |
@@ -50,7 +52,7 @@ The diagram is a target, not a deployment claim. The control plane must never ex
 
 ## Repository layout
 
-- `apps/api` — JWT-secured Project/FeatureRevision, versioned-configuration, TestRun/snapshot, and scheduling/outbox control plane
+- `apps/api` — JWT-secured Project/FeatureRevision, versioned-configuration, TestRun/snapshot, scheduling/outbox control plane, and the RabbitMQ outbox relay
 - `apps/web` — Next.js frontend scaffold and render test
 - `services/runner` — non-executing runner bootstrap
 - `packages/api-contracts` — JSON Schemas, fixtures, and OpenAPI validation tooling
@@ -114,9 +116,11 @@ The checked-in values are local-development defaults, not production secret mana
 - [Implemented TestRun intent/snapshot architecture](docs/architecture/test-run-intent-slice.md)
 - [Implemented scheduling/attempt/outbox architecture](docs/architecture/scheduling-outbox-slice.md)
 - [Scheduling/outbox slice report](SCHEDULING_OUTBOX_SLICE_REPORT.md)
+- [Implemented outbox relay/RabbitMQ architecture](docs/architecture/outbox-relay-rabbitmq-slice.md)
+- [Outbox relay/RabbitMQ slice report](RABBITMQ_OUTBOX_RELAY_SLICE_REPORT.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Security release requirements](docs/security/threat-model.md)
 
 ## Scope discipline
 
-This slice implements exactly one runtime lifecycle transition, CREATED to QUEUED, together with its execution attempt, immutable queue-time dispatch intent, and durable outbox record. It deliberately does not implement broker publication, a consumer inbox, worker claim, assignment epochs, leases, ExecutionCommand production, RabbitMQ messaging, SSE, secret values/storage/redemption/capabilities, source bundles or capabilities, object storage, Karate parsing/execution, a container launcher, network enforcement, results/artifacts, quality-gate execution, or full OpenTelemetry infrastructure.
+This slice publishes already-durable dispatch intents to RabbitMQ and adds the production trigger that moves runs from CREATED to QUEUED. It deliberately does not implement a consumer, a consumer inbox, worker claim, assignment epochs, leases, ExecutionCommand production, SSE, secret values/storage/redemption/capabilities, source bundles or capabilities, object storage, Karate parsing/execution, a container launcher, network enforcement, results/artifacts, quality-gate execution, or full OpenTelemetry infrastructure. The queue may hold published dispatch intents that nothing consumes; that is intentional.

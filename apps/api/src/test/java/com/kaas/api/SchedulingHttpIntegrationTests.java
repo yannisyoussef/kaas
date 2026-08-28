@@ -71,7 +71,10 @@ import tools.jackson.databind.ObjectMapper;
         properties = {
             "kaas.scheduling.queue-timeout=PT7M",
             // The concurrency tests park one connection per blocked scheduler; leave headroom over SCHEDULERS.
-            "spring.datasource.hikari.maximum-pool-size=16"
+            "spring.datasource.hikari.maximum-pool-size=16",
+            // This suite drives scheduling explicitly and asserts exact state, so the timers must stay out of it.
+            "kaas.scheduling.auto.enabled=false",
+            "kaas.outbox.relay.enabled=false"
         })
 class SchedulingHttpIntegrationTests {
     private static final String ISSUER = "https://issuer.kaas.test";
@@ -434,14 +437,16 @@ class SchedulingHttpIntegrationTests {
         assertRejectedBecause(
                 "execution dispatch identity and payload are immutable",
                 "delete from execution_dispatches where run_id = ?", runId);
+        // V5 narrowed this guard rather than removing it: delivery state may move, semantic content may not, and
+        // an unclaimed row can never be marked published.
         assertRejectedBecause(
-                "outbox messages are immutable until publication is implemented",
+                "only claim, release, publication, retry, terminal, and requeue transitions are supported",
                 "update outbox_messages set published_at = now() where run_id = ?", runId);
         assertRejectedBecause(
-                "outbox messages are immutable until publication is implemented",
+                "only claim, release, publication, retry, terminal, and requeue transitions are supported",
                 "update outbox_messages set payload_sha256 = repeat('a', 64) where run_id = ?", runId);
         assertRejectedBecause(
-                "outbox messages are immutable until publication is implemented",
+                "outbox messages are retained as delivery evidence",
                 "delete from outbox_messages where run_id = ?", runId);
         assertRejectedBecause(
                 "run lifecycle events are immutable",
@@ -491,11 +496,11 @@ class SchedulingHttpIntegrationTests {
     }
 
     @Test
-    void theMigrationChainReachesVersionFourWithEveryStepApplied() {
+    void theMigrationChainReachesVersionFiveWithEveryStepApplied() {
         assertThat(jdbc.queryForList(
                         "select version from flyway_schema_history where success order by installed_rank",
                         String.class))
-                .containsExactly("1", "2", "3", "4");
+                .containsExactly("1", "2", "3", "4", "5");
     }
 
     @Test

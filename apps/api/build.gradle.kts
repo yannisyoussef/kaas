@@ -13,6 +13,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-security")
     implementation("org.springframework.boot:spring-boot-starter-oauth2-resource-server")
     implementation("org.springframework.boot:spring-boot-starter-flyway")
+    implementation("org.springframework.boot:spring-boot-starter-amqp")
     implementation("org.flywaydb:flyway-database-postgresql")
     runtimeOnly("org.postgresql:postgresql")
 
@@ -21,6 +22,7 @@ dependencies {
     testImplementation("org.springframework.security:spring-security-test")
     testImplementation("org.testcontainers:testcontainers-junit-jupiter")
     testImplementation("org.testcontainers:testcontainers-postgresql")
+    testImplementation("org.testcontainers:testcontainers-rabbitmq")
     testImplementation("com.tngtech.archunit:archunit-junit5:1.4.1")
     mockitoAgent("org.mockito:mockito-core") { isTransitive = false }
 }
@@ -32,15 +34,13 @@ tasks.withType<Test>().configureEach {
 
 val verifyNoExecutionDependencies = tasks.register("verifyNoExecutionDependencies") {
     group = "verification"
-    description = "Fails if the control plane acquires execution, broker, object-store, or secret-provider dependencies."
+    description = "Fails if the control plane acquires execution, object-store, or secret-provider dependencies. RabbitMQ is an intended transport dependency from the outbox relay slice onward; it carries no execution authority."
     doLast {
         val forbidden = configurations.runtimeClasspath.get().resolvedConfiguration.resolvedArtifacts
             .map { "${it.moduleVersion.id.group}:${it.name}" }
             .filter {
                 it.startsWith("com.intuit.karate:") ||
                     it.contains("kaas:runner") ||
-                    it.startsWith("org.springframework.amqp:") ||
-                    it.startsWith("com.rabbitmq:") ||
                     it.startsWith("io.minio:") ||
                     it.startsWith("com.github.docker-java:") ||
                     it.startsWith("org.springframework.vault:") ||

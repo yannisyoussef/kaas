@@ -568,7 +568,9 @@ paths:
       description: >-
         Atomically records a CREATED run, its immutable execution snapshot, and the scoped idempotency record. The
         response does not imply that a command was generated or published, or that the run reached QUEUED. An
-        identical replay returns the original status, body, Location, and ETag. Reusing the
+        identical replay returns the original status and Location together with the run's CURRENT representation
+        and ETag, so a replay after scheduling reports QUEUED rather than a stale CREATED view; it never creates a
+        second run or regenerates the snapshot. Reusing the
         same key in the same authenticated organization, operation, and project scope with a different normalized
         request fingerprint returns an idempotency conflict.
       parameters:
@@ -914,8 +916,7 @@ components:
     RunEtag:
       description: >-
         Strong representation tag derived from the semantic runVersion. A CREATED run is "run-1"; the CREATED to
-        QUEUED scheduling transition makes it "run-2". Because scheduling has no production trigger yet, "run-1" is
-        currently the only tag a deployed API returns.
+        QUEUED scheduling transition makes it "run-2".
       schema:
         type: string
     RetryAfter:
@@ -1503,8 +1504,8 @@ components:
         internal scheduler implements the single CREATED to QUEUED transition, which yields runVersion 2 with
         server-owned queue timing. Clients never supply queue timing, and the execution attempt that scheduling
         creates is deliberately withheld from this public representation because it is infrastructure history.
-        NOTE: no production trigger invokes the scheduler yet, so a deployed run currently stays CREATED at
-        runVersion 1 indefinitely. Do not poll for QUEUED until an outbox relay or scheduling trigger ships.
+        A background scheduler performs the transition shortly after creation, so a client may observe CREATED
+        briefly and then QUEUED; both are normal. Nothing beyond QUEUED is implemented.
       required: [runId, projectId, runVersion, lifecycleState, cancellationStatus, testOutcome, infrastructureOutcome, qualityGateStatus, snapshotDigest, queueStartedAt, queueDeadlineAt, createdBy, createdAt, updatedAt]
       properties:
         runId:

@@ -5,7 +5,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;
-import com.tngtech.archunit.lang.ArchRule;
 import org.junit.jupiter.api.Test;
 
 class ControlPlaneArchitectureTest {
@@ -23,17 +22,30 @@ class ControlPlaneArchitectureTest {
                         .filter(imported -> imported.getPackageName().contains(".controlplane.domain"))
                         .count())
                 .isGreaterThan(10L);
+        assertThat(classes.stream()
+                        .filter(imported -> imported.getPackageName().contains(".outbox.domain"))
+                        .count())
+                .isGreaterThan(5L);
     }
 
     @Test
     void domainIsFrameworkIndependent() {
-        ArchRule rule = noClasses()
+        // Each domain package may depend only on the JDK and itself. Allowing every "..domain.." package to see
+        // every other would silently permit the control-plane domain to depend on the outbox domain.
+        noClasses()
                 .that()
-                .resideInAPackage("..domain..")
+                .resideInAPackage("..controlplane.domain..")
                 .should()
                 .dependOnClassesThat()
-                .resideOutsideOfPackages("java..", "com.kaas.api.controlplane.domain..");
-        rule.check(classes);
+                .resideOutsideOfPackages("java..", "com.kaas.api.controlplane.domain..")
+                .check(classes);
+        noClasses()
+                .that()
+                .resideInAPackage("..outbox.domain..")
+                .should()
+                .dependOnClassesThat()
+                .resideOutsideOfPackages("java..", "com.kaas.api.outbox.domain..")
+                .check(classes);
     }
 
     @Test

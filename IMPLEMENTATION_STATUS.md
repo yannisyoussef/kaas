@@ -2,7 +2,7 @@
 
 Status date: 2026-08-28
 
-This document describes repository reality after the transactional run scheduling, execution attempt, and outbox vertical slice. Product vision and execution architecture do not imply runtime capability.
+This document describes repository reality after the outbox relay and RabbitMQ publication vertical slice. Product vision and execution architecture do not imply runtime capability.
 
 ## Implemented and validated
 
@@ -35,7 +35,13 @@ This document describes repository reality after the transactional run schedulin
 - RFC 9457 Problem Details across MVC and security filters, request/trace correlation context, safe structured mutation logs, and Actuator HTTP metrics.
 - Signed-JWT HTTP, tenant-IDOR, concurrent idempotency, PostgreSQL Testcontainers, database immutability, transport/content boundaries, two ten-writer configuration revision races, canonical digest vectors, and ArchUnit tests.
 - Scheduling idempotency by state and invariants: ten concurrent schedulers yield exactly one semantic winner, one attempt, one dispatch, and one outbox message; repeat scheduling makes no new durable work.
-- Final Java 25/Gradle 9.7.1 clean verification: 51 API tests plus 1 runner test passed with zero failures/skips; contract, web, audit, Compose, and whitespace gates also passed.
+- Generalized, explicitly typed PostgreSQL outbox owning its own immutable payload, with a controlled message-type enum, an optional dispatch reference, and a V5 delivery-scheduling model the database rather than the relay process owns.
+- Outbox relay publishing to RabbitMQ with correlated publisher confirms, persistent messages, mandatory routing, bounded deterministic backoff, terminal dispositions retained as evidence, and fail-closed digest verification before publication.
+- Relay claim protocol using FOR UPDATE SKIP LOCKED with lease expiry, so multiple relays take disjoint work, a crashed relay strands nothing, and a revived relay cannot overwrite a newer disposition. No database transaction is held across broker I/O.
+- At-least-once publication with an explicit, tested crash-after-confirm duplicate window; stable message identity and semantic digest make duplicates safe for a future consumer.
+- Production run scheduler moving CREATED to QUEUED in bounded, deterministically ordered batches through the established use case, safe across replicas.
+- Idempotent run-create replay now returns the run's current canonical representation and ETag rather than a reconstructed CREATED view, so one resource never advertises two strong validators.
+- Final Java 25/Gradle 9.7.1 clean verification: 82 API tests plus 1 runner test passed with zero failures/skips using PostgreSQL and RabbitMQ Testcontainers; contract, web, audit, Compose, and whitespace gates also passed.
 
 ## Scaffolded, not product functionality
 
@@ -48,22 +54,22 @@ This document describes repository reality after the transactional run schedulin
 ## Designed or proposed
 
 - Future control-plane capabilities beyond versioned execution configuration and a separately deployable execution plane.
-- PostgreSQL schemas for orchestration and result metadata beyond the implemented CREATED/QUEUED scheduling bundle.
+- PostgreSQL schemas for orchestration and result metadata beyond the implemented scheduling bundle and outbox delivery state.
 - Per-run container isolation as a candidate only; it is not approved as a sufficient hostile-code boundary.
-- Product concepts beyond implemented QUEUED scheduling, including execution, results, artifact storage, and quality gates.
+- Product concepts beyond implemented QUEUED scheduling and dispatch publication, including execution, results, artifact storage, and quality gates.
 - Orthogonal run lifecycle, cancellation, test outcome, infrastructure outcome, and quality-gate semantics.
-- Assignment fencing, leases, phase deadlines beyond the queue deadline, outbox publication and consumer inbox semantics, retries/DLQ classification, structured results/artifacts, and bounded SSE replay.
+- Assignment fencing, leases, phase deadlines beyond the queue deadline, consumer inbox semantics, consumer-side DLQ classification, structured results/artifacts, and bounded SSE replay.
 
 ## Planned and intentionally absent
 
-- RabbitMQ publishers/consumers, topology, retries, DLQ, or broker idempotency behavior. The durable outbox exists but nothing reads or publishes it, and the API runtime dependency graph contains no AMQP client.
+- RabbitMQ consumers, consumer inbox deduplication, or consumer dead-letter handling. Publication is implemented; the queue may hold published dispatch intents that no production code consumes.
 - Redis.
 - SSE implementation.
 - Object-storage integration.
 - Secret values, provider mapping, storage, resolution, redemption, capability minting, or injection.
 - Karate dependencies, runner images, container launchers, or arbitrary test execution.
 - OpenTelemetry instrumentation.
-- Lifecycle mutation handlers beyond CREATED to QUEUED, outbox publication relay, consumer inbox, lease reconciliation, quality evaluation, and durable run event storage beyond the scheduling transition record.
+- Lifecycle mutation handlers beyond CREATED to QUEUED, consumer inbox, lease reconciliation, quality evaluation, outbox retention policy, and durable run event storage beyond the scheduling transition record.
 
 ## Toolchain decisions
 
@@ -107,7 +113,7 @@ No item above is runtime behavior. KAA-004 remains open: Docker/host/daemon/netw
 
 ## Current vertical slice
 
-Authenticated, organization-scoped Project/FeatureRevision and Environment/RunProfile lifecycles, TestRun/RunSnapshot persistence, and the single CREATED to QUEUED scheduling transition are implemented. Scheduling is an internal application use case with no public endpoint; it durably records an attempt, an immutable queue-time dispatch intent, and an unpublished outbox message. Queue-time dispatch intent is deliberately not a claim-time execution command: no assignment epoch, lease, or runtime capability exists yet. Broker publication, worker claim, and execution remain disabled until their separate protocol and hostile-execution release gates are implemented and validated.
+Authenticated, organization-scoped Project/FeatureRevision and Environment/RunProfile lifecycles, TestRun/RunSnapshot persistence, the single CREATED to QUEUED scheduling transition, and at-least-once publication of the resulting dispatch intent to RabbitMQ are implemented. A background scheduler triggers the transition and a separate relay loop publishes the outbox; PostgreSQL remains authoritative for run state, attempt identity, dispatch intent, and delivery state. Queue-time dispatch intent is deliberately not a claim-time execution command: no assignment epoch, lease, or runtime capability exists yet. Worker claim, consumption, and execution remain disabled until their separate protocol and hostile-execution release gates are implemented and validated.
 
 ## Security gate
 
@@ -122,3 +128,5 @@ See `ENVIRONMENT_RUN_PROFILE_SLICE_REPORT.md` for the versioned-configuration mo
 See `TEST_RUN_INTENT_SLICE_REPORT.md` for the CREATED-only lifecycle boundary, snapshot canonicalization/persistence, API contract, security evidence, runner-command mapping, and independent reviews.
 
 See `SCHEDULING_OUTBOX_SLICE_REPORT.md` for the recovered scheduling slice: the queue-time/claim-time protocol correction, transactional bundle, compare-and-set concurrency evidence, persistence guards, contract changes, security review, and independent reviews.
+
+See `RABBITMQ_OUTBOX_RELAY_SLICE_REPORT.md` for the relay slice: the generalized outbox decision, delivery-scheduling model, relay claim protocol, publisher confirms, retry and terminal policy, at-least-once crash-window analysis, scheduler trigger, health and observability, security review, and independent reviews.

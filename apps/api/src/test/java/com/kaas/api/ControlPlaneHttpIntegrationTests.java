@@ -52,7 +52,10 @@ import tools.jackson.databind.ObjectMapper;
 
 @Testcontainers
 @Import(ControlPlaneHttpIntegrationTests.JwtTestConfiguration.class)
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        // These suites assert CREATED-state invariants, so the production timers must not act on them.
+        properties = {"kaas.scheduling.auto.enabled=false", "kaas.outbox.relay.enabled=false"})
 class ControlPlaneHttpIntegrationTests {
     private static final String ISSUER = "https://issuer.kaas.test";
     private static final String AUDIENCE = "kaas-api";

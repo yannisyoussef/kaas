@@ -7,12 +7,14 @@ import com.kaas.api.controlplane.domain.ExecutionDispatch;
 import com.kaas.api.controlplane.domain.InfrastructureOutcome;
 import com.kaas.api.controlplane.domain.QualityGateStatus;
 import com.kaas.api.controlplane.domain.RunLifecycle;
+import com.kaas.api.controlplane.domain.SchedulableRun;
 import com.kaas.api.controlplane.domain.TestOutcome;
 import com.kaas.api.controlplane.domain.TestRun;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -25,6 +27,25 @@ class JdbcRunSchedulingRepository implements RunSchedulingRepository {
 
     JdbcRunSchedulingRepository(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+    }
+
+    @Override
+    public List<SchedulableRun> findSchedulable(int batchSize) {
+        // Ordering matches ix_test_runs_created, so the batch is reproducible across replicas. The index does
+        // not cover cancellation_status or run_version, so this still reads the heap.
+        return jdbc.query(
+                """
+                select organization_id, run_id, run_version
+                  from test_runs
+                 where lifecycle_state = 'CREATED' and cancellation_status = 'NOT_REQUESTED'
+                 order by created_at, run_id
+                 limit ?
+                """,
+                (resultSet, rowNumber) -> new SchedulableRun(
+                        resultSet.getObject("organization_id", UUID.class),
+                        resultSet.getObject("run_id", UUID.class),
+                        resultSet.getLong("run_version")),
+                batchSize);
     }
 
     @Override
@@ -112,12 +133,14 @@ class JdbcRunSchedulingRepository implements RunSchedulingRepository {
                 """
                 insert into outbox_messages
                     (outbox_id, dispatch_id, message_id, organization_id, project_id, run_id,
-                     message_type, schema_version, aggregate_type, aggregate_id, payload_sha256,
-                     occurred_at, published_at, publish_attempts, last_failure_code)
-                values (?, ?, ?, ?, ?, ?, 'EXECUTION_DISPATCH', '1.0', 'TEST_RUN', ?, ?, ?, null, 0, null)
+                     message_type, schema_version, aggregate_type, aggregate_id, payload, payload_sha256,
+                     occurred_at, available_at, published_at, publish_attempts, last_failure_code)
+                values (?, ?, ?, ?, ?, ?, 'EXECUTION_DISPATCH', '1.0', 'TEST_RUN', ?, cast(? as jsonb), ?,
+                        ?, ?, null, 0, null)
                 """,
                 outboxId, dispatch.dispatchId(), dispatch.messageId(), organizationId, queued.projectId(),
-                queued.runId(), queued.runId(), hex(dispatch.payloadDigest()), Timestamp.from(dispatch.occurredAt()));
+                queued.runId(), queued.runId(), dispatchPayload, hex(dispatch.payloadDigest()),
+                Timestamp.from(dispatch.occurredAt()), Timestamp.from(dispatch.occurredAt()));
     }
 
     private static TestRun run(ResultSet resultSet, int rowNumber) throws SQLException {
