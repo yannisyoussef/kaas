@@ -1,6 +1,7 @@
 package com.kaas.api;
 
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;
@@ -12,6 +13,17 @@ class ControlPlaneArchitectureTest {
             new ClassFileImporter()
                     .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
                     .importPackages("com.kaas.api");
+
+    @Test
+    void thePackageSelectorsUsedByTheseRulesActuallyMatchClasses() {
+        // Every rule below uses allowEmptyShould(true), so a mistyped package would make them pass silently.
+        assertThat(classes.stream().filter(imported -> imported.getPackageName().contains(".controlplane.")).count())
+                .isGreaterThan(20L);
+        assertThat(classes.stream()
+                        .filter(imported -> imported.getPackageName().contains(".controlplane.domain"))
+                        .count())
+                .isGreaterThan(10L);
+    }
 
     @Test
     void domainIsFrameworkIndependent() {
@@ -53,6 +65,30 @@ class ControlPlaneArchitectureTest {
                         "software.amazon.awssdk.services.secretsmanager..",
                         "com.azure.security.keyvault..",
                         "com.google.cloud.secretmanager..")
+                .allowEmptyShould(true)
+                .check(classes);
+    }
+
+    @Test
+    void controlPlaneCannotLaunchProcessesOrScheduleExecution() {
+        noClasses()
+                .that()
+                .resideInAPackage("..controlplane..")
+                .should()
+                .dependOnClassesThat()
+                .haveFullyQualifiedName("java.lang.ProcessBuilder")
+                .orShould()
+                .dependOnClassesThat()
+                .haveFullyQualifiedName("java.lang.Runtime")
+                .orShould()
+                .dependOnClassesThat()
+                .haveFullyQualifiedName("org.springframework.scheduling.annotation.Scheduled")
+                .orShould()
+                .dependOnClassesThat()
+                .haveFullyQualifiedName("org.springframework.scheduling.TaskScheduler")
+                .orShould()
+                .dependOnClassesThat()
+                .haveFullyQualifiedName("java.util.concurrent.ScheduledExecutorService")
                 .allowEmptyShould(true)
                 .check(classes);
     }

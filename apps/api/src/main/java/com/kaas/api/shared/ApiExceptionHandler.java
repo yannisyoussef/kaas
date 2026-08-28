@@ -7,6 +7,8 @@ import java.util.Comparator;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import java.sql.SQLException;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
@@ -21,6 +23,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.transaction.TransactionException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
@@ -128,6 +131,21 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     ResponseEntity<ProblemDetail> unexpected(Exception exception, HttpServletRequest request) {
+        if (exception instanceof DataAccessException || exception instanceof TransactionException) {
+            // Spring composes these messages as "<task>; SQL [<statement>]; <server message>", so attaching the
+            // cause would put the statement and the PostgreSQL trigger text into the log. Record the SQLSTATE
+            // instead: it is diagnostic without disclosing schema internals.
+            LOGGER.atError()
+                    .addKeyValue("exceptionType", exception.getClass().getName())
+                    .addKeyValue("sqlState", sqlState(exception))
+                    .log("Database request failure");
+            return response(
+                    request,
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "The server could not complete the request.",
+                    List.of());
+        }
         LOGGER.atError()
                 .addKeyValue("exceptionType", exception.getClass().getName())
                 .setCause(exception)
@@ -138,6 +156,18 @@ public class ApiExceptionHandler {
                 "INTERNAL_ERROR",
                 "The server could not complete the request.",
                 List.of());
+    }
+
+    private static String sqlState(Throwable exception) {
+        for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
+            if (cause instanceof SQLException sql && sql.getSQLState() != null) {
+                return sql.getSQLState();
+            }
+            if (cause.getCause() == cause) {
+                break;
+            }
+        }
+        return "unknown";
     }
 
     private ResponseEntity<ProblemDetail> response(

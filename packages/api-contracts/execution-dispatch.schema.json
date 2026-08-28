@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kaas.dev/contracts/v1/execution-dispatch.schema.json",
+  "title": "ExecutionDispatch",
+  "description": "Immutable queue-time identity for one unassigned KaaS attempt. It is not executable and contains no worker, assignment epoch, lease, source, secret, network, launcher, or broker capability.",
+  "type": "object",
+  "required": [
+    "schemaVersion", "messageId", "messageType", "dispatchId", "occurredAt", "producer",
+    "organizationId", "projectId", "runId", "runVersion", "attemptId", "attemptNumber",
+    "runSnapshotId", "runSnapshotDigest", "queueDeadlineAt", "payloadDigest"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "1.0"},
+    "messageId": {"type": "string", "format": "uuid"},
+    "messageType": {"const": "EXECUTION_DISPATCH"},
+    "dispatchId": {"type": "string", "format": "uuid"},
+    "occurredAt": {"type": "string", "format": "date-time"},
+    "producer": {"const": "kaas.scheduler"},
+    "organizationId": {"type": "string", "format": "uuid"},
+    "projectId": {"type": "string", "format": "uuid"},
+    "runId": {"type": "string", "format": "uuid"},
+    "runVersion": {"type": "integer", "minimum": 2, "maximum": 9007199254740991},
+    "attemptId": {"type": "string", "format": "uuid"},
+    "attemptNumber": {"const": 1},
+    "runSnapshotId": {"type": "string", "format": "uuid", "description": "The current snapshot identity is the run UUID; semantic validation requires equality with runId."},
+    "runSnapshotDigest": {"$ref": "#/$defs/digest"},
+    "queueDeadlineAt": {"type": "string", "format": "date-time"},
+    "payloadDigest": {"$ref": "#/$defs/digest", "description": "Versioned semantic digest; not a hash of unspecified JSON serialization bytes."}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+  },
+  "additionalProperties": false
+}

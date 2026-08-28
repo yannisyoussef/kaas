@@ -1797,13 +1797,13 @@ class ConfigurationHttpIntegrationTests {
                         UUID.fromString(runId)))
                 .isInstanceOf(DataIntegrityViolationException.class)
                 .satisfies(exception -> assertThat(rootCause(exception).getMessage())
-                        .contains("test run updates are disabled until lifecycle mutation is implemented"));
+                        .contains("only the exact CREATED to QUEUED"));
         assertThatThrownBy(() -> jdbc.update(
                         "update test_runs set run_version = 2, lifecycle_state = 'RUNNING' where run_id = ?",
                         UUID.fromString(runId)))
                 .isInstanceOf(DataIntegrityViolationException.class)
                 .satisfies(exception -> assertThat(rootCause(exception).getMessage())
-                        .contains("test run updates are disabled until lifecycle mutation is implemented"));
+                        .contains("only the exact CREATED to QUEUED"));
         assertThatThrownBy(() -> jdbc.update(
                         """
                         insert into test_runs

@@ -912,7 +912,10 @@ components:
         type: string
         pattern: '^/api/v1/runs/[0-9a-fA-F-]{36}$'
     RunEtag:
-      description: Strong representation tag derived from runVersion, for example "run-3".
+      description: >-
+        Strong representation tag derived from the semantic runVersion. A CREATED run is "run-1"; the CREATED to
+        QUEUED scheduling transition makes it "run-2". Because scheduling has no production trigger yet, "run-1" is
+        currently the only tag a deployed API returns.
       schema:
         type: string
     RetryAfter:
@@ -1496,9 +1499,13 @@ components:
     Run:
       type: object
       description: >-
-        Current public TestRun aggregate. The implemented create slice always returns version 1 in CREATED with no
-        attempt or queue deadline; queue timing starts only when a future scheduler performs CREATED to QUEUED.
-      required: [runId, projectId, runVersion, lifecycleState, cancellationStatus, testOutcome, infrastructureOutcome, qualityGateStatus, snapshotDigest, createdBy, createdAt, updatedAt]
+        Current public TestRun aggregate. Create returns runVersion 1 in CREATED with null queue timing. The
+        internal scheduler implements the single CREATED to QUEUED transition, which yields runVersion 2 with
+        server-owned queue timing. Clients never supply queue timing, and the execution attempt that scheduling
+        creates is deliberately withheld from this public representation because it is infrastructure history.
+        NOTE: no production trigger invokes the scheduler yet, so a deployed run currently stays CREATED at
+        runVersion 1 indefinitely. Do not poll for QUEUED until an outbox relay or scheduling trigger ships.
+      required: [runId, projectId, runVersion, lifecycleState, cancellationStatus, testOutcome, infrastructureOutcome, qualityGateStatus, snapshotDigest, queueStartedAt, queueDeadlineAt, createdBy, createdAt, updatedAt]
       properties:
         runId:
           type: string
@@ -1523,6 +1530,16 @@ components:
           enum: [NOT_EVALUATED, PASSED, FAILED]
         snapshotDigest:
           $ref: '#/components/schemas/Sha256Digest'
+        queueStartedAt:
+          type: [string, 'null']
+          format: date-time
+          description: Server-owned instant the run entered QUEUED. Null in CREATED.
+        queueDeadlineAt:
+          type: [string, 'null']
+          format: date-time
+          description: >-
+            Server-owned queue expiry, computed as queueStartedAt plus the configured queue timeout. Null in
+            CREATED; queue timing never starts before the run is QUEUED.
         createdBy:
           type: string
           minLength: 1

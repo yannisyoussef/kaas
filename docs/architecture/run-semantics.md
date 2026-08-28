@@ -1,6 +1,6 @@
 # Run Semantics
 
-**Status: PARTIALLY IMPLEMENTED.** TestRun intent, exact initial orthogonal dimensions, immutable RunSnapshot persistence, authenticated create/read/list/snapshot APIs, and the pure lifecycle transition oracle are implemented. Scheduling, lifecycle mutation handlers, attempts, messaging, SSE, quality evaluation, results, artifacts, and execution remain proposed and absent.
+**Status: PARTIALLY IMPLEMENTED.** TestRun intent, exact initial orthogonal dimensions, immutable RunSnapshot persistence, authenticated create/read/list/snapshot APIs, the pure lifecycle transition oracle, and the atomic `CREATED → QUEUED` scheduling transition with its execution attempt, queue-time dispatch intent, and transactional outbox are implemented. Broker publication, consumer inbox, worker claim, leases, lifecycle mutation beyond QUEUED, SSE, quality evaluation, results, artifacts, and execution remain proposed and absent.
 
 ## Requirements and constraints
 
@@ -48,7 +48,7 @@ Examples:
 
 ## Run and execution attempt
 
-A run is the user-visible orchestration identity. Its separately persisted immutable `RunSnapshot` captures exact input meaning. This pair is implemented for the CREATED state. An `ExecutionAttempt` is a proposed infrastructure assignment for that run and would contain `attemptId`, one-based `attemptNumber`, `assignmentEpoch`, lease data, command identity, and attempt evidence.
+A run is the user-visible orchestration identity. Its separately persisted immutable `RunSnapshot` captures exact input meaning. An `ExecutionAttempt` is one infrastructure assignment for that run. Attempt #1 is implemented and is created by scheduling in state `WAITING_FOR_CLAIM` with `attemptId` and one-based `attemptNumber` only: `assignmentEpoch`, lease data, and command identity are claim-time authority that does not exist until a worker claims the attempt, and are deliberately absent.
 
 The schemas model attempts now, but the MVP permits exactly one. Automatic infrastructure retry is disabled. A future retry must create a new `attemptId`, increment `attemptNumber` and `assignmentEpoch`, and publish a new immutable command. A user-requested rerun creates a new run until same-run retry policy is designed.
 

@@ -37,4 +37,17 @@ public record TestRun(
                 now,
                 now);
     }
+
+    public TestRun queued(Instant startedAt, Instant deadlineAt) {
+        if (lifecycleState != RunLifecycle.CREATED || !lifecycleState.canTransitionTo(RunLifecycle.QUEUED)) {
+            throw new IllegalStateException("Only a CREATED run can be queued.");
+        }
+        if (startedAt == null || deadlineAt == null || !deadlineAt.isAfter(startedAt)) {
+            throw new IllegalArgumentException("Queue timing is required.");
+        }
+        return new TestRun(
+                runId, projectId, Math.addExact(runVersion, 1), RunLifecycle.QUEUED, cancellationStatus,
+                testOutcome, infrastructureOutcome, qualityGateStatus, snapshotDigest, startedAt, deadlineAt,
+                createdBy, createdAt, startedAt);
+    }
 }

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "1.0",
+  "messageId": "10000000-0000-4000-8000-000000000001",
+  "messageType": "EXECUTION_DISPATCH",
+  "dispatchId": "20000000-0000-4000-8000-000000000002",
+  "occurredAt": "2026-08-28T12:00:00.123456Z",
+  "producer": "kaas.scheduler",
+  "organizationId": "30000000-0000-4000-8000-000000000003",
+  "projectId": "40000000-0000-4000-8000-000000000004",
+  "runId": "50000000-0000-4000-8000-000000000005",
+  "runVersion": 2,
+  "attemptId": "60000000-0000-4000-8000-000000000006",
+  "attemptNumber": 1,
+  "runSnapshotId": "50000000-0000-4000-8000-000000000005",
+  "runSnapshotDigest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+  "queueDeadlineAt": "2026-08-28T12:05:00.123456Z",
+  "payloadDigest": "sha256:c30ae0b3f489b4922b4f32bd12d2ef99325821c7a61e7121e1da640d1c3d6acf"
+}

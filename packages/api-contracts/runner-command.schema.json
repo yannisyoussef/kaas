@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kaas.dev/contracts/v1/runner-command.schema.json",
   "title": "ExecutionCommand",
-  "description": "Immutable, tenant-bound command for one KaaS execution attempt. This contract contains no raw secrets, host paths, transport headers, or runtime-specific launcher configuration.",
+  "description": "Proposed claim-time immutable command created only after a worker assignment and fencing epoch exist. It is never produced by queue-time scheduling and contains no raw secrets, host paths, transport headers, or runtime-specific launcher configuration.",
   "type": "object",
   "required": [
     "schemaVersion",

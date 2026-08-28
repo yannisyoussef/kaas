@@ -4,6 +4,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
 const contracts = [
+  { name: "execution-dispatch", schema: "../execution-dispatch.schema.json", fixtureDirectory: "../fixtures/execution-dispatch", maxBytes: 16 * 1024 },
   { name: "runner-command", schema: "../runner-command.schema.json", fixtureDirectory: "../fixtures/runner-command", maxBytes: 4 * 1024 * 1024 },
   { name: "runner-result", schema: "../runner-result.schema.json", fixtureDirectory: "../fixtures/runner-result", maxBytes: 16 * 1024 * 1024 },
   { name: "artifact-manifest", schema: "../artifact-manifest.schema.json", fixtureDirectory: "../fixtures/artifact-manifest", maxBytes: 1024 * 1024 },
@@ -22,7 +23,22 @@ const expectedKeywordByName = new Map([
   ["invalid-payload-type.json", "required"],
   ["invalid-message-type.json", "const"],
   ["invalid-stale-version.json", "minimum"],
+  ["invalid-dispatch-missing-identity.json", "required"],
+  ["invalid-dispatch-version.json", "const"],
+  ["invalid-dispatch-extra-capability.json", "additionalProperties"],
+  ["invalid-dispatch-digest.json", "pattern"],
+  ["invalid-dispatch-attempt.json", "const"],
+  ["invalid-dispatch-message-type.json", "const"],
+  ["invalid-dispatch-deadline.json", "format"],
 ]);
+
+// Authority that only exists after a worker claim. A queue-time DispatchIntent must never carry it.
+const CLAIM_TIME_AUTHORITY = [
+  "assignmentEpoch", "workerId", "worker", "lease", "leaseId", "leaseExpiresAt", "deadline",
+  "capability", "capabilities", "secretCapability", "sourceCapability", "secretValue", "payload",
+  "routingKey", "exchange", "objectStoreUrl", "presignedUrl", "presigned", "dockerConfig", "docker",
+  "image", "hostPath", "credential", "credentials", "token", "source", "feature", "script",
+];
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 addFormats(ajv);
@@ -60,13 +76,25 @@ for (const contract of contracts) {
 }
 
 validateSemanticInvariants(validFixtures);
-console.log("validated semantic invariants: chronology, summaries, identity binding, uniqueness, progress, and aggregate byte policies");
+console.log("validated semantic invariants: chronology, summaries, identity binding, uniqueness, progress, aggregate byte policies, and the queue-time dispatch authority boundary");
 
 function validateSemanticInvariants(fixtures) {
+  const dispatch = findFixture(fixtures, "execution-dispatch", "valid-canonical.json");
   const command = findFixture(fixtures, "runner-command", "valid-canonical.json");
   const result = findFixture(fixtures, "runner-result", "valid-canonical.json");
   const manifest = findFixture(fixtures, "artifact-manifest", "valid-canonical.json");
   const events = fixtures.get("live-event").map(({ value }) => value).sort((left, right) => left.sequence - right.sequence);
+
+  assert.ok(Date.parse(dispatch.occurredAt) < Date.parse(dispatch.queueDeadlineAt), "dispatch queue deadline must follow creation");
+  assert.equal(dispatch.runSnapshotId, dispatch.runId, "dispatch snapshot identity must equal its immutable run snapshot identity");
+  assert.equal(dispatch.attemptNumber, 1, "initial dispatch must reference attempt one");
+  assert.ok(dispatch.runVersion >= 2, "queue-time dispatch must carry the post-transition semantic run version");
+  for (const forbidden of CLAIM_TIME_AUTHORITY) {
+    assert.ok(!(forbidden in dispatch), `queue-time dispatch must not carry claim-time authority: ${forbidden}`);
+  }
+  for (const field of ["organizationId", "projectId", "runId", "attemptId", "attemptNumber"]) {
+    assert.ok(dispatch[field] !== undefined, `dispatch ${field} must bind tenant and attempt identity`);
+  }
 
   assert.ok(Date.parse(command.occurredAt) < Date.parse(command.deadline), "command deadline must follow creation");
   assert.notEqual(command.payload.environmentSnapshot.environmentId, command.payload.environmentSnapshot.environmentRevisionId, "environment identity and revision identity must remain distinct");

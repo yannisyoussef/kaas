@@ -2,7 +2,7 @@
 
 Status date: 2026-08-28
 
-This document describes repository reality after the TestRun intent and immutable RunSnapshot vertical slice. Product vision and execution architecture do not imply runtime capability.
+This document describes repository reality after the transactional run scheduling, execution attempt, and outbox vertical slice. Product vision and execution architecture do not imply runtime capability.
 
 ## Implemented and validated
 
@@ -24,13 +24,18 @@ This document describes repository reality after the TestRun intent and immutabl
 - Atomic TestRun intent creation in exact version-1 CREATED state, authenticated get/list, and immutable snapshot reads with strong ETags.
 - Exact FeatureRevision selection (1–1000), RunProfileRevision/EnvironmentRevision provenance, materialized effective typed configuration, metadata-only secret bindings, server-owned Karate engine metadata, and a versioned canonical digest.
 - PostgreSQL V3 normalized snapshot sealing, composite ownership FKs, initial TestRun invariant trigger, deferred one-to-one snapshot requirement, stable project history index, and no-delete evidence retention.
+- Internal transactional scheduling of the single CREATED to QUEUED transition: database-level compare-and-set on organization/run/state/expected runVersion, server-owned queue start and deadline, and semantic runVersion increment to 2.
+- Atomic scheduling bundle in one transaction: ExecutionAttempt #1 awaiting claim with no assignment, an immutable queue-time DispatchIntent bound to the sealed snapshot, a run lifecycle event, and exactly one unpublished outbox message.
+- Versioned canonical `kaas.execution-dispatch.v1` message digest over length-prefixed fields, independent of JSON serialization order, with a strict machine-validated `execution-dispatch` contract and forbidden-field fixtures.
+- PostgreSQL V4 narrowing of the V3 fail-closed TestRun guard to permit only the exact CREATED to QUEUED shape, insert-only attempt/dispatch/event/outbox tables, payload-to-column equality enforcement, and deferred bundle-completeness constraint triggers.
 - Semantic transactional run idempotency, including reordered feature-set replay and concurrent first use.
 - PostgreSQL-sealed normalized configuration aggregates that reject late child inserts and every post-seal parent/child update or delete.
 - Exact UTF-8 source preservation and SHA-256, 512 KiB source validation, 1 MiB streaming request limit, NUL/control/malformed-Unicode rejection, and no Karate parsing.
 - Flyway-managed PostgreSQL schema, JPA `ddl-auto=validate`, composite tenant/parent FKs, indexes, uniqueness/check constraints, Feature revision triggers, and deferred configuration aggregate sealing.
 - RFC 9457 Problem Details across MVC and security filters, request/trace correlation context, safe structured mutation logs, and Actuator HTTP metrics.
 - Signed-JWT HTTP, tenant-IDOR, concurrent idempotency, PostgreSQL Testcontainers, database immutability, transport/content boundaries, two ten-writer configuration revision races, canonical digest vectors, and ArchUnit tests.
-- Final Java 25/Gradle 9.7.1 clean verification: 30 API tests plus 1 runner test passed with zero failures/skips; contract, web, audit, Compose, and whitespace gates also passed.
+- Scheduling idempotency by state and invariants: ten concurrent schedulers yield exactly one semantic winner, one attempt, one dispatch, and one outbox message; repeat scheduling makes no new durable work.
+- Final Java 25/Gradle 9.7.1 clean verification: 51 API tests plus 1 runner test passed with zero failures/skips; contract, web, audit, Compose, and whitespace gates also passed.
 
 ## Scaffolded, not product functionality
 
@@ -43,22 +48,22 @@ This document describes repository reality after the TestRun intent and immutabl
 ## Designed or proposed
 
 - Future control-plane capabilities beyond versioned execution configuration and a separately deployable execution plane.
-- PostgreSQL schemas for future run scheduling, attempts, orchestration, and result metadata beyond the implemented CREATED intent/snapshot.
+- PostgreSQL schemas for orchestration and result metadata beyond the implemented CREATED/QUEUED scheduling bundle.
 - Per-run container isolation as a candidate only; it is not approved as a sufficient hostile-code boundary.
-- Product concepts beyond implemented CREATED run intent, including scheduling, execution, results, artifact storage, and quality gates.
+- Product concepts beyond implemented QUEUED scheduling, including execution, results, artifact storage, and quality gates.
 - Orthogonal run lifecycle, cancellation, test outcome, infrastructure outcome, and quality-gate semantics.
-- Optimistic run concurrency, attempt/assignment fencing, phase deadlines, at-least-once outbox/inbox semantics, retries/DLQ classification, structured results/artifacts, and bounded SSE replay.
+- Assignment fencing, leases, phase deadlines beyond the queue deadline, outbox publication and consumer inbox semantics, retries/DLQ classification, structured results/artifacts, and bounded SSE replay.
 
 ## Planned and intentionally absent
 
-- RabbitMQ publishers/consumers, topology, retries, DLQ, or idempotency behavior.
+- RabbitMQ publishers/consumers, topology, retries, DLQ, or broker idempotency behavior. The durable outbox exists but nothing reads or publishes it, and the API runtime dependency graph contains no AMQP client.
 - Redis.
 - SSE implementation.
 - Object-storage integration.
 - Secret values, provider mapping, storage, resolution, redemption, capability minting, or injection.
 - Karate dependencies, runner images, container launchers, or arbitrary test execution.
 - OpenTelemetry instrumentation.
-- Run lifecycle mutation handlers, execution outbox/inbox tables, lease reconciliation, quality evaluation, and durable event storage.
+- Lifecycle mutation handlers beyond CREATED to QUEUED, outbox publication relay, consumer inbox, lease reconciliation, quality evaluation, and durable run event storage beyond the scheduling transition record.
 
 ## Toolchain decisions
 
@@ -102,7 +107,7 @@ No item above is runtime behavior. KAA-004 remains open: Docker/host/daemon/netw
 
 ## Current vertical slice
 
-Authenticated, organization-scoped Project/FeatureRevision and Environment/RunProfile lifecycles plus CREATED TestRun/RunSnapshot persistence are implemented. The snapshot materializes exact revision provenance and effective configuration without resolving secrets. Scheduling and execution remain disabled until their separate protocol and hostile-execution release gates are implemented and validated.
+Authenticated, organization-scoped Project/FeatureRevision and Environment/RunProfile lifecycles, TestRun/RunSnapshot persistence, and the single CREATED to QUEUED scheduling transition are implemented. Scheduling is an internal application use case with no public endpoint; it durably records an attempt, an immutable queue-time dispatch intent, and an unpublished outbox message. Queue-time dispatch intent is deliberately not a claim-time execution command: no assignment epoch, lease, or runtime capability exists yet. Broker publication, worker claim, and execution remain disabled until their separate protocol and hostile-execution release gates are implemented and validated.
 
 ## Security gate
 
@@ -115,3 +120,5 @@ See `PROJECT_FEATURE_SLICE_REPORT.md` for the implemented API/schema decisions, 
 See `ENVIRONMENT_RUN_PROFILE_SLICE_REPORT.md` for the versioned-configuration model, canonicalization, database sealing, concurrency/idempotency evidence, and independent specialist reviews.
 
 See `TEST_RUN_INTENT_SLICE_REPORT.md` for the CREATED-only lifecycle boundary, snapshot canonicalization/persistence, API contract, security evidence, runner-command mapping, and independent reviews.
+
+See `SCHEDULING_OUTBOX_SLICE_REPORT.md` for the recovered scheduling slice: the queue-time/claim-time protocol correction, transactional bundle, compare-and-set concurrency evidence, persistence guards, contract changes, security review, and independent reviews.

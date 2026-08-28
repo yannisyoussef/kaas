@@ -1,6 +1,6 @@
 # Run State Machine
 
-**Status: PARTIALLY IMPLEMENTED.** The pure transition oracle and exact `none → CREATED` persistence are implemented. Every transition out of CREATED and all attempt/messaging/deadline handlers remain proposed.
+**Status: PARTIALLY IMPLEMENTED.** The pure transition oracle, exact `none → CREATED` persistence, and the atomic `CREATED → QUEUED` scheduling transition are implemented. Every transition out of QUEUED, and all claim/lease/messaging/deadline handlers, remain proposed.
 
 ## State flow
 
@@ -33,7 +33,7 @@ Every row assumes authenticated/authorized internal actors and schema/size valid
 | Current | Event → result | Actor | Preconditions and expected version | Durable atomic effects | Emitted durable event | Retry / idempotency | Timeout / terminal | Invalid or race behavior |
 |---|---|---|---|---|---|---|---|---|
 | none | `CREATE_RUN` → `CREATED` | API | Authorized project; exact owned revisions; valid scoped idempotency key | TestRun + sealed snapshot + key/fingerprint/response metadata, `runVersion=1` | none in this bounded slice | Same key+fingerprint replays original; same key+different fingerprint is 409 | No queue deadline; nonterminal | Advisory transaction lock serializes concurrent same-key creation; loser reads original |
-| `CREATED` | `SCHEDULE` → `QUEUED` | Scheduler | **PROPOSED:** `expectedRunVersion`; no cancellation; complete execution-attempt plan | Create attempt 1, command ID/digest, `queuedAt`, queue deadline, command outbox; increment version | `RUN_STATE_CHANGED` | Duplicate scheduling at new version is no-op; outbox republishes same message ID | Queue-wait timer starts here; nonterminal | Cancellation CAS first means schedule is stale |
+| `CREATED` | `SCHEDULE` → `QUEUED` | Scheduler (internal) | **IMPLEMENTED:** `expectedRunVersion` compare-and-set; no cancellation | Create attempt 1 awaiting claim, immutable queue-time DispatchIntent + digest, `queuedAt`, queue deadline, lifecycle event, unpublished outbox row; increment version | `RUN_STATE_CHANGED` persisted; nothing published | Repeat scheduling observes already QUEUED and writes nothing; concurrent schedulers yield one winner | Queue-wait timer starts here; nonterminal | Cancellation blocks scheduling; no production trigger invokes the scheduler yet |
 | `CREATED`,`QUEUED` | `REQUEST_CANCEL` → `COMPLETED` | API | `expectedRunVersion`; not processing/terminal | Record request+ack times; `NOT_AVAILABLE/CANCELLED`; cancel idempotency response | `RUN_STATE_CHANGED`, `EXECUTION_COMPLETED` | Exact repeat returns same representation; conflicting key is 409 | Immediate terminal | Claim/schedule/result after winning cancel is stale and acknowledged without effect |
 | `QUEUED` | `CLAIM` → `CLAIMED` | Worker gateway | Current attempt; queue deadline open; `expectedRunVersion`; new active epoch | Store lease owner audit, epoch, expiry, last-seen; increment version | `RUN_STATE_CHANGED` | Same attempt+epoch returns existing claim; competing claim rejected | 30s lease; nonterminal | Cancel/queue-timeout CAS first rejects claim |
 | `CLAIMED` | `HEARTBEAT` → `CLAIMED` | Worker gateway | Exact attempt+epoch; lease not fenced | Update `lastHeartbeatAt` and `leaseExpiresAt` only | none | Repeated heartbeat is safe | Extends lease; nonterminal | Old epoch/deadline/terminal heartbeat is stale; no version change |

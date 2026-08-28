@@ -48,7 +48,8 @@ val verifyNoExecutionDependencies = tasks.register("verifyNoExecutionDependencie
                     it.startsWith("software.amazon.awssdk:secretsmanager") ||
                     it.startsWith("com.amazonaws:aws-java-sdk-secretsmanager") ||
                     it.startsWith("com.azure:azure-security-keyvault") ||
-                    it.startsWith("com.google.cloud:google-cloud-secretmanager")
+                    it.startsWith("com.google.cloud:google-cloud-secretmanager") ||
+                    it.startsWith("org.testcontainers:")
             }
         check(forbidden.isEmpty()) { "Forbidden control-plane dependencies found in apps/api: $forbidden" }
     }
