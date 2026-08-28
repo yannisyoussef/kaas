@@ -12,7 +12,7 @@ Broker ordering is not a correctness dependency. A message is accepted only when
 
 | Boundary | Key and conceptual storage | Exact duplicate | Conflict |
 |---|---|---|---|
-| API run creation | Scoped `(organization, principal, operation, project, Idempotency-Key)` plus normalized request fingerprint and stored response, retained 24h | Return original HTTP status/body/Location/ETag | Same scope/key with different fingerprint → 409 `IDEMPOTENCY_CONFLICT` |
+| API run creation | Scoped `(organization, principal, operation, project, Idempotency-Key)` plus normalized request fingerprint and stored response; implemented keys currently have no automatic expiry | Return original HTTP status/body/Location/ETag | Same scope/key with different fingerprint → 409 `IDEMPOTENCY_CONFLICT` |
 | Command publication | Transactional outbox row/message ID and immutable payload digest | Republish same message ID/bytes until broker confirms | Same outbox/message ID with different digest → stop publication and security alert |
 | Command consumption | Consumer inbox uniqueness on consumer identity + `messageId`; command ID/digest checked against assignment | ACK after previously committed effect | Same ID with different digest or wrong tenant/attempt/epoch → quarantine/DLQ |
 | Execution claim | Attempt ID + `assignmentEpoch` and active-claim invariant | Return existing lease to same assignment | Competing worker/epoch → reject; stale epoch cannot renew |

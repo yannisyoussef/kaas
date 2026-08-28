@@ -4,8 +4,9 @@ info:
   version: 1.0.0
   description: >-
     Project, immutable FeatureRevision, SecretReference metadata, immutable EnvironmentRevision, and immutable
-    RunProfileRevision operations are implemented. Run operations remain proposed contracts only. Authentication and
-    tenant authorization are required; arbitrary execution remains disabled. Implemented JSON mutation requests are
+    RunProfileRevision operations and TestRun create/get/list/snapshot are implemented. Run cancellation, events,
+    results, and artifacts remain proposed contracts only. Authentication and tenant authorization are required;
+    arbitrary execution remains disabled. Implemented JSON mutation requests are
     limited to 1048576 encoded bytes, and decoded Feature source is limited to 524288 UTF-8 bytes.
   license:
     name: All rights reserved
@@ -26,7 +27,7 @@ tags:
   - name: Run Profiles
     description: Implemented project-scoped RunProfile identities whose immutable revisions pin EnvironmentRevisions.
   - name: Runs
-    description: Proposed asynchronous run operations. Every lookup is authorized against trusted organization/project ownership.
+    description: Implemented CREATED intent/snapshot operations plus explicitly proposed lifecycle/result operations. Every lookup is authorized against trusted organization/project ownership.
 paths:
   /api/v1/projects:
     get:
@@ -562,11 +563,12 @@ paths:
     post:
       tags: [Runs]
       operationId: createRun
-      summary: Create an asynchronous run
+      summary: Persist a CREATED test-run intent and immutable snapshot
+      x-kaas-implementation-status: IMPLEMENTED
       description: >-
-        Atomically records a CREATED run, its immutable input intent, and the scoped idempotency record. The
-        response does not imply that a command was published or that the run reached QUEUED. An identical replay
-        within the 24-hour key-retention window returns the original status, body, Location, and ETag. Reusing the
+        Atomically records a CREATED run, its immutable execution snapshot, and the scoped idempotency record. The
+        response does not imply that a command was generated or published, or that the run reached QUEUED. An
+        identical replay returns the original status, body, Location, and ETag. Reusing the
         same key in the same authenticated organization, operation, and project scope with a different normalized
         request fingerprint returns an idempotency conflict.
       parameters:
@@ -585,14 +587,18 @@ paths:
               $ref: '#/components/headers/RunLocation'
             ETag:
               $ref: '#/components/headers/RunEtag'
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Run'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -601,8 +607,25 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/ValidationProblem'
-        '429':
-          $ref: '#/components/responses/RateLimited'
+    get:
+      tags: [Runs]
+      operationId: listProjectRuns
+      summary: List test runs in one authorized project
+      x-kaas-implementation-status: IMPLEMENTED
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Stable page ordered by createdAt descending and runId descending.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
   /api/v1/runs/{runId}:
     parameters:
       - $ref: '#/components/parameters/RunId'
@@ -610,22 +633,48 @@ paths:
       tags: [Runs]
       operationId: getRun
       summary: Get the canonical run representation
+      x-kaas-implementation-status: IMPLEMENTED
       responses:
         '200':
           description: Current run state and independent outcome dimensions.
           headers:
             ETag:
               $ref: '#/components/headers/RunEtag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Run'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/runs/{runId}/snapshot:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+    get:
+      tags: [Runs]
+      operationId: getRunSnapshot
+      summary: Get the immutable materialized execution snapshot
+      x-kaas-implementation-status: IMPLEMENTED
+      description: >-
+        Returns exact revision provenance, typed effective non-secret configuration, metadata-only secret references,
+        profile settings, and the server-owned engine descriptor. It never resolves secret values or creates an
+        execution command.
+      responses:
+        '200':
+          description: The persisted snapshot; the read path does not re-resolve mutable inputs.
+          headers:
+            ETag:
+              description: Strong tag derived from the immutable snapshot digest.
+              schema: {type: string}
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunSnapshot'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /api/v1/runs/{runId}/cancellations:
     parameters:
       - $ref: '#/components/parameters/RunId'
@@ -633,6 +682,7 @@ paths:
       tags: [Runs]
       operationId: cancelRun
       summary: Request cancellation without deleting the run
+      x-kaas-implementation-status: PROPOSED
       description: >-
         Creates the single cancellation intent for a run. Repeating an accepted request is idempotent. CREATED or
         QUEUED may complete cancellation immediately; an active worker phase transitions toward STOPPING. A request
@@ -687,6 +737,7 @@ paths:
       tags: [Runs]
       operationId: streamRunEvents
       summary: Stream durable low-volume run events
+      x-kaas-implementation-status: PROPOSED
       description: >-
         Authentication and run authorization are re-evaluated for every connection. Last-Event-ID is the decimal
         per-run sequence last processed by the client; replay starts strictly after it. Heartbeats are comment frames
@@ -732,6 +783,7 @@ paths:
       tags: [Runs]
       operationId: getRunResults
       summary: Get canonical structured results and control-plane quality evaluation
+      x-kaas-implementation-status: PROPOSED
       responses:
         '200':
           description: Accepted execution evidence plus separately evaluated quality-gate status.
@@ -754,6 +806,7 @@ paths:
       tags: [Runs]
       operationId: listRunArtifacts
       summary: List verified artifact metadata
+      x-kaas-implementation-status: PROPOSED
       description: Returns metadata only. Authorized, expiring download capabilities are minted separately and never supplied by the runner.
       responses:
         '200':
@@ -829,7 +882,7 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      description: Opaque client key scoped to authenticated organization, principal, operation, and target resource path. Implemented creation keys currently have no expiry; proposed Run operations define retention separately.
+      description: Opaque client key scoped to authenticated organization, principal, operation, and target resource path. Implemented creation keys currently have no expiry.
       schema:
         type: string
         minLength: 8
@@ -870,6 +923,8 @@ components:
   responses:
     BadRequest:
       description: JSON syntax, duplicate keys, or request encoding is invalid.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
       content:
         application/problem+json:
           schema: {$ref: '#/components/schemas/ProblemDetail'}
@@ -879,59 +934,78 @@ components:
         WWW-Authenticate:
           description: Bearer authentication challenge.
           schema: {type: string, const: Bearer}
+        Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
     Forbidden:
       description: The authenticated principal is not allowed to perform the operation. Deployments may use 404 to avoid existence disclosure.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
     NotFound:
       description: The authorized resource does not exist, or existence is intentionally concealed.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
     IdempotencyConflict:
       description: The scoped key was already used with a different normalized request fingerprint.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
     Conflict:
       description: Idempotency or database uniqueness conflict.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
       content:
         application/problem+json:
           schema: {$ref: '#/components/schemas/ProblemDetail'}
     LifecycleConflict:
       description: The requested lifecycle operation lost a race, is invalid from the current state, or the run is already terminal.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
     ResultNotReady:
       description: Canonical result processing has not completed.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
     EventHistoryGap:
       description: The Last-Event-ID predates retained history. The problem extensions provide earliestSequence and latestSequence; refetch run/results/artifacts.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/EventHistoryGapProblem'
     ValidationProblem:
       description: Request validation failed. Submitted values are never echoed.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ValidationProblem'
     PayloadTooLarge:
       description: The encoded or decoded request exceeds the contractual size limit.
+      headers:
+        Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
       content:
         application/problem+json:
           schema:
@@ -1363,8 +1437,8 @@ components:
     CreateRunRequest:
       type: object
       description: >-
-        PROPOSED profile-based run intent. The immutable RunProfileRevision supplies its pinned EnvironmentRevision and
-        execution settings. Explicit-mode run creation remains unresolved and is not represented here.
+        IMPLEMENTED profile-based run intent. The immutable RunProfileRevision supplies its pinned EnvironmentRevision
+        and all execution settings. Client order is non-semantic; duplicate revision IDs are rejected.
       required: [featureRevisionIds, runProfileRevisionId]
       properties:
         featureRevisionIds:
@@ -1421,7 +1495,10 @@ components:
       additionalProperties: false
     Run:
       type: object
-      required: [runId, projectId, runVersion, lifecycleState, cancellation, outcomes, createdAt, updatedAt, queueDeadlineAt, links]
+      description: >-
+        Current public TestRun aggregate. The implemented create slice always returns version 1 in CREATED with no
+        attempt or queue deadline; queue timing starts only when a future scheduler performs CREATED to QUEUED.
+      required: [runId, projectId, runVersion, lifecycleState, cancellationStatus, testOutcome, infrastructureOutcome, qualityGateStatus, snapshotDigest, createdBy, createdAt, updatedAt]
       properties:
         runId:
           type: string
@@ -1434,67 +1511,95 @@ components:
           minimum: 1
         lifecycleState:
           enum: [CREATED, QUEUED, CLAIMED, PROVISIONING, RUNNING, COLLECTING_RESULTS, PROCESSING_RESULTS, STOPPING, COMPLETED]
-        cancellation:
-          $ref: '#/components/schemas/Cancellation'
-        outcomes:
-          $ref: '#/components/schemas/RunOutcomes'
-        currentAttempt:
-          oneOf:
-            - $ref: '#/components/schemas/AttemptReference'
-            - type: 'null'
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-        queueDeadlineAt:
-          type: string
-          format: date-time
-        links:
-          $ref: '#/components/schemas/RunLinks'
-      additionalProperties: false
-    Cancellation:
-      type: object
-      required: [status]
-      properties:
-        status:
+        cancellationStatus:
           enum: [NOT_REQUESTED, REQUESTED, ACKNOWLEDGED]
-        requestedAt:
-          type: string
-          format: date-time
-        acknowledgedAt:
-          type: string
-          format: date-time
-        stopCause:
-          enum: [USER_REQUESTED, PROVISIONING_TIMEOUT, EXECUTION_TIMEOUT, RESULT_COLLECTION_TIMEOUT]
-      additionalProperties: false
-    AttemptReference:
-      type: object
-      required: [attemptId, attemptNumber, assignmentEpoch]
-      properties:
-        attemptId:
-          type: string
-          format: uuid
-        attemptNumber:
-          type: integer
-          minimum: 1
-        assignmentEpoch:
-          type: integer
-          minimum: 1
-      additionalProperties: false
-    RunOutcomes:
-      type: object
-      required: [testOutcome, infrastructureOutcome, qualityGate]
-      properties:
         testOutcome:
           type: [string, 'null']
           enum: [PASSED, FAILED, NOT_AVAILABLE, null]
         infrastructureOutcome:
           type: [string, 'null']
           enum: [SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, null]
-        qualityGate:
-          $ref: '#/components/schemas/QualityGateEvaluation'
+        qualityGateStatus:
+          enum: [NOT_EVALUATED, PASSED, FAILED]
+        snapshotDigest:
+          $ref: '#/components/schemas/Sha256Digest'
+        createdBy:
+          type: string
+          minLength: 1
+          maxLength: 255
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    RunPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMetadata'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/Run'}
+    RunSnapshot:
+      type: object
+      required: [runId, projectId, snapshotVersion, features, environment, runProfile, effectiveConfiguration, secretBindings, selection, parallelism, scenarioRetry, executionTimeoutSeconds, artifactPolicy, engine, snapshotDigest]
+      properties:
+        runId: {type: string, format: uuid}
+        projectId: {type: string, format: uuid}
+        snapshotVersion: {type: integer, const: 1}
+        features:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: {$ref: '#/components/schemas/SnapshotFeature'}
+        environment: {$ref: '#/components/schemas/SnapshotRevision'}
+        runProfile: {$ref: '#/components/schemas/SnapshotRevision'}
+        effectiveConfiguration:
+          type: array
+          maxItems: 500
+          items: {$ref: '#/components/schemas/ConfigurationVariable'}
+        secretBindings:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/SecretBinding'}
+        selection: {$ref: '#/components/schemas/ProfileSelection'}
+        parallelism: {type: integer, minimum: 1, maximum: 32}
+        scenarioRetry: {$ref: '#/components/schemas/ScenarioRetry'}
+        executionTimeoutSeconds: {type: integer, minimum: 1, maximum: 3600}
+        artifactPolicy: {$ref: '#/components/schemas/ArtifactPolicy'}
+        engine: {$ref: '#/components/schemas/EngineDescriptor'}
+        snapshotDigest: {$ref: '#/components/schemas/Sha256Digest'}
+      additionalProperties: false
+    SnapshotFeature:
+      type: object
+      required: [featureId, revisionId, revisionNumber, logicalPath, sourceDigest]
+      properties:
+        featureId: {type: string, format: uuid}
+        revisionId: {type: string, format: uuid}
+        revisionNumber: {type: integer, minimum: 1}
+        logicalPath: {type: string, minLength: 1, maxLength: 512}
+        sourceDigest: {$ref: '#/components/schemas/Sha256Digest'}
+      additionalProperties: false
+    SnapshotRevision:
+      type: object
+      required: [resourceId, revisionId, revisionNumber, contentDigest]
+      properties:
+        resourceId: {type: string, format: uuid}
+        revisionId: {type: string, format: uuid}
+        revisionNumber: {type: integer, minimum: 1}
+        contentDigest: {$ref: '#/components/schemas/Sha256Digest'}
+      additionalProperties: false
+    EngineDescriptor:
+      type: object
+      required: [engine, version]
+      properties:
+        engine: {type: string, const: KARATE}
+        version:
+          type: string
+          pattern: '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$'
       additionalProperties: false
     QualityGateEvaluation:
       type: object
@@ -1537,21 +1642,6 @@ components:
             - type: boolean
         status:
           enum: [PASSED, FAILED]
-      additionalProperties: false
-    RunLinks:
-      type: object
-      required: [self, events, results, artifacts, cancellations]
-      properties:
-        self:
-          type: string
-        events:
-          type: string
-        results:
-          type: string
-        artifacts:
-          type: string
-        cancellations:
-          type: string
       additionalProperties: false
     RunResults:
       type: object

@@ -448,6 +448,26 @@ class JdbcConfigurationRepository implements ConfigurationRepository {
     }
 
     @Override
+    public Optional<RunProfileRevision> findRunProfileRevisionById(
+            UUID organizationId, UUID projectId, UUID revisionId) {
+        return runProfileRevisionHeader(
+                        """
+                        select revision_id, run_profile_id, project_id, revision_number,
+                               environment_revision_id, parallelism, retry_max_attempts,
+                               retry_delay_milliseconds, execution_timeout_seconds,
+                               max_artifact_bytes, max_total_bytes, content_sha256,
+                               created_by, created_at
+                          from run_profile_revisions
+                         where organization_id = ? and project_id = ?
+                           and revision_id = ? and sealed = true
+                        """,
+                        organizationId,
+                        projectId,
+                        revisionId)
+                .map(header -> runProfileRevision(organizationId, header));
+    }
+
+    @Override
     public Optional<RunProfileRevision> findRunProfileRevisionByNumber(
             UUID organizationId, UUID projectId, UUID runProfileId, long revisionNumber) {
         return runProfileRevisionHeader(

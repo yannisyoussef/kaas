@@ -88,6 +88,9 @@ public interface ConfigurationRepository {
     Optional<RunProfileRevision> findRunProfileRevision(
             UUID organizationId, UUID projectId, UUID runProfileId, UUID revisionId);
 
+    Optional<RunProfileRevision> findRunProfileRevisionById(
+            UUID organizationId, UUID projectId, UUID revisionId);
+
     Optional<RunProfileRevision> findRunProfileRevisionByNumber(
             UUID organizationId, UUID projectId, UUID runProfileId, long revisionNumber);
 

@@ -1273,6 +1273,577 @@ class ConfigurationHttpIntegrationTests {
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
 
+    @Test
+    void runIntentCreatesOnlyASealedReproducibleSnapshotWithSafeTenantScopedReads() throws Exception {
+        UUID organizationA = UUID.randomUUID();
+        UUID organizationB = UUID.randomUUID();
+        String tokenA = token(organizationA, "run-creator");
+        String tokenB = token(organizationB, "other-tenant");
+        String projectA = createProject(tokenA);
+        String projectB = createProject(tokenB);
+
+        JsonNode featureA = json(post(
+                "/api/v1/projects/" + projectA + "/features",
+                tokenA,
+                key(),
+                json(Map.of(
+                        "name", "Run feature A",
+                        "logicalPath", "features/a.feature",
+                        "source", "Feature: A\nScenario: one\n* match 1 == 1\n"))));
+        JsonNode featureZ = json(post(
+                "/api/v1/projects/" + projectA + "/features",
+                tokenA,
+                key(),
+                json(Map.of(
+                        "name", "Run feature Z",
+                        "logicalPath", "features/z.feature",
+                        "source", "Feature: Z\nScenario: one\n* match 1 == 1\n"))));
+        JsonNode foreignFeature = json(post(
+                "/api/v1/projects/" + projectB + "/features",
+                tokenB,
+                key(),
+                json(Map.of(
+                        "name", "Foreign run feature",
+                        "logicalPath", "foreign.feature",
+                        "source", "Feature: foreign\nScenario: one\n* match 1 == 1\n"))));
+        String featureAId = featureA.at("/feature/featureId").stringValue();
+        String featureARevision = featureA.at("/initialRevision/revisionId").stringValue();
+        String featureZRevision = featureZ.at("/initialRevision/revisionId").stringValue();
+        String foreignFeatureRevision = foreignFeature.at("/initialRevision/revisionId").stringValue();
+
+        String secretId = json(post(
+                        secretPath(projectA), tokenA, key(), json(Map.of("name", "runClientSecret"))))
+                .get("secretReferenceId")
+                .stringValue();
+        JsonNode environment = json(post(
+                environmentPath(projectA),
+                tokenA,
+                key(),
+                environmentBody(
+                        "Run environment",
+                        List.of(
+                                variable("timeout", "INTEGER", 10_000),
+                                variable("baseUrl", "STRING", "https://environment.example"),
+                                variable("enabled", "BOOLEAN", true)),
+                        List.of(binding("clientSecret", secretId)))));
+        String environmentId = environment.at("/environment/environmentId").stringValue();
+        String environmentRevision = environment.at("/initialRevision/revisionId").stringValue();
+        JsonNode profile = json(post(
+                profilePath(projectA),
+                tokenA,
+                key(),
+                profileBody(
+                        "Run profile",
+                        environmentRevision,
+                        List.of("@smoke", "@regression"),
+                        4,
+                        2,
+                        250,
+                        300,
+                        List.of("RAW_RESULT", "EXECUTION_LOG"),
+                        1_000,
+                        2_000,
+                        List.of(variable("baseUrl", "STRING", "https://override.example")))));
+        String profileId = profile.at("/runProfile/runProfileId").stringValue();
+        String profileRevision = profile.at("/initialRevision/revisionId").stringValue();
+
+        String runPath = "/api/v1/projects/" + projectA + "/runs";
+        String request = json(Map.of(
+                "featureRevisionIds", List.of(featureZRevision, featureARevision),
+                "runProfileRevisionId", profileRevision));
+        String runKey = key();
+        assertProblem(post(runPath, null, runKey, request), 401, "UNAUTHENTICATED");
+        assertProblem(get(runPath, null), 401, "UNAUTHENTICATED");
+        var created = post(runPath, tokenA, runKey, request);
+        assertThat(created.statusCode()).isEqualTo(202);
+        assertThat(created.headers().firstValue("ETag")).contains("\"run-1\"");
+        assertThat(created.headers().firstValue("Idempotency-Replayed")).contains("false");
+        assertThat(created.headers().firstValue("Cache-Control"))
+                .hasValueSatisfying(value -> assertThat(value).contains("no-store"));
+        JsonNode run = json(created);
+        String runId = run.get("runId").stringValue();
+        assertThat(created.headers().firstValue("Location")).contains("/api/v1/runs/" + runId);
+        assertThat(run.get("projectId").stringValue()).isEqualTo(projectA);
+        assertThat(run.get("runVersion").asInt()).isEqualTo(1);
+        assertThat(run.get("lifecycleState").stringValue()).isEqualTo("CREATED");
+        assertThat(run.get("cancellationStatus").stringValue()).isEqualTo("NOT_REQUESTED");
+        assertThat(run.get("qualityGateStatus").stringValue()).isEqualTo("NOT_EVALUATED");
+        assertThat(run.get("testOutcome").isNull()).isTrue();
+        assertThat(run.get("infrastructureOutcome").isNull()).isTrue();
+        assertThat(run.get("queueStartedAt").isNull()).isTrue();
+        assertThat(run.get("queueDeadlineAt").isNull()).isTrue();
+        assertThat(run.has("currentAttempt")).isFalse();
+        assertThat(run.get("createdBy").stringValue()).isEqualTo("run-creator");
+        assertThat(run.get("createdAt")).isEqualTo(run.get("updatedAt"));
+
+        var fetched = get("/api/v1/runs/" + runId, tokenA);
+        assertThat(fetched.statusCode()).isEqualTo(200);
+        assertThat(fetched.body()).isEqualTo(created.body());
+        assertThat(fetched.headers().firstValue("ETag")).contains("\"run-1\"");
+        assertThat(fetched.headers().firstValue("Cache-Control")).contains("no-store");
+        var initialList = get(runPath, tokenA);
+        assertThat(initialList.headers().firstValue("Cache-Control")).contains("no-store");
+        assertThat(json(initialList).at("/items/0/runId").stringValue()).isEqualTo(runId);
+
+        var snapshotResponse = get("/api/v1/runs/" + runId + "/snapshot", tokenA);
+        assertThat(snapshotResponse.statusCode()).isEqualTo(200);
+        assertThat(snapshotResponse.headers().firstValue("Cache-Control")).contains("no-store");
+        String originalSnapshotBody = snapshotResponse.body();
+        JsonNode snapshot = json(snapshotResponse);
+        assertThat(snapshot.get("snapshotVersion").asInt()).isEqualTo(1);
+        assertThat(snapshot.get("snapshotDigest").stringValue()).matches("sha256:[a-f0-9]{64}");
+        assertThat(snapshot.at("/environment/resourceId").stringValue()).isEqualTo(environmentId);
+        assertThat(snapshot.at("/environment/revisionId").stringValue()).isEqualTo(environmentRevision);
+        assertThat(snapshot.at("/environment/revisionNumber").asInt()).isEqualTo(1);
+        assertThat(snapshot.at("/environment/contentDigest").stringValue()).matches("sha256:[a-f0-9]{64}");
+        assertThat(snapshot.at("/runProfile/resourceId").stringValue()).isEqualTo(profileId);
+        assertThat(snapshot.at("/runProfile/revisionId").stringValue()).isEqualTo(profileRevision);
+        assertThat(snapshot.at("/runProfile/revisionNumber").asInt()).isEqualTo(1);
+        assertThat(snapshot.at("/runProfile/contentDigest").stringValue()).matches("sha256:[a-f0-9]{64}");
+        assertThat(snapshot.at("/features/0/featureId").stringValue()).isEqualTo(featureAId);
+        assertThat(snapshot.at("/features/0/revisionId").stringValue()).isEqualTo(featureARevision);
+        assertThat(snapshot.at("/features/0/revisionNumber").asInt()).isEqualTo(1);
+        assertThat(snapshot.at("/features/0/sourceDigest").stringValue()).matches("sha256:[a-f0-9]{64}");
+        assertThat(snapshot.at("/features/0/logicalPath").stringValue()).isEqualTo("features/a.feature");
+        assertThat(snapshot.at("/features/1/logicalPath").stringValue()).isEqualTo("features/z.feature");
+        assertThat(snapshot.at("/effectiveConfiguration/0/key").stringValue()).isEqualTo("baseUrl");
+        assertThat(snapshot.at("/effectiveConfiguration/0/value").stringValue())
+                .isEqualTo("https://override.example");
+        assertThat(snapshot.at("/secretBindings/0/secretReferenceId").stringValue()).isEqualTo(secretId);
+        assertThat(snapshot.at("/selection/tags").toString()).isEqualTo("[\"@regression\",\"@smoke\"]");
+        assertThat(snapshot.get("parallelism").asInt()).isEqualTo(4);
+        assertThat(snapshot.at("/scenarioRetry/maxAttempts").asInt()).isEqualTo(2);
+        assertThat(snapshot.at("/scenarioRetry/delayMilliseconds").asInt()).isEqualTo(250);
+        assertThat(snapshot.get("executionTimeoutSeconds").asInt()).isEqualTo(300);
+        assertThat(snapshot.at("/artifactPolicy/types").toString())
+                .isEqualTo("[\"EXECUTION_LOG\",\"RAW_RESULT\"]");
+        assertThat(snapshot.at("/artifactPolicy/maxArtifactBytes").asLong()).isEqualTo(1_000);
+        assertThat(snapshot.at("/artifactPolicy/maxTotalBytes").asLong()).isEqualTo(2_000);
+        assertThat(snapshot.at("/engine/engine").stringValue()).isEqualTo("KARATE");
+        assertThat(snapshot.at("/engine/version").stringValue()).isEqualTo("2.0.0");
+        assertThat(snapshot.toString()).doesNotContain("Feature: A", "secretValue", "provider", "capability");
+
+        String reorderedRequest = json(Map.of(
+                "runProfileRevisionId", profileRevision,
+                "featureRevisionIds", List.of(featureARevision, featureZRevision)));
+        var replay = post(runPath, tokenA, runKey, reorderedRequest);
+        assertThat(replay.statusCode()).isEqualTo(202);
+        assertThat(replay.body()).isEqualTo(created.body());
+        assertThat(replay.headers().firstValue("Location")).isEqualTo(created.headers().firstValue("Location"));
+        assertThat(replay.headers().firstValue("Idempotency-Replayed")).contains("true");
+        assertProblem(
+                post(
+                        runPath,
+                        tokenA,
+                        runKey,
+                        json(Map.of(
+                                "runProfileRevisionId", profileRevision,
+                                "featureRevisionIds", List.of(featureARevision)))),
+                409,
+                "IDEMPOTENCY_CONFLICT");
+
+        String concurrentKey = key();
+        CyclicBarrier runBarrier = new CyclicBarrier(2);
+        List<HttpResponse<String>> concurrentRuns;
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var futures = IntStream.range(0, 2)
+                    .mapToObj(ignored -> executor.submit(() -> {
+                        runBarrier.await();
+                        return post(runPath, tokenA, concurrentKey, request);
+                    }))
+                    .toList();
+            concurrentRuns = futures.stream()
+                    .map(future -> {
+                        try {
+                            return future.get(30, TimeUnit.SECONDS);
+                        } catch (Exception exception) {
+                            throw new AssertionError(exception);
+                        }
+                    })
+                    .toList();
+        }
+        assertThat(concurrentRuns).allMatch(response -> response.statusCode() == 202);
+        assertThat(concurrentRuns.get(0).body()).isEqualTo(concurrentRuns.get(1).body());
+        assertThat(concurrentRuns.get(0).headers().firstValue("Location"))
+                .isEqualTo(concurrentRuns.get(1).headers().firstValue("Location"));
+        assertThat(concurrentRuns.get(0).headers().firstValue("ETag"))
+                .isEqualTo(concurrentRuns.get(1).headers().firstValue("ETag"));
+        assertThat(concurrentRuns.stream()
+                        .filter(response -> response.headers()
+                                .firstValue("Idempotency-Replayed")
+                                .map("true"::equals)
+                                .orElse(false))
+                        .count())
+                .isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                        """
+                        select count(*) from api_idempotency_keys
+                         where organization_id = ? and principal_id = 'run-creator'
+                           and operation = 'createRun' and scope_path = ? and idempotency_key = ?
+                        """,
+                        Integer.class,
+                        organizationA,
+                        "/projects/" + projectA + "/runs",
+                        concurrentKey))
+                .isEqualTo(1);
+
+        var semanticallySame = post(runPath, tokenA, key(), reorderedRequest);
+        assertThat(semanticallySame.statusCode()).isEqualTo(202);
+        assertThat(json(semanticallySame).get("runId").stringValue()).isNotEqualTo(runId);
+        assertThat(json(semanticallySame).get("snapshotDigest").stringValue())
+                .isEqualTo(run.get("snapshotDigest").stringValue());
+        JsonNode runPageZero = json(get(runPath + "?page=0&size=2", tokenA));
+        JsonNode runPageOne = json(get(runPath + "?page=1&size=2", tokenA));
+        assertThat(runPageZero.get("totalElements").asInt()).isEqualTo(3);
+        assertThat(runPageZero.get("items").size()).isEqualTo(2);
+        assertThat(runPageOne.get("items").size()).isEqualTo(1);
+        assertThat(runPageZero.at("/items/0/runId").stringValue())
+                .isNotEqualTo(runPageZero.at("/items/1/runId").stringValue())
+                .isNotEqualTo(runPageOne.at("/items/0/runId").stringValue());
+        var otherPrincipal = post(runPath, token(organizationA, "run-creator-two"), runKey, request);
+        assertThat(otherPrincipal.statusCode()).isEqualTo(202);
+        assertThat(json(otherPrincipal).get("runId").stringValue()).isNotEqualTo(runId);
+        var oneFeatureRun = post(
+                runPath,
+                tokenA,
+                key(),
+                json(Map.of(
+                        "runProfileRevisionId", profileRevision,
+                        "featureRevisionIds", List.of(featureARevision))));
+        assertThat(oneFeatureRun.statusCode()).isEqualTo(202);
+
+        assertProblem(
+                post(
+                        runPath,
+                        tokenA,
+                        key(),
+                        json(Map.of(
+                                "runProfileRevisionId", profileRevision,
+                                "featureRevisionIds", List.of(featureARevision, featureARevision)))),
+                422,
+                "VALIDATION_FAILED");
+        assertProblem(
+                post(
+                        runPath,
+                        tokenA,
+                        key(),
+                        json(Map.of(
+                                "runProfileRevisionId", profileRevision,
+                                "featureRevisionIds", List.of(featureARevision, foreignFeatureRevision)))),
+                404,
+                "NOT_FOUND");
+        JsonNode foreignEnvironment = json(post(
+                environmentPath(projectB),
+                tokenB,
+                key(),
+                environmentBody("Foreign run environment", List.of(), List.of())));
+        JsonNode foreignProfile = json(post(
+                profilePath(projectB),
+                tokenB,
+                key(),
+                profileBody(
+                        "Foreign run profile",
+                        foreignEnvironment.at("/initialRevision/revisionId").stringValue(),
+                        List.of(),
+                        1,
+                        1,
+                        0,
+                        60,
+                        List.of(),
+                        0,
+                        0,
+                        List.of())));
+        String foreignRunPath = "/api/v1/projects/" + projectB + "/runs";
+        var independentTenantRun = post(
+                foreignRunPath,
+                tokenB,
+                runKey,
+                json(Map.of(
+                        "runProfileRevisionId", foreignProfile.at("/initialRevision/revisionId").stringValue(),
+                        "featureRevisionIds", List.of(foreignFeatureRevision))));
+        assertThat(independentTenantRun.statusCode()).isEqualTo(202);
+        assertThat(json(independentTenantRun).get("runId").stringValue()).isNotEqualTo(runId);
+        assertProblem(
+                post(
+                        runPath,
+                        tokenA,
+                        key(),
+                        json(Map.of(
+                                "runProfileRevisionId",
+                                foreignProfile.at("/initialRevision/revisionId").stringValue(),
+                                "featureRevisionIds",
+                                List.of(featureARevision)))),
+                404,
+                "NOT_FOUND");
+        assertProblem(
+                post(
+                        runPath,
+                        tokenA,
+                        key(),
+                        """
+                        {"featureRevisionIds":["%s"],"runProfileRevisionId":"%s","engine":"evil"}
+                        """.formatted(featureARevision, profileRevision)),
+                400,
+                "VALIDATION_FAILED");
+        assertProblem(
+                post(
+                        runPath,
+                        tokenA,
+                        key(),
+                        """
+                        {"featureRevisionIds":["not-a-uuid"],"runProfileRevisionId":"%s"}
+                        """.formatted(profileRevision)),
+                400,
+                "VALIDATION_FAILED");
+        assertProblem(get("/api/v1/runs/" + runId, null), 401, "UNAUTHENTICATED");
+        assertProblem(get("/api/v1/runs/" + runId + "/snapshot", null), 401, "UNAUTHENTICATED");
+        assertProblem(get("/api/v1/runs/" + runId, tokenB), 404, "NOT_FOUND");
+        assertProblem(get("/api/v1/runs/" + runId + "/snapshot", tokenB), 404, "NOT_FOUND");
+        assertProblem(get(runPath, tokenB), 404, "NOT_FOUND");
+
+        var appended = post(
+                "/api/v1/projects/" + projectA + "/features/" + featureAId + "/revisions",
+                tokenA,
+                key(),
+                json(Map.of("source", "Feature: A\nScenario: changed\n* match 2 == 2\n")));
+        assertThat(appended.statusCode()).isEqualTo(201);
+        assertThat(get("/api/v1/runs/" + runId + "/snapshot", tokenA).body()).isEqualTo(originalSnapshotBody);
+        String featureANewRevision = json(appended).get("revisionId").stringValue();
+        assertProblem(
+                post(
+                        runPath,
+                        tokenA,
+                        key(),
+                        json(Map.of(
+                                "runProfileRevisionId", profileRevision,
+                                "featureRevisionIds", List.of(featureARevision, featureANewRevision)))),
+                422,
+                "VALIDATION_FAILED");
+        JsonNode environmentTwo = json(post(
+                environmentRevisionPath(projectA, environmentId),
+                tokenA,
+                key(),
+                environmentRevisionBody(
+                        List.of(
+                                variable("timeout", "INTEGER", 20_000),
+                                variable("baseUrl", "STRING", "https://environment-v2.example"),
+                                variable("enabled", "BOOLEAN", false)),
+                        List.of(binding("clientSecret", secretId)))));
+        JsonNode profileTwo = json(post(
+                profileRevisionPath(projectA, profileId),
+                tokenA,
+                key(),
+                profileRevisionBody(
+                        environmentTwo.get("revisionId").stringValue(),
+                        List.of("@smoke", "@regression"),
+                        4,
+                        2,
+                        250,
+                        301,
+                        List.of("RAW_RESULT", "EXECUTION_LOG"),
+                        1_000,
+                        2_000,
+                        List.of(variable("baseUrl", "STRING", "https://override-v2.example")))));
+        var runTwo = post(
+                runPath,
+                tokenA,
+                key(),
+                json(Map.of(
+                        "runProfileRevisionId", profileTwo.get("revisionId").stringValue(),
+                        "featureRevisionIds", List.of(featureANewRevision, featureZRevision))));
+        assertThat(runTwo.statusCode()).isEqualTo(202);
+        JsonNode snapshotTwo = json(get(
+                "/api/v1/runs/" + json(runTwo).get("runId").stringValue() + "/snapshot", tokenA));
+        assertThat(snapshotTwo.get("snapshotDigest").stringValue())
+                .isNotEqualTo(snapshot.get("snapshotDigest").stringValue());
+        assertThat(snapshotTwo.at("/environment/revisionId").stringValue())
+                .isEqualTo(environmentTwo.get("revisionId").stringValue());
+        assertThat(snapshotTwo.at("/runProfile/revisionId").stringValue())
+                .isEqualTo(profileTwo.get("revisionId").stringValue());
+        assertThat(snapshotTwo.at("/features/0/revisionId").stringValue()).isEqualTo(featureANewRevision);
+        assertThat(get("/api/v1/runs/" + runId + "/snapshot", tokenA).body()).isEqualTo(originalSnapshotBody);
+
+        List<UUID> maximumRevisionIds = new ArrayList<>();
+        maximumRevisionIds.add(UUID.fromString(featureARevision));
+        maximumRevisionIds.add(UUID.fromString(featureZRevision));
+        List<Object[]> featureRows = new ArrayList<>();
+        List<Object[]> revisionRows = new ArrayList<>();
+        for (int index = 2; index < 1000; index++) {
+            UUID featureId = UUID.randomUUID();
+            UUID revisionId = UUID.randomUUID();
+            maximumRevisionIds.add(revisionId);
+            featureRows.add(new Object[] {
+                featureId,
+                organizationA,
+                UUID.fromString(projectA),
+                "Bulk feature " + index,
+                "bulk/feature-%04d.feature".formatted(index),
+                "run-creator",
+                java.sql.Timestamp.from(Instant.now())
+            });
+            revisionRows.add(new Object[] {
+                revisionId,
+                organizationA,
+                UUID.fromString(projectA),
+                featureId,
+                "Feature: bulk\nScenario: exact\n* match 1 == 1\n",
+                "0".repeat(64),
+                "run-creator",
+                java.sql.Timestamp.from(Instant.now())
+            });
+        }
+        jdbc.batchUpdate(
+                """
+                insert into features
+                    (feature_id, organization_id, project_id, name, logical_path,
+                     next_revision_number, version, created_by, created_at)
+                values (?, ?, ?, ?, ?, 2, 0, ?, ?)
+                """,
+                featureRows);
+        jdbc.batchUpdate(
+                """
+                insert into feature_revisions
+                    (revision_id, organization_id, project_id, feature_id, revision_number,
+                     source, source_sha256, created_by, created_at)
+                values (?, ?, ?, ?, 1, ?, ?, ?, ?)
+                """,
+                revisionRows);
+        var maximumRun = post(
+                runPath,
+                tokenA,
+                key(),
+                json(Map.of(
+                        "runProfileRevisionId", profileRevision,
+                        "featureRevisionIds", maximumRevisionIds)));
+        assertThat(maximumRun.statusCode()).isEqualTo(202);
+        List<UUID> tooManyRevisionIds = new ArrayList<>(maximumRevisionIds);
+        tooManyRevisionIds.add(UUID.randomUUID());
+        assertProblem(
+                post(
+                        runPath,
+                        tokenA,
+                        key(),
+                        json(Map.of(
+                                "runProfileRevisionId", profileRevision,
+                                "featureRevisionIds", tooManyRevisionIds))),
+                422,
+                "VALIDATION_FAILED");
+        assertProblem(
+                post(
+                        runPath,
+                        tokenA,
+                        key(),
+                        json(Map.of(
+                                "runProfileRevisionId", profileRevision,
+                                "featureRevisionIds", List.of()))),
+                422,
+                "VALIDATION_FAILED");
+
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from test_runs where run_id = ?", Integer.class, UUID.fromString(runId)))
+                .isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from run_snapshots where run_id = ? and sealed",
+                        Integer.class,
+                        UUID.fromString(runId)))
+                .isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from test_runs where run_id = ? and queued_at is null and queue_deadline_at is null",
+                        Integer.class,
+                        UUID.fromString(runId)))
+                .isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from information_schema.tables where table_schema = 'public' and table_name in ('execution_commands','worker_assignments','runtime_capabilities')",
+                        Integer.class))
+                .isZero();
+        assertThatThrownBy(() -> jdbc.update(
+                        "update run_snapshots set engine_version = '9.9.9' where run_id = ?",
+                        UUID.fromString(runId)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(exception -> assertThat(rootCause(exception).getMessage())
+                        .contains("run snapshots are immutable"));
+        assertThatThrownBy(() -> jdbc.update(
+                        "delete from run_snapshots where run_id = ?", UUID.fromString(runId)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(exception -> assertThat(rootCause(exception).getMessage())
+                        .contains("run snapshots are immutable"));
+        assertThatThrownBy(() -> jdbc.update(
+                        "update run_snapshot_tags set tag = '@changed' where run_id = ? and tag = '@smoke'",
+                        UUID.fromString(runId)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(exception -> assertThat(rootCause(exception).getMessage())
+                        .contains("run snapshot children are immutable"));
+        assertThatThrownBy(() -> jdbc.update(
+                        "delete from run_snapshot_features where run_id = ? and ordinal = 0",
+                        UUID.fromString(runId)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(exception -> assertThat(rootCause(exception).getMessage())
+                        .contains("run snapshot children are immutable"));
+        assertThatThrownBy(() -> jdbc.update(
+                        "insert into run_snapshot_tags (organization_id, project_id, run_id, tag) values (?, ?, ?, '@late')",
+                        organizationA,
+                        UUID.fromString(projectA),
+                        UUID.fromString(runId)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(exception -> assertThat(rootCause(exception).getMessage())
+                        .contains("run snapshot children require an unsealed parent"));
+        assertThatThrownBy(() -> jdbc.update("delete from test_runs where run_id = ?", UUID.fromString(runId)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(exception -> assertThat(rootCause(exception).getMessage())
+                        .contains("test runs cannot be deleted"));
+        assertThatThrownBy(() -> jdbc.update(
+                        "update test_runs set run_version = 2, snapshot_sha256 = ? where run_id = ?",
+                        "f".repeat(64),
+                        UUID.fromString(runId)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(exception -> assertThat(rootCause(exception).getMessage())
+                        .contains("test run updates are disabled until lifecycle mutation is implemented"));
+        assertThatThrownBy(() -> jdbc.update(
+                        "update test_runs set run_version = 2, lifecycle_state = 'RUNNING' where run_id = ?",
+                        UUID.fromString(runId)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(exception -> assertThat(rootCause(exception).getMessage())
+                        .contains("test run updates are disabled until lifecycle mutation is implemented"));
+        assertThatThrownBy(() -> jdbc.update(
+                        """
+                        insert into test_runs
+                            (run_id, organization_id, project_id, run_version, lifecycle_state,
+                             cancellation_status, quality_gate_status, snapshot_sha256,
+                             created_by, created_at, updated_by, updated_at)
+                        values (?, ?, ?, 2, 'CREATED', 'NOT_REQUESTED', 'NOT_EVALUATED', ?, 'test', now(), 'test', now())
+                        """,
+                        UUID.randomUUID(),
+                        organizationA,
+                        UUID.fromString(projectA),
+                        "0".repeat(64)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(exception -> assertThat(rootCause(exception).getMessage())
+                        .contains("exact CREATED state"));
+        assertThatThrownBy(() -> new TransactionTemplate(transactionManager).executeWithoutResult(ignored -> jdbc.update(
+                        """
+                        insert into test_runs
+                            (run_id, organization_id, project_id, run_version, lifecycle_state,
+                             cancellation_status, quality_gate_status, snapshot_sha256,
+                             created_by, created_at, updated_by, updated_at)
+                        values (?, ?, ?, 1, 'CREATED', 'NOT_REQUESTED', 'NOT_EVALUATED', ?, 'test', now(), 'test', now())
+                        """,
+                        UUID.randomUUID(),
+                        organizationA,
+                        UUID.fromString(projectA),
+                        "0".repeat(64))))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(exception -> assertThat(rootCause(exception).getMessage())
+                        .contains("requires exactly one matching sealed snapshot"));
+        assertThat(jdbc.queryForList(
+                        """
+                        select column_name from information_schema.columns
+                         where table_schema = 'public'
+                           and table_name in ('run_snapshots', 'run_snapshot_configuration_entries')
+                        """,
+                        String.class))
+                .noneMatch(column -> column.matches(".*(provider|capability|credential|ciphertext|secret_value|token|uri|path).*"));
+    }
+
     private JsonNode assertConcurrentSamePost(String path, String bearer, String body) throws Exception {
         String idempotencyKey = key();
         CyclicBarrier barrier = new CyclicBarrier(2);

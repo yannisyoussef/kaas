@@ -13,6 +13,7 @@
 | [013](013-at-least-once-execution-protocol.md) | At-least-once protocol with outbox, inbox, and fencing | PROPOSED |
 | [014](014-project-feature-revision-slice.md) | Authenticated Projects and immutable FeatureRevisions | IMPLEMENTED |
 | [015](015-versioned-execution-configuration.md) | Immutable Environment/RunProfile configuration and metadata-only SecretReferences | IMPLEMENTED |
+| [016](016-test-run-intent-and-immutable-snapshot.md) | CREATED TestRun intent with a sealed immutable execution snapshot | IMPLEMENTED |
 
 Deferred topics without active decisions remain: RabbitMQ topology, concrete object-storage/upload adapter, secret delivery mechanism, hostile-execution runtime, and OpenTelemetry implementation. This iteration decides transport-neutral reliability, SSE replay, lifecycle/outcomes, and result/artifact semantics only.
 

@@ -1,6 +1,6 @@
 # Run Semantics
 
-**Status: PROPOSED CONTRACT ARCHITECTURE.** No run domain, persistence, messaging, authentication, SSE, quality evaluation, or execution behavior is implemented.
+**Status: PARTIALLY IMPLEMENTED.** TestRun intent, exact initial orthogonal dimensions, immutable RunSnapshot persistence, authenticated create/read/list/snapshot APIs, and the pure lifecycle transition oracle are implemented. Scheduling, lifecycle mutation handlers, attempts, messaging, SSE, quality evaluation, results, artifacts, and execution remain proposed and absent.
 
 ## Requirements and constraints
 
@@ -48,7 +48,7 @@ Examples:
 
 ## Run and execution attempt
 
-A run is the user-visible orchestration and immutable input intent. An `ExecutionAttempt` is one infrastructure assignment for that run and contains `attemptId`, one-based `attemptNumber`, `assignmentEpoch`, lease data, command identity, and attempt evidence.
+A run is the user-visible orchestration identity. Its separately persisted immutable `RunSnapshot` captures exact input meaning. This pair is implemented for the CREATED state. An `ExecutionAttempt` is a proposed infrastructure assignment for that run and would contain `attemptId`, one-based `attemptNumber`, `assignmentEpoch`, lease data, command identity, and attempt evidence.
 
 The schemas model attempts now, but the MVP permits exactly one. Automatic infrastructure retry is disabled. A future retry must create a new `attemptId`, increment `attemptNumber` and `assignmentEpoch`, and publish a new immutable command. A user-requested rerun creates a new run until same-run retry policy is designed.
 

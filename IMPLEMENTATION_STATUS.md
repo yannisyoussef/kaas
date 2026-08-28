@@ -2,7 +2,7 @@
 
 Status date: 2026-08-28
 
-This document describes repository reality after the Environment/RunProfile versioned-configuration vertical slice. Product vision and run architecture do not imply runtime capability.
+This document describes repository reality after the TestRun intent and immutable RunSnapshot vertical slice. Product vision and execution architecture do not imply runtime capability.
 
 ## Implemented and validated
 
@@ -21,26 +21,31 @@ This document describes repository reality after the Environment/RunProfile vers
 - Project-scoped SecretReference metadata create/get/list with no secret/provider/capability fields.
 - Atomic Environment plus revision 1 creation, immutable revision append/get/history, strict typed scalar variables, safe secret bindings, and deterministic content digests.
 - Atomic RunProfile plus revision 1 creation, immutable revision append/get/history, exact EnvironmentRevision binding, bounded tags/retry/timeout/artifact settings, same-type plain overrides, and deterministic transitive digests.
+- Atomic TestRun intent creation in exact version-1 CREATED state, authenticated get/list, and immutable snapshot reads with strong ETags.
+- Exact FeatureRevision selection (1–1000), RunProfileRevision/EnvironmentRevision provenance, materialized effective typed configuration, metadata-only secret bindings, server-owned Karate engine metadata, and a versioned canonical digest.
+- PostgreSQL V3 normalized snapshot sealing, composite ownership FKs, initial TestRun invariant trigger, deferred one-to-one snapshot requirement, stable project history index, and no-delete evidence retention.
+- Semantic transactional run idempotency, including reordered feature-set replay and concurrent first use.
 - PostgreSQL-sealed normalized configuration aggregates that reject late child inserts and every post-seal parent/child update or delete.
 - Exact UTF-8 source preservation and SHA-256, 512 KiB source validation, 1 MiB streaming request limit, NUL/control/malformed-Unicode rejection, and no Karate parsing.
 - Flyway-managed PostgreSQL schema, JPA `ddl-auto=validate`, composite tenant/parent FKs, indexes, uniqueness/check constraints, Feature revision triggers, and deferred configuration aggregate sealing.
 - RFC 9457 Problem Details across MVC and security filters, request/trace correlation context, safe structured mutation logs, and Actuator HTTP metrics.
 - Signed-JWT HTTP, tenant-IDOR, concurrent idempotency, PostgreSQL Testcontainers, database immutability, transport/content boundaries, two ten-writer configuration revision races, canonical digest vectors, and ArchUnit tests.
+- Final Java 25/Gradle 9.7.1 clean verification: 30 API tests plus 1 runner test passed with zero failures/skips; contract, web, audit, Compose, and whitespace gates also passed.
 
 ## Scaffolded, not product functionality
 
 - The runner prints a status message and cannot execute Karate, shell commands, or external processes.
 - The web application contains a landing page and placeholder dashboard with no API client or product data.
-- Run OpenAPI paths and execution JSON Schemas remain proposed contracts. Project/Feature/SecretReference/Environment/RunProfile OpenAPI paths describe implemented runtime behavior.
+- Run create/get/list/snapshot OpenAPI paths are implemented. Cancellation/events/results/artifacts and execution JSON Schemas remain proposed contracts.
 - Docker Compose PostgreSQL is configured for the API. RabbitMQ and MinIO are not connected to feature lifecycle.
 - Docker Compose binds PostgreSQL, RabbitMQ, and MinIO to loopback and defines development health checks. Configuration validation passes; container startup was not verified because the local Docker daemon was unavailable.
 
 ## Designed or proposed
 
 - Future control-plane capabilities beyond versioned execution configuration and a separately deployable execution plane.
-- PostgreSQL schemas for future run orchestration and result metadata.
+- PostgreSQL schemas for future run scheduling, attempts, orchestration, and result metadata beyond the implemented CREATED intent/snapshot.
 - Per-run container isolation as a candidate only; it is not approved as a sufficient hostile-code boundary.
-- Product concepts beyond implemented projects, immutable feature/configuration revisions, and metadata-only secret references, including asynchronous runs, results, artifact storage, and quality gates.
+- Product concepts beyond implemented CREATED run intent, including scheduling, execution, results, artifact storage, and quality gates.
 - Orthogonal run lifecycle, cancellation, test outcome, infrastructure outcome, and quality-gate semantics.
 - Optimistic run concurrency, attempt/assignment fencing, phase deadlines, at-least-once outbox/inbox semantics, retries/DLQ classification, structured results/artifacts, and bounded SSE replay.
 
@@ -53,7 +58,7 @@ This document describes repository reality after the Environment/RunProfile vers
 - Secret values, provider mapping, storage, resolution, redemption, capability minting, or injection.
 - Karate dependencies, runner images, container launchers, or arbitrary test execution.
 - OpenTelemetry instrumentation.
-- Run semantic validation, execution outbox/inbox tables, lease reconciliation, quality evaluation, and durable event storage.
+- Run lifecycle mutation handlers, execution outbox/inbox tables, lease reconciliation, quality evaluation, and durable event storage.
 
 ## Toolchain decisions
 
@@ -97,7 +102,7 @@ No item above is runtime behavior. KAA-004 remains open: Docker/host/daemon/netw
 
 ## Current vertical slice
 
-Authenticated, organization-scoped Project/FeatureRevision and Environment/RunProfile configuration lifecycles are implemented. Logical configuration identities own contiguous immutable revision histories; RunProfileRevision pins an exact EnvironmentRevision. SecretReference is non-authorizing metadata only. The Docker-backed suite is mandatory and not auto-skipped. TestRun persistence/orchestration should follow only as another bounded control-plane slice; execution must remain disabled until the hostile-execution release gate is validated.
+Authenticated, organization-scoped Project/FeatureRevision and Environment/RunProfile lifecycles plus CREATED TestRun/RunSnapshot persistence are implemented. The snapshot materializes exact revision provenance and effective configuration without resolving secrets. Scheduling and execution remain disabled until their separate protocol and hostile-execution release gates are implemented and validated.
 
 ## Security gate
 
@@ -108,3 +113,5 @@ See `CONTRACT_LIFECYCLE_ARCHITECTURE_REPORT.md` for the decisions, adversarial r
 See `PROJECT_FEATURE_SLICE_REPORT.md` for the implemented API/schema decisions, verification evidence, residual risks, and independent specialist reviews.
 
 See `ENVIRONMENT_RUN_PROFILE_SLICE_REPORT.md` for the versioned-configuration model, canonicalization, database sealing, concurrency/idempotency evidence, and independent specialist reviews.
+
+See `TEST_RUN_INTENT_SLICE_REPORT.md` for the CREATED-only lifecycle boundary, snapshot canonicalization/persistence, API contract, security evidence, runner-command mapping, and independent reviews.

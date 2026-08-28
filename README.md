@@ -2,7 +2,7 @@
 
 > **Execute. Automate. Assure.**
 
-KaaS is intended to become a self-service quality engineering platform for isolated, asynchronous Karate execution and structured results. The repository implements authenticated, organization-scoped Projects, logical Features with immutable FeatureRevisions, and reproducible versioned execution configuration through Environments, RunProfiles, and metadata-only SecretReferences backed by PostgreSQL.
+KaaS is intended to become a self-service quality engineering platform for isolated, asynchronous Karate execution and structured results. The repository implements authenticated, organization-scoped Projects, immutable FeatureRevisions, versioned execution configuration, and CREATED TestRun intent with a sealed immutable execution snapshot backed by PostgreSQL.
 
 Arbitrary test execution is disabled. No user-supplied feature runs in the API or runner scaffold.
 
@@ -16,10 +16,11 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | Environment and immutable revisions | IMPLEMENTED + VALIDATED | Typed scalar variables, metadata-only secret bindings, canonical digests, sealed relational aggregates, and 10-writer concurrency coverage |
 | RunProfile and immutable revisions | IMPLEMENTED + VALIDATED | Exact EnvironmentRevision pinning, bounded execution intent, same-type plain overrides, canonical digests, and 10-writer concurrency coverage |
 | SecretReference metadata | IMPLEMENTED + VALIDATED | Project-scoped identity/name/audit only; no value, provider/path, credential, resolve, reveal, or redemption capability |
+| TestRun intent and immutable RunSnapshot | IMPLEMENTED + VALIDATED | 202 create, get/list/snapshot, semantic idempotency, exact initial dimensions, canonical digest, sealed V3 aggregate, no scheduling |
 | Runner bootstrap | SCAFFOLDED + VALIDATED | Reports that execution is disabled; launches no external process |
 | Next.js web scaffold | IMPLEMENTED + VALIDATED | Next.js 16.3.3; lint, typecheck, render test, build, production audit |
 | Contract tooling | IMPLEMENTED + VALIDATED | Strict AJV schemas/fixtures plus semantic checks; proposed contracts only |
-| OpenAPI contract | IMPLEMENTED + PROPOSED | Project/Feature/configuration operations are implemented; preserved Run operations remain proposed |
+| OpenAPI contract | IMPLEMENTED + PROPOSED | Run create/get/list/snapshot and configuration APIs are implemented; cancellation/events/results/artifacts remain proposed |
 | Local PostgreSQL/RabbitMQ/MinIO definitions | SCAFFOLDED | Loopback-only Compose config with development health checks |
 | Modular control-plane boundaries | IMPLEMENTED | Capability packages with inward ports and ArchUnit enforcement |
 | PostgreSQL persistence | IMPLEMENTED | Flyway schema, JPA validation, tenant composite FKs, immutable-revision trigger, query indexes |
@@ -48,7 +49,7 @@ The diagram is a target, not a deployment claim. The control plane must never ex
 
 ## Repository layout
 
-- `apps/api` — JWT-secured Project/FeatureRevision and versioned-configuration control plane, Flyway/JPA/JDBC persistence, and tests
+- `apps/api` — JWT-secured Project/FeatureRevision, versioned-configuration, and CREATED TestRun/snapshot control plane
 - `apps/web` — Next.js frontend scaffold and render test
 - `services/runner` — non-executing runner bootstrap
 - `packages/api-contracts` — JSON Schemas, fixtures, and OpenAPI validation tooling
@@ -109,9 +110,10 @@ The checked-in values are local-development defaults, not production secret mana
 - [Environment/RunProfile slice report](ENVIRONMENT_RUN_PROFILE_SLICE_REPORT.md)
 - [Implemented Project/Feature architecture](docs/architecture/project-feature-slice.md)
 - [Implemented Environment/RunProfile architecture](docs/architecture/environment-run-profile-slice.md)
+- [Implemented TestRun intent/snapshot architecture](docs/architecture/test-run-intent-slice.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Security release requirements](docs/security/threat-model.md)
 
 ## Scope discipline
 
-This slice deliberately does not implement TestRun, RabbitMQ messaging, outbox/inbox execution records, SSE, secret values/storage/redemption, object storage, Karate parsing, runner execution, a container launcher, network enforcement, quality-gate execution, or full OpenTelemetry infrastructure. Git integrations, scheduling, Kubernetes, multi-framework execution, billing, advanced RBAC, and AI generation also remain outside scope.
+This slice deliberately implements only TestRun intent and immutable snapshot persistence. It does not implement scheduling, lifecycle mutation, execution attempts, RabbitMQ messaging, outbox/inbox, SSE, secret values/storage/redemption, source bundles, object storage, Karate parsing/execution, a container launcher, network enforcement, results/artifacts, quality-gate execution, or full OpenTelemetry infrastructure.
