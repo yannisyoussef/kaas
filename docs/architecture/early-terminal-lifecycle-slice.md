@@ -145,11 +145,13 @@ So the populated-upgrade test now asserts, **before** the upgrade runs, that the
 
 ## What is deliberately still absent
 
-- No cancellation for any phase a worker owns. That is a `409` until claiming lands and a real `STOPPING` protocol exists.
+- No cancellation for any phase a worker owns. That is a `409` until claiming lands and a real `STOPPING` protocol exists. *(Implemented for `CLAIMED` by the [consumer/claim/lease slice](consumer-claim-lease-slice.md); still a `409` for everything past it.)*
 - No `REQUESTED` cancellation status is ever persisted, because nothing waits.
 - No new execution-attempt disposition. The attempt keeps `WAITING_FOR_CLAIM`; the run's terminal state already says what happened, and inventing an attempt outcome would describe an execution that never started.
 - No expiry of `CREATED` runs. They are cheap and nothing has established what a fair intent lifetime is.
 
 ## Constraints the worker-claim slice must still rewrite
 
-Unchanged and deliberately not weakened: `guard_initial_execution_attempt` (still requires `queued_at = created_at`, impossible for attempt #2), the single-attempt uniqueness and check constraints, and the `QUEUED` branch of `require_complete_scheduling_bundle`. They must be rewritten together.
+Unchanged and deliberately not weakened *in this slice*: `guard_initial_execution_attempt` (still requires `queued_at = created_at`, impossible for attempt #2), the single-attempt uniqueness and check constraints, and the `QUEUED` branch of `require_complete_scheduling_bundle`. They must be rewritten together.
+
+**Since superseded in part.** The [consumer/claim/lease slice](consumer-claim-lease-slice.md) replaced `guard_initial_execution_attempt` with `guard_execution_attempt`, which permits claim, heartbeat, and fence, and added `CLAIMED` and `STOPPING` branches to the bundle invariant. What still belongs to the worker-execution slice is the single-attempt uniqueness and check constraints, and the `QUEUED` branch — infrastructure retry is what forces those.

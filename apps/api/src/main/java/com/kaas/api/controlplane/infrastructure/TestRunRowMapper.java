@@ -4,6 +4,7 @@ import com.kaas.api.controlplane.domain.CancellationStatus;
 import com.kaas.api.controlplane.domain.InfrastructureOutcome;
 import com.kaas.api.controlplane.domain.QualityGateStatus;
 import com.kaas.api.controlplane.domain.RunLifecycle;
+import com.kaas.api.controlplane.domain.StopReason;
 import com.kaas.api.controlplane.domain.TerminationPhase;
 import com.kaas.api.controlplane.domain.TerminationReason;
 import com.kaas.api.controlplane.domain.TestOutcome;
@@ -29,7 +30,7 @@ final class TestRunRowMapper implements RowMapper<TestRun> {
             """
             select run_id, project_id, run_version, lifecycle_state, cancellation_status, test_outcome,
                    infrastructure_outcome, quality_gate_status, termination_reason, termination_phase,
-                   snapshot_sha256, queued_at, queue_deadline_at, cancellation_requested_at,
+                   stop_reason, snapshot_sha256, queued_at, queue_deadline_at, cancellation_requested_at,
                    cancellation_acknowledged_at, completed_at, created_by, created_at, updated_at
             """;
 
@@ -43,6 +44,7 @@ final class TestRunRowMapper implements RowMapper<TestRun> {
         String infrastructureOutcome = resultSet.getString("infrastructure_outcome");
         String terminationReason = resultSet.getString("termination_reason");
         String terminationPhase = resultSet.getString("termination_phase");
+        String stopReason = resultSet.getString("stop_reason");
         return new TestRun(
                 resultSet.getObject("run_id", UUID.class),
                 resultSet.getObject("project_id", UUID.class),
@@ -54,6 +56,7 @@ final class TestRunRowMapper implements RowMapper<TestRun> {
                 QualityGateStatus.valueOf(resultSet.getString("quality_gate_status")),
                 terminationReason == null ? null : TerminationReason.valueOf(terminationReason),
                 terminationPhase == null ? null : TerminationPhase.valueOf(terminationPhase),
+                stopReason == null ? null : StopReason.valueOf(stopReason),
                 SHA256 + resultSet.getString("snapshot_sha256"),
                 instant(resultSet, "queued_at"),
                 instant(resultSet, "queue_deadline_at"),

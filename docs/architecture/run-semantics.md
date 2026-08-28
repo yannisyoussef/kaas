@@ -1,6 +1,6 @@
 # Run Semantics
 
-**Status: PARTIALLY IMPLEMENTED.** TestRun intent, exact initial orthogonal dimensions, immutable RunSnapshot persistence, authenticated create/read/list/snapshot APIs, the pure lifecycle transition oracle, the atomic `CREATED → QUEUED` scheduling transition with its execution attempt, queue-time dispatch intent, and transactional outbox, broker publication through the relay, and the three transitions that end a run no worker has taken — cancellation from `CREATED` or `QUEUED`, and the queue deadline from `QUEUED` — are implemented. Consumer inbox, worker claim, leases, lifecycle mutation between `QUEUED` and `COMPLETED`, SSE, quality evaluation, results, artifacts, and execution remain proposed and absent.
+**Status: PARTIALLY IMPLEMENTED.** TestRun intent, exact initial orthogonal dimensions, immutable RunSnapshot persistence, authenticated create/read/list/snapshot APIs, the pure lifecycle transition oracle, the atomic `CREATED → QUEUED` scheduling transition with its execution attempt, queue-time dispatch intent, and transactional outbox, broker publication through the relay, durable consumption with a consumer inbox, the authoritative `QUEUED → CLAIMED` claim with assignment-epoch fencing and a server-controlled lease, and every implemented way a run can end — cancellation from `CREATED`, `QUEUED`, or `CLAIMED`, the queue deadline from `QUEUED`, and lease loss from `CLAIMED` — are implemented. Provisioning, execution commands, source and secret capabilities, SSE, quality evaluation, results, artifacts, and execution remain proposed and absent.
 
 ## Requirements and constraints
 
@@ -42,8 +42,9 @@ Examples:
 2. `SUCCEEDED` requires `testOutcome` `PASSED` or `FAILED` and a `COMPLETE` structured result.
 3. Any non-success infrastructure outcome yields canonical `testOutcome=NOT_AVAILABLE` for the MVP. Partial runner evidence may be retained for diagnostics but is not quality evidence.
 4. A zero-test discovery after acceptance is not success. It is a structured infrastructure/validation failure with `NOT_AVAILABLE`; an empty selection known at request time is rejected before run creation.
-5. `CANCELLED` requires `cancellationStatus=ACKNOWLEDGED`; a late cancellation that loses to accepted results does not rewrite outcomes. The converse holds too and is enforced: `TIMED_OUT` requires `cancellationStatus=NOT_REQUESTED`, so a deadline is never reported as though somebody asked for it.
-8. A terminated run records why and where: `terminationReason` and `terminationPhase` are set exactly when the run is `COMPLETED`, each reason pins one infrastructure outcome, and the phase vocabulary is the runner result contract's structured-error phases rather than a second private enum.
+5. `CANCELLED` requires `cancellationStatus=ACKNOWLEDGED`; a late cancellation that loses to accepted results does not rewrite outcomes. The converse is enforced for the queue deadline specifically: a `QUEUE_DEADLINE` termination requires `cancellationStatus=NOT_REQUESTED`, so a queue timeout is never reported as though somebody asked for it. It is deliberately *not* asserted of `TIMED_OUT` in general, because a run cancelled while running and then timed out really does carry an outstanding request.
+8. An owned run cannot become terminal in one step. `CLAIMED` passes through `STOPPING`, where its assignment is fenced, before it can complete; a terminal run may retain no live assignment.
+9. A terminated run records why and where: `terminationReason` and `terminationPhase` are set exactly when the run is `COMPLETED`, each reason pins one infrastructure outcome, and the phase vocabulary is the runner result contract's structured-error phases rather than a second private enum.
 6. `qualityGate` is owned by the control plane, has an independent `evaluationVersion`, and never appears in runner output.
 7. A quality-gate change never changes lifecycle, test outcome, infrastructure outcome, or raw result evidence.
 

@@ -189,6 +189,10 @@ class JdbcRunTerminationRepository implements RunTerminationRepository {
         return switch (reason) {
             case USER_REQUESTED -> TerminalDisposition.SUPPRESSED_CANCELLED;
             case QUEUE_DEADLINE -> TerminalDisposition.SUPPRESSED_QUEUE_TIMEOUT;
+            // A lost lease means the dispatch was already consumed and claimed, so there is no pending message
+            // left to withdraw. Reaching this would mean a run was claimed without its dispatch being delivered.
+            case LEASE_LOST -> throw new IllegalStateException(
+                    "A claimed run has no pending dispatch to withdraw.");
         };
     }
 

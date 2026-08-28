@@ -74,7 +74,9 @@ import tools.jackson.databind.ObjectMapper;
             "spring.datasource.hikari.maximum-pool-size=16",
             // This suite drives scheduling explicitly and asserts exact state, so the timers must stay out of it.
             "kaas.scheduling.auto.enabled=false",
-            "kaas.outbox.relay.enabled=false"
+            "kaas.outbox.relay.enabled=false",
+            "kaas.consumer.enabled=false",
+            "kaas.claim.reconcile.enabled=false"
         })
 class SchedulingHttpIntegrationTests {
     private static final String ISSUER = "https://issuer.kaas.test";
@@ -152,7 +154,7 @@ class SchedulingHttpIntegrationTests {
         assertThat(run.has("currentAttemptId")).isFalse();
         assertThat(run.has("attemptId")).isFalse();
 
-        // Exactly one attempt, awaiting a claim that no implemented code can perform.
+        // Exactly one attempt, awaiting a claim that only the dispatch consumer can perform.
         Map<String, Object> attempt = jdbc.queryForMap(
                 "select * from execution_attempts where run_id = ?", created.runId());
         assertThat(count("execution_attempts", created.runId())).isEqualTo(1);
@@ -162,11 +164,15 @@ class SchedulingHttpIntegrationTests {
         assertThat(jdbc.queryForObject(
                         "select current_attempt_id from test_runs where run_id = ?", UUID.class, created.runId()))
                 .isEqualTo(attempt.get("attempt_id"));
-        // No assignment exists yet: the schema itself offers nowhere to record one.
-        assertThat(columnsOf("execution_attempts"))
-                .containsExactlyInAnyOrder(
-                        "attempt_id", "organization_id", "project_id", "run_id", "attempt_number",
-                        "attempt_state", "created_by", "created_at");
+        // The attempt is unassigned. The assignment columns exist now that claiming does, so the property worth
+        // asserting is that scheduling leaves every one of them empty: queueing offers work, it does not hand it
+        // to anybody.
+        assertThat(attempt.get("assignment_epoch")).isNull();
+        assertThat(attempt.get("assigned_worker_id")).isNull();
+        assertThat(attempt.get("lease_started_at")).isNull();
+        assertThat(attempt.get("lease_expires_at")).isNull();
+        assertThat(attempt.get("last_heartbeat_at")).isNull();
+        assertThat(attempt.get("fenced_at")).isNull();
 
         // Exactly one dispatch, bound to the sealed snapshot.
         Map<String, Object> dispatchRow = jdbc.queryForMap(
@@ -398,7 +404,7 @@ class SchedulingHttpIntegrationTests {
     void theDatabaseRejectsEveryMutationExceptTheImplementedScheduleTransition() throws Exception {
         CreatedRun created = createRun();
         UUID runId = created.runId();
-        String scheduleGuard = "only scheduling and early terminal transitions are supported";
+        String scheduleGuard = "only scheduling, claim, stop, and terminal transitions are supported";
 
         // A CREATED run cannot be pushed straight into a future state, nor given queue timing by hand.
         assertRejectedBecause(scheduleGuard, "update test_runs set lifecycle_state = 'RUNNING' where run_id = ?", runId);
@@ -423,10 +429,10 @@ class SchedulingHttpIntegrationTests {
 
         // The queue-time bundle is immutable, and the outbox delivery metadata cannot be forged yet.
         assertRejectedBecause(
-                "execution attempts are immutable until claim is implemented",
+                "only claim, heartbeat, and fence assignment transitions are supported",
                 "update execution_attempts set attempt_state = 'CLAIMED' where run_id = ?", runId);
         assertRejectedBecause(
-                "execution attempts are immutable until claim is implemented",
+                "execution attempts are retained as assignment evidence",
                 "delete from execution_attempts where run_id = ?", runId);
         assertRejectedBecause(
                 "execution dispatch identity and payload are immutable",

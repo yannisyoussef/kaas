@@ -62,8 +62,9 @@ import tools.jackson.databind.ObjectMapper;
  * the production scheduler, relay the outbox, and confirm publication.
  *
  * <p>The broker is never mocked here. The relay is invoked directly rather than by its timer so that each pass is
- * deterministic. Consumption happens only to assert what was published: no production consumer exists, nothing
- * claims an attempt, and no execution command is ever produced.
+ * deterministic. Consumption happens only to assert what was published, with the production consumer switched
+ * off: this suite is about publication, and a consumer racing it for the same messages would make every
+ * assertion about queue contents depend on who got there first.
  */
 @Testcontainers
 @Import(OutboxRelayRabbitIntegrationTests.JwtTestConfiguration.class)
@@ -73,6 +74,8 @@ import tools.jackson.databind.ObjectMapper;
             // Timers are off: every pass in this suite is invoked explicitly so assertions stay deterministic.
             "kaas.scheduling.auto.enabled=false",
             "kaas.outbox.relay.enabled=false",
+            "kaas.consumer.enabled=false",
+            "kaas.claim.reconcile.enabled=false",
             "kaas.outbox.relay.max-attempts=3",
             // Small batches keep the concurrency test honest: with the default batch one relay would take
             // everything. It also satisfies the startup invariant claim-ttl > batch-size x confirm-timeout.

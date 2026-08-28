@@ -64,9 +64,9 @@ Logical paths are normalized relative POSIX workspace paths. Schema rejects URI 
 
 ## Claim, lease, and fencing
 
-Claim is a control-plane compare-and-set, not broker acknowledgment alone. A successful claim binds one worker audit identity to `attemptId` and `assignmentEpoch` until a server-controlled lease expiry. Heartbeats carry the same attempt/epoch, renew only that lease, and produce no public event.
+**IMPLEMENTED through claim.** Claim is a control-plane compare-and-set, not broker acknowledgment alone. A successful claim binds one worker audit identity to `attemptId` and `assignmentEpoch` until a server-controlled lease expiry. Heartbeats carry the same attempt/epoch, renew only that lease, and produce no public event.
 
-Reassignment must always use a higher epoch; an infrastructure retry also uses a new attempt ID and command. Result and manifest acceptance require exact active epoch. This makes a partitioned old worker unable to commit evidence after fencing.
+Reassignment must always use a higher epoch; an infrastructure retry also uses a new attempt ID and command. Only the first assignment is implemented today, so epoch 2 is permitted by the schema and produced by nothing. Result and manifest acceptance require exact active epoch. This makes a partitioned old worker unable to commit evidence after fencing.
 
 ## Result and artifact exchange
 

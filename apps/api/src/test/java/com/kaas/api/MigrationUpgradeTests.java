@@ -31,8 +31,16 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  *
  * <ul>
  *   <li>every migration applies to an empty database, and
- *   <li>every migration applies to a database already carrying representative rows from the previous version.
+ *   <li>the <em>most recent</em> migration applies to a database already carrying representative rows from the
+ *       version before it.
  * </ul>
+ *
+ * <p>That second bullet is narrower than it sounds and the wording is deliberate. The baseline is the
+ * second-newest version on disk, so each migration gets populated coverage exactly once — in the slice that
+ * introduces it — and loses it the moment the next migration lands. A slice that ships two migrations therefore
+ * leaves the earlier one tested against an empty database only. That is a known limit of this gate, not an
+ * oversight, and it is the reason the populated assertions have to be written while the migration is the newest
+ * one.
  *
  * <p>It deliberately uses Flyway and JDBC directly rather than a Spring context: the subject is the migration
  * chain itself, and the baseline version has to be chosen before any application bean could start.
@@ -67,7 +75,7 @@ class MigrationUpgradeTests {
         seedRepresentativeRows(database);
         assertTheFixtureReachesWhatTheUpgradeChanges(database);
 
-        // The remaining migrations now run against real rows, with every runtime trigger of the previous version
+        // The newest migration now runs against real rows, with every runtime trigger of the previous version
         // still installed. A migration that transforms data must cope with the guards that were protecting it.
         Flyway.configure().dataSource(jdbcUrl(database), POSTGRES.getUsername(), POSTGRES.getPassword()).load().migrate();
 
@@ -79,10 +87,16 @@ class MigrationUpgradeTests {
      * Proves, before the upgrade runs, that the fixture actually holds rows the pending migrations will act on.
      *
      * <p>This is the same rule as for a backfill, applied to the other way a migration touches existing data. A
-     * migration that adds a validating CHECK, drops a NOT NULL, or replaces a guard is checked against every row
-     * already in the table — so over an empty table it proves exactly nothing, and would pass while shipping a
-     * constraint production data violates. Asserting emptiness here is the point: if a future fixture change
-     * empties one of these, this fails loudly instead of going quietly green.
+     * migration that adds a validating CHECK, drops a NOT NULL, or changes a column type is checked against
+     * every row already in the table — so over an empty table it proves exactly nothing, and would pass while
+     * shipping a constraint production data violates.
+     *
+     * <p>Replacing a guard <em>function</em> is deliberately not on that list. {@code CREATE OR REPLACE FUNCTION}
+     * validates nothing against existing rows: a plpgsql body is not executed until the next write, so a broken
+     * guard is caught by the runtime suites rather than here. Only validating DDL is covered by this gate.
+     *
+     * <p>Asserting these is the point: if a future fixture change empties one of them, this fails loudly instead
+     * of going quietly green.
      */
     private void assertTheFixtureReachesWhatTheUpgradeChanges(String database) throws Exception {
         // V7 adds validating CHECKs to test_runs, so the table must be non-empty and must already hold the
@@ -99,6 +113,23 @@ class MigrationUpgradeTests {
         assertThat(count(database, "outbox_messages where published_at is not null")).isPositive();
         assertThat(count(database, "outbox_messages where published_at is null"
                         + " and terminal_disposition is null")).isPositive();
+        // V8 adds validating CHECKs to execution_attempts, evaluated against every attempt already present.
+        assertThat(count(database, "execution_attempts where attempt_state = 'WAITING_FOR_CLAIM'")).isPositive();
+
+        // V8 also DROPS and re-ADDS the two termination CHECKs and the lifecycle-event transition CHECK. Those
+        // are the constraints whose entire subject is a terminated run, so a fixture without one validates them
+        // against nothing: every disjunct short-circuits on `termination_reason IS NULL`, and a dropped branch
+        // ships green here and fails on the first real database. Each reason and each event shape the previous
+        // version can produce has to be present *before* the upgrade runs.
+        assertThat(count(database, "test_runs where termination_reason = 'USER_REQUESTED'")).isPositive();
+        assertThat(count(database, "test_runs where termination_reason = 'QUEUE_DEADLINE'")).isPositive();
+        assertThat(count(database, "test_runs where lifecycle_state = 'COMPLETED'")).isPositive();
+        assertThat(count(database, "run_lifecycle_events where previous_state = 'CREATED'"
+                        + " and lifecycle_state = 'QUEUED' and sequence = 1")).isPositive();
+        assertThat(count(database, "run_lifecycle_events where previous_state = 'CREATED'"
+                        + " and lifecycle_state = 'COMPLETED' and attempt_id is null")).isPositive();
+        assertThat(count(database, "run_lifecycle_events where previous_state = 'QUEUED'"
+                        + " and lifecycle_state = 'COMPLETED' and attempt_id is not null")).isPositive();
     }
 
     /** Everything the upgrade must not lose, damage, or silently rewrite. */
@@ -107,13 +138,16 @@ class MigrationUpgradeTests {
         assertThat(count(database, "feature_revisions")).isEqualTo(1);
         assertThat(count(database, "environment_revisions")).isEqualTo(1);
         assertThat(count(database, "run_profile_revisions")).isEqualTo(1);
-        assertThat(count(database, "run_snapshots")).isEqualTo(5);
+        assertThat(count(database, "run_snapshots")).isEqualTo(8);
         // One CREATED run and one QUEUED run, with the QUEUED run's full scheduling bundle intact.
         assertThat(count(database, "test_runs where lifecycle_state = 'CREATED'")).isEqualTo(1);
         assertThat(count(database, "test_runs where lifecycle_state = 'QUEUED'")).isEqualTo(4);
-        assertThat(count(database, "execution_attempts")).isEqualTo(4);
+        assertThat(count(database, "test_runs where lifecycle_state = 'COMPLETED'")).isEqualTo(3);
+        // Four queued bundles plus the two attempts belonging to runs terminated out of QUEUED.
+        assertThat(count(database, "execution_attempts")).isEqualTo(6);
         assertThat(count(database, "execution_dispatches")).isEqualTo(4);
-        assertThat(count(database, "run_lifecycle_events")).isEqualTo(4);
+        // Four scheduling events, two more for the runs terminated out of QUEUED, and three terminal events.
+        assertThat(count(database, "run_lifecycle_events")).isEqualTo(9);
 
         // Every delivery state the outbox can hold survives, still carrying its payload and digest.
         assertThat(count(database, "outbox_messages")).isEqualTo(5);
@@ -144,14 +178,20 @@ class MigrationUpgradeTests {
         // V7 adds terminal state to a table that already had rows. It transforms nothing, and the assertion that
         // it transformed nothing is the point: every pre-existing run must still be unfinished, with no invented
         // completion time, reason, or cancellation.
-        assertThat(count(database, "test_runs where completed_at is not null"
-                        + " or termination_reason is not null or termination_phase is not null"
-                        + " or cancellation_requested_at is not null"
-                        + " or cancellation_acknowledged_at is not null"))
+        assertThat(count(database, "test_runs where lifecycle_state <> 'COMPLETED'"
+                        + " and (completed_at is not null or termination_reason is not null"
+                        + " or termination_phase is not null or cancellation_requested_at is not null"
+                        + " or cancellation_acknowledged_at is not null)"))
                 .isZero();
         assertThat(count(database, "test_runs where lifecycle_state <> 'COMPLETED'")).isEqualTo(5);
+        // And the terminated ones kept the reasons they were terminated for.
+        assertThat(count(database, "test_runs where termination_reason = 'QUEUE_DEADLINE'"
+                        + " and infrastructure_outcome = 'TIMED_OUT'")).isEqualTo(1);
+        assertThat(count(database, "test_runs where termination_reason = 'USER_REQUESTED'"
+                        + " and infrastructure_outcome = 'CANCELLED'")).isEqualTo(2);
         // The lifecycle events kept their attempts; relaxing the column did not blank anything.
-        assertThat(count(database, "run_lifecycle_events where attempt_id is null")).isZero();
+        // The only event without an attempt is the CREATED->COMPLETED one, which never had one.
+        assertThat(count(database, "run_lifecycle_events where attempt_id is null")).isEqualTo(1);
         // And no delivery state was reinterpreted as a suppression.
         assertThat(count(database, "outbox_messages where terminal_disposition like 'SUPPRESSED%'")).isZero();
         assertThat(count(database, "outbox_messages where terminal_disposition = 'RETRIES_EXHAUSTED'"))
@@ -159,6 +199,22 @@ class MigrationUpgradeTests {
         // The reaper's index exists, because a queue deadline nothing can select efficiently is a promise the
         // platform cannot keep at scale.
         assertThat(count(database, "pg_indexes where indexname = 'ix_test_runs_queue_deadline'")).isEqualTo(1);
+
+        // V8 likewise transforms nothing. No pre-existing run acquires a stop reason, and no pre-existing
+        // attempt acquires an assignment — an upgrade that invented either would be handing out ownership of
+        // work to a worker that never claimed it.
+        assertThat(count(database, "test_runs where stop_reason is not null")).isZero();
+        assertThat(count(database, "execution_attempts where assignment_epoch is not null"
+                        + " or assigned_worker_id is not null or lease_started_at is not null"
+                        + " or lease_expires_at is not null or last_heartbeat_at is not null"
+                        + " or fenced_at is not null"))
+                .isZero();
+        assertThat(count(database, "execution_attempts where attempt_state <> 'WAITING_FOR_CLAIM'")).isZero();
+        // The consumer inbox starts empty: it records decisions this deployment makes, and inventing one would
+        // claim a message had been consumed that never arrived.
+        assertThat(count(database, "dispatch_inbox")).isZero();
+        assertThat(count(database, "pg_indexes where indexname = 'ix_execution_attempts_lease'")).isEqualTo(1);
+        assertThat(count(database, "pg_indexes where indexname = 'ix_test_runs_stopping'")).isEqualTo(1);
     }
 
     /**
@@ -220,6 +276,17 @@ class MigrationUpgradeTests {
             statements.add(runFixture(delivery[0], "QUEUED", 2, "e", delivery));
         }
 
+        // Terminated runs, in all three shapes the previous version can actually produce.
+        //
+        // Without these the fixture is populated and still proves nothing about any constraint whose subject is a
+        // terminated run: every termination CHECK short-circuits on `termination_reason IS NULL`, and only one of
+        // the lifecycle-event branches is ever evaluated. A later migration could drop a disjunct — the kind of
+        // slip a DROP-and-re-ADD rewrite invites — and ship green here while failing against the first real
+        // database it met. These states became reachable one slice ago, so the next deployment holds them.
+        statements.add(terminalRunFixture("31", "CREATED", 2, "USER_REQUESTED", "CANCELLATION", "CANCELLED"));
+        statements.add(terminalRunFixture("32", "QUEUED", 3, "QUEUE_DEADLINE", "QUEUE", "TIMED_OUT"));
+        statements.add(terminalRunFixture("33", "QUEUED", 3, "USER_REQUESTED", "CANCELLATION", "CANCELLED"));
+
         // One RUN_STATE_CHANGED row as well, so the generalized schema is exercised beside the real type.
         statements.add("""
             INSERT INTO outbox_messages (outbox_id, dispatch_id, message_id, organization_id, project_id, run_id,
@@ -243,6 +310,89 @@ class MigrationUpgradeTests {
             }
             statement.execute("SET session_replication_role = origin");
         }
+    }
+
+    /**
+     * A run that reached COMPLETED, with the lifecycle event that ended it.
+     *
+     * <p>Seeded through {@code session_replication_role = replica} like everything else here, so the shapes are
+     * written directly rather than driven through the guards — but each one is a shape the previous version's
+     * guards genuinely permit, which is the point: these are rows a real upgrade will meet.
+     *
+     * @param previousState the state the run was terminated from, which decides whether it has an attempt
+     */
+    private static String terminalRunFixture(
+            String suffix,
+            String previousState,
+            int version,
+            String terminationReason,
+            String terminationPhase,
+            String infrastructureOutcome) {
+        String runId = "00000000-0000-4000-8000-0000000000" + suffix;
+        String attemptId = "00000000-0000-4000-8000-0000000001" + suffix;
+        boolean fromQueued = "QUEUED".equals(previousState);
+        boolean cancelled = "USER_REQUESTED".equals(terminationReason);
+        StringBuilder sql = new StringBuilder("""
+            INSERT INTO test_runs (run_id, organization_id, project_id, run_version, lifecycle_state,
+                    cancellation_status, test_outcome, infrastructure_outcome, quality_gate_status,
+                    termination_reason, termination_phase, snapshot_sha256, queued_at, queue_deadline_at,
+                    cancellation_requested_at, cancellation_acknowledged_at, completed_at, current_attempt_id,
+                    created_by, created_at, updated_by, updated_at)
+            VALUES ('%s', '00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001',
+                    %d, 'COMPLETED', '%s', 'NOT_AVAILABLE', '%s', 'NOT_EVALUATED', '%s', '%s',
+                    repeat('7', 64), %s, %s, %s, %s, now(), %s,
+                    'fixture', now(), '%s', now());
+            INSERT INTO run_snapshots (run_id, organization_id, project_id, snapshot_version, run_profile_id,
+                    run_profile_revision_id, run_profile_revision_number, run_profile_sha256, environment_id,
+                    environment_revision_id, environment_revision_number, environment_sha256, parallelism,
+                    retry_max_attempts, retry_delay_milliseconds, execution_timeout_seconds,
+                    max_artifact_bytes, max_total_bytes, engine, engine_version, content_sha256, sealed)
+            VALUES ('%s', '00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001', 1,
+                    '00000000-0000-4000-8000-000000000006', '00000000-0000-4000-8000-000000000007', 1,
+                    repeat('c', 64), '00000000-0000-4000-8000-000000000004',
+                    '00000000-0000-4000-8000-000000000005', 1, repeat('b', 64), 1, 1, 0, 60, 1000, 2000,
+                    'KARATE', '2.0.0', repeat('7', 64), true);
+            """
+                .formatted(
+                        runId, version,
+                        cancelled ? "ACKNOWLEDGED" : "NOT_REQUESTED",
+                        infrastructureOutcome, terminationReason, terminationPhase,
+                        fromQueued ? "now()" : "null",
+                        fromQueued ? "now() + interval '5 min'" : "null",
+                        cancelled ? "now()" : "null",
+                        cancelled ? "now()" : "null",
+                        fromQueued ? "'" + attemptId + "'" : "null",
+                        cancelled ? "fixture-principal" : "kaas.queue-reaper",
+                        runId));
+        if (fromQueued) {
+            // A run terminated from QUEUED keeps the scheduling bundle it earned, so the fixture must too — and
+            // its dispatch was withdrawn rather than delivered, which is the outbox shape V7 introduced.
+            sql.append("""
+                INSERT INTO execution_attempts (attempt_id, organization_id, project_id, run_id, attempt_number,
+                        attempt_state, created_by, created_at)
+                VALUES ('%s', '00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001',
+                        '%s', 1, 'WAITING_FOR_CLAIM', 'kaas.scheduler', now());
+                INSERT INTO run_lifecycle_events (event_id, organization_id, project_id, run_id, run_version,
+                        sequence, event_type, previous_state, lifecycle_state, attempt_id, actor, occurred_at)
+                VALUES ('00000000-0000-4000-8000-0000000006%s', '00000000-0000-4000-8000-0000000000a0',
+                        '00000000-0000-4000-8000-000000000001', '%s', 2, 1, 'RUN_STATE_CHANGED', 'CREATED',
+                        'QUEUED', '%s', 'kaas.scheduler', now());
+                """
+                    .formatted(attemptId, runId, suffix, runId, attemptId));
+        }
+        // The terminal event itself: sequence = run_version - 1, which is the branch the new CHECK adds.
+        sql.append("""
+            INSERT INTO run_lifecycle_events (event_id, organization_id, project_id, run_id, run_version,
+                    sequence, event_type, previous_state, lifecycle_state, attempt_id, actor, occurred_at)
+            VALUES ('00000000-0000-4000-8000-0000000007%s', '00000000-0000-4000-8000-0000000000a0',
+                    '00000000-0000-4000-8000-000000000001', '%s', %d, %d, 'RUN_STATE_CHANGED', '%s',
+                    'COMPLETED', %s, '%s', now());
+            """
+                .formatted(
+                        suffix, runId, version, version - 1, previousState,
+                        fromQueued ? "'" + attemptId + "'" : "null",
+                        cancelled ? "fixture-principal" : "kaas.queue-reaper"));
+        return sql.toString();
     }
 
     /**

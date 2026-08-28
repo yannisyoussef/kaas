@@ -2,7 +2,6 @@ package com.kaas.api.controlplane.application;
 
 import com.kaas.api.controlplane.domain.CancellationStatus;
 import com.kaas.api.controlplane.domain.ExecutionAttempt;
-import com.kaas.api.controlplane.domain.ExecutionAttemptState;
 import com.kaas.api.controlplane.domain.ExecutionDispatch;
 import com.kaas.api.controlplane.domain.ExecutionDispatchPolicy;
 import com.kaas.api.controlplane.domain.RunLifecycle;
@@ -87,8 +86,7 @@ public class RunSchedulingService {
         Instant queueDeadlineAt = queueStartedAt.plus(queueTimeout);
         TestRun queued = previous.queued(queueStartedAt, queueDeadlineAt);
         UUID attemptId = UUID.randomUUID();
-        var attempt = new ExecutionAttempt(
-                attemptId, runId, 1, ExecutionAttemptState.WAITING_FOR_CLAIM, queueStartedAt);
+        var attempt = ExecutionAttempt.waitingForClaim(attemptId, runId, queueStartedAt);
         var dispatch = ExecutionDispatchPolicy.create(
                 UUID.randomUUID(), UUID.randomUUID(), queueStartedAt, organizationId, previous.projectId(), runId,
                 queued.runVersion(), attemptId, runId, previous.snapshotDigest(), queueDeadlineAt);

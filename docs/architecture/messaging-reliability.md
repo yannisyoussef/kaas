@@ -1,6 +1,6 @@
 # Messaging Reliability
 
-**Status: PROPOSED SEMANTICS.** No broker topology, outbox, inbox, publisher, consumer, retry queue, DLQ, or reconciliation job is implemented.
+**Status: PARTIALLY IMPLEMENTED.** The broker topology, transactional outbox, publisher relay with correlated confirms, consumer inbox, dispatch consumer, consumer dead-letter exchange, and the lease and queue-deadline reconcilers are implemented for the execution-dispatch message type. Result, artifact, and live-event messaging remain proposed, as do consumer-side retry queues for anything but dispatch.
 
 ## Delivery guarantee
 
@@ -14,7 +14,7 @@ Broker ordering is not a correctness dependency. A message is accepted only when
 |---|---|---|---|
 | API run creation | Scoped `(organization, principal, operation, project, Idempotency-Key)` plus normalized request fingerprint and stored response; implemented keys currently have no automatic expiry | Return original HTTP status/body/Location/ETag | Same scope/key with different fingerprint → 409 `IDEMPOTENCY_CONFLICT` |
 | Command publication | Transactional outbox row/message ID and immutable payload digest | Republish same message ID/bytes until broker confirms | Same outbox/message ID with different digest → stop publication and security alert |
-| Command consumption | Consumer inbox uniqueness on consumer identity + `messageId`; command ID/digest checked against assignment | ACK after previously committed effect | Same ID with different digest or wrong tenant/attempt/epoch → quarantine/DLQ |
+| Dispatch consumption | **IMPLEMENTED:** consumer inbox unique on consumer identity + `messageId`; every field corroborated against the persisted dispatch row before any state is read | Redelivery observes the recorded decision and is ACKed without repeating effects | Same ID with different digest → `CONFLICT`, recorded and dead-lettered without overwriting the original decision; wrong tenant, project, attempt, or version → `REJECTED` |
 | Execution claim | Attempt ID + `assignmentEpoch` and active-claim invariant | Return existing lease to same assignment | Competing worker/epoch → reject; stale epoch cannot renew |
 | Result processing | `resultId`, message ID, payload digest, command/run/attempt/epoch binding | ACK and return existing canonical/quarantined disposition | Conflicting digest or second result for attempt → quarantine/security reconciliation |
 | Artifact registration | `artifactId`, manifest ID, opaque reservation/reference, size and digest | No-op after verifying identical metadata | Reference reuse, metadata mismatch, wrong attempt/policy → reject/quarantine |
@@ -30,7 +30,7 @@ Outbox solves the database/broker dual-write gap. It does not make delivery or c
 
 ## Consumer inbox and acknowledgment
 
-The consumer validates transport size and an allowlisted local schema before domain effects. In one local transaction it records inbox identity/digest, performs the conditional domain mutation, and creates any outgoing outbox records. Broker acknowledgment occurs only after that transaction commits.
+**IMPLEMENTED for dispatch.** The consumer validates transport size and an allowlisted local schema before domain effects, with unknown properties a hard failure. In one local transaction it records inbox identity and digest, performs the conditional domain mutation, and creates any outgoing outbox records. Broker acknowledgment occurs only after that transaction commits — and a delivery tag is never used as deduplication identity, because it is channel-local and changes on every redelivery.
 
 - Crash before commit: broker redelivers and no committed effect exists.
 - Crash after commit before ACK: broker redelivers; inbox detects the exact duplicate and ACKs without repeating effects.

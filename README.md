@@ -24,12 +24,15 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | Durable scheduler backoff | IMPLEMENTED + VALIDATED | PostgreSQL-owned retry delay and quarantine that survive a restart and are shared across replicas; never mutates run lifecycle or version |
 | Early run cancellation | IMPLEMENTED + VALIDATED | POST /runs/{runId}/cancellations ends a CREATED or QUEUED run immediately, idempotent by state, tenant-scoped with concealed 404; no STOPPING phase because no worker owns the run |
 | Queue-deadline reaping | IMPLEMENTED + VALIDATED | The queue deadline is now enforced rather than merely recorded; an expired run is completed TIMED_OUT, never reported as cancelled, with durable backoff shared with the scheduler |
+| Dispatch consumption and inbox | IMPLEMENTED + VALIDATED | Production RabbitMQ consumer with strict contract validation, durable inbox keyed by message identity, database-before-acknowledgement ordering, redelivery as a decided no-op, and integrity conflicts recorded rather than resolved |
+| Worker claim and fencing | IMPLEMENTED + VALIDATED | QUEUED to CLAIMED compare-and-set corroborated against the persisted dispatch, assignment epoch as fencing token, server-controlled worker identity and lease; grants no execution, source, or secret authority |
+| Lease recovery | IMPLEMENTED + VALIDATED | Heartbeats on an internal service surface, expiry plus recovery window, fencing to STOPPING, and settlement to FAILED/LEASE_LOST so claimed work always releases capacity |
 | Dispatch suppression | IMPLEMENTED + VALIDATED | A dispatch no relay is currently holding is withdrawn in the terminating transaction, spending no attempt and counting as no dead letter; a message under a live relay lease is left to publish rather than falsely recalled |
 | Migration-upgrade testing | IMPLEMENTED + VALIDATED | Every migration verified against an empty database and against a populated previous-version database with its triggers installed, with the fixture proven to reach what the upgrade changes before it runs |
 | Runner bootstrap | SCAFFOLDED + VALIDATED | Reports that execution is disabled; launches no external process |
 | Next.js web scaffold | IMPLEMENTED + VALIDATED | Next.js 16.3.3; lint, typecheck, render test, build, production audit |
 | Contract tooling | IMPLEMENTED + VALIDATED | Strict AJV schemas/fixtures plus semantic checks; proposed contracts only |
-| OpenAPI contract | IMPLEMENTED + PROPOSED | Run create/get/list/snapshot/cancellations and configuration APIs are implemented; events/results/artifacts remain proposed |
+| OpenAPI contract | IMPLEMENTED + PROPOSED | Run create/get/list/snapshot/cancellations and configuration APIs are implemented; events/results/artifacts remain proposed. The worker heartbeat is an internal service operation and is deliberately outside the public contract |
 | Local PostgreSQL/RabbitMQ/MinIO definitions | SCAFFOLDED | Loopback-only Compose config with development health checks |
 | Modular control-plane boundaries | IMPLEMENTED | Capability packages with inward ports and ArchUnit enforcement |
 | PostgreSQL persistence | IMPLEMENTED | Flyway schema, JPA validation, tenant composite FKs, immutable-revision trigger, query indexes |
@@ -128,9 +131,11 @@ The checked-in values are local-development defaults, not production secret mana
 - [Admission/scheduler hardening report](ADMISSION_SCHEDULER_HARDENING_REPORT.md)
 - [Implemented early terminal lifecycle](docs/architecture/early-terminal-lifecycle-slice.md)
 - [Early terminal lifecycle slice report](EARLY_TERMINAL_LIFECYCLE_SLICE_REPORT.md)
+- [Implemented consumer/claim/lease architecture](docs/architecture/consumer-claim-lease-slice.md)
+- [Consumer/claim/lease slice report](CONSUMER_CLAIM_LEASE_SLICE_REPORT.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Security release requirements](docs/security/threat-model.md)
 
 ## Scope discipline
 
-This slice gives the run lifecycle its first exit: a tenant can cancel work no worker has taken, and a queue deadline that has passed now ends the run instead of holding capacity forever. It deliberately does not implement cancellation of any phase a worker owns, a STOPPING protocol, a consumer, a consumer inbox, worker claim, assignment epochs, leases, ExecutionCommand production, SSE, secret values/storage/redemption/capabilities, source bundles or capabilities, object storage, Karate parsing/execution, a container launcher, network enforcement, results/artifacts, quality-gate execution, or full OpenTelemetry infrastructure. The queue may hold published dispatch intents that nothing consumes; that is intentional.
+This slice lets published work be received and authoritatively claimed, and gives claimed work a bounded way back out. It deliberately does not implement ExecutionCommand production, source capability issuance, secret capability issuance, provisioning, SSE, secret values/storage/redemption, source bundles, object storage, Karate parsing/execution, a container launcher, network enforcement, results/artifacts, quality-gate execution, or full OpenTelemetry infrastructure. A claim records who owns an infrastructure attempt and grants no permission to execute anything; that boundary is the point.

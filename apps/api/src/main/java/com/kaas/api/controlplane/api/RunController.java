@@ -3,6 +3,7 @@ package com.kaas.api.controlplane.api;
 import com.kaas.api.controlplane.application.RunIntentService;
 import com.kaas.api.controlplane.application.RunTerminationService;
 import com.kaas.api.controlplane.domain.PageResult;
+import com.kaas.api.controlplane.domain.RunLifecycle;
 import com.kaas.api.controlplane.domain.RunSnapshot;
 import com.kaas.api.controlplane.domain.TestRun;
 import com.kaas.api.security.TenantPrincipalResolver;
@@ -94,7 +95,12 @@ public class RunController {
             @PathVariable UUID runId,
             @Valid @RequestBody CancellationRequest request) {
         TestRun run = terminations.cancel(principals.resolve(authentication), runId);
-        return ResponseEntity.ok()
+        // 200 when the run is already over, 202 when it is not. Unowned work stops immediately, so cancelling it
+        // is a completion; owned work has an assignment that must be fenced and then settled, so cancelling it is
+        // a durable request whose termination is genuinely still pending. Reporting the second as 200 would tell
+        // a client the run had finished while it was still stopping.
+        boolean pending = run.lifecycleState() != RunLifecycle.COMPLETED;
+        return (pending ? ResponseEntity.accepted() : ResponseEntity.ok())
                 .location(URI.create("/api/v1/runs/" + runId))
                 .eTag("run-" + run.runVersion())
                 .cacheControl(CacheControl.noStore())

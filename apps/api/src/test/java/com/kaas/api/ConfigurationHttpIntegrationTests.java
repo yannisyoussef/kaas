@@ -57,7 +57,14 @@ import tools.jackson.databind.ObjectMapper;
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         // These suites assert CREATED-state invariants, so the production timers must not act on them.
-        properties = {"kaas.scheduling.auto.enabled=false", "kaas.outbox.relay.enabled=false"})
+        properties = {
+            "kaas.scheduling.auto.enabled=false",
+            "kaas.outbox.relay.enabled=false",
+            // No broker in this suite and nothing claimed: both background components would only add writes
+            // that assertions about state would then have to tolerate.
+            "kaas.consumer.enabled=false",
+            "kaas.claim.reconcile.enabled=false"
+        })
 class ConfigurationHttpIntegrationTests {
     private static final String ISSUER = "https://issuer.kaas.test";
     private static final String AUDIENCE = "kaas-api";
@@ -1800,13 +1807,13 @@ class ConfigurationHttpIntegrationTests {
                         UUID.fromString(runId)))
                 .isInstanceOf(DataIntegrityViolationException.class)
                 .satisfies(exception -> assertThat(rootCause(exception).getMessage())
-                        .contains("only scheduling and early terminal transitions"));
+                        .contains("only scheduling, claim, stop, and terminal transitions"));
         assertThatThrownBy(() -> jdbc.update(
                         "update test_runs set run_version = 2, lifecycle_state = 'RUNNING' where run_id = ?",
                         UUID.fromString(runId)))
                 .isInstanceOf(DataIntegrityViolationException.class)
                 .satisfies(exception -> assertThat(rootCause(exception).getMessage())
-                        .contains("only scheduling and early terminal transitions"));
+                        .contains("only scheduling, claim, stop, and terminal transitions"));
         assertThatThrownBy(() -> jdbc.update(
                         """
                         insert into test_runs

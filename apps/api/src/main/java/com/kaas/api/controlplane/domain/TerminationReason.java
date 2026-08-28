@@ -9,7 +9,13 @@ public enum TerminationReason {
     /** A tenant asked for the run to stop before any worker owned it. */
     USER_REQUESTED(TerminationPhase.CANCELLATION, InfrastructureOutcome.CANCELLED),
     /** The run waited longer than its queue deadline allowed. Nobody cancelled it; it simply expired. */
-    QUEUE_DEADLINE(TerminationPhase.QUEUE, InfrastructureOutcome.TIMED_OUT);
+    QUEUE_DEADLINE(TerminationPhase.QUEUE, InfrastructureOutcome.TIMED_OUT),
+    /**
+     * A worker claimed the run and then stopped renewing its lease. Deliberately not a timeout: a queue deadline
+     * means the platform never got to the run, while a lost lease means it did and then lost the worker holding
+     * it. The two need different diagnoses, so they must not share an outcome.
+     */
+    LEASE_LOST(TerminationPhase.CLAIM, InfrastructureOutcome.FAILED);
 
     private final TerminationPhase phase;
     private final InfrastructureOutcome outcome;

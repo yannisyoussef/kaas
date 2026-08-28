@@ -14,6 +14,7 @@ public record TestRun(
         QualityGateStatus qualityGateStatus,
         TerminationReason terminationReason,
         TerminationPhase terminationPhase,
+        StopReason stopReason,
         String snapshotDigest,
         Instant queueStartedAt,
         Instant queueDeadlineAt,
@@ -37,6 +38,7 @@ public record TestRun(
                 QualityGateStatus.NOT_EVALUATED,
                 null,
                 null,
+                null,
                 snapshotDigest,
                 null,
                 null,
@@ -58,8 +60,8 @@ public record TestRun(
         return new TestRun(
                 runId, projectId, Math.addExact(runVersion, 1), RunLifecycle.QUEUED, cancellationStatus,
                 testOutcome, infrastructureOutcome, qualityGateStatus, terminationReason, terminationPhase,
-                snapshotDigest, startedAt, deadlineAt, cancellationRequestedAt, cancellationAcknowledgedAt,
-                completedAt, createdBy, createdAt, startedAt);
+                stopReason, snapshotDigest, startedAt, deadlineAt, cancellationRequestedAt,
+                cancellationAcknowledgedAt, completedAt, createdBy, createdAt, startedAt);
     }
 
     /**
@@ -87,6 +89,100 @@ public record TestRun(
             throw new IllegalArgumentException("A run may only expire at or after its queue deadline.");
         }
         return terminated(TerminationReason.QUEUE_DEADLINE, null, at);
+    }
+
+    /**
+     * Hands the run to the worker instance that won the claim. This is the first state a run reaches that
+     * somebody owns, which is why everything after it needs fencing to take back.
+     *
+     * <p>Claiming after the queue deadline is refused here as well as by the database. The reaper is entitled to
+     * end a run whose deadline has passed, and a claim that slipped past it would leave two components each
+     * believing they hold the run.
+     */
+    public TestRun claimed(Instant at) {
+        if (lifecycleState != RunLifecycle.QUEUED || !lifecycleState.canTransitionTo(RunLifecycle.CLAIMED)) {
+            throw new IllegalStateException("Only a QUEUED run can be claimed.");
+        }
+        if (cancellationStatus != CancellationStatus.NOT_REQUESTED) {
+            throw new IllegalStateException("A run that has been asked to stop cannot be claimed.");
+        }
+        if (at == null || at.isBefore(updatedAt)) {
+            throw new IllegalArgumentException("A claim cannot precede the run's own last update.");
+        }
+        if (at.isAfter(queueDeadlineAt)) {
+            throw new IllegalStateException("A run cannot be claimed after its queue deadline.");
+        }
+        return new TestRun(
+                runId, projectId, Math.addExact(runVersion, 1), RunLifecycle.CLAIMED, cancellationStatus,
+                testOutcome, infrastructureOutcome, qualityGateStatus, terminationReason, terminationPhase,
+                stopReason, snapshotDigest, queueStartedAt, queueDeadlineAt, cancellationRequestedAt,
+                cancellationAcknowledgedAt, completedAt, createdBy, createdAt, at);
+    }
+
+    /**
+     * Begins ending a run somebody owns. Unlike unowned work this cannot finish in one step: an assignment
+     * exists, and it has to be fenced before the run can be called over. No outcome is written here — the run has
+     * not finished, and recording one now would let a crash leave a run claiming a result it never reached.
+     *
+     * @param requestedAt when a tenant asked, for a cancellation; null when the lease was simply lost
+     */
+    public TestRun stopping(StopReason reason, Instant requestedAt, Instant at) {
+        if (lifecycleState != RunLifecycle.CLAIMED || !lifecycleState.canTransitionTo(RunLifecycle.STOPPING)) {
+            throw new IllegalStateException("Only a run somebody owns can begin stopping.");
+        }
+        if (reason == null || at == null || at.isBefore(updatedAt)) {
+            throw new IllegalArgumentException("A stop needs a reason and cannot precede the run's last update.");
+        }
+        boolean cancelling = reason == StopReason.USER_REQUESTED;
+        if (cancelling == (requestedAt == null)) {
+            throw new IllegalArgumentException("A cancellation records when it was asked for; a lease loss does not.");
+        }
+        if (cancelling && cancellationStatus != CancellationStatus.NOT_REQUESTED) {
+            throw new IllegalStateException("This run has already been asked to stop.");
+        }
+        return new TestRun(
+                runId, projectId, Math.addExact(runVersion, 1), RunLifecycle.STOPPING,
+                cancelling ? CancellationStatus.REQUESTED : cancellationStatus,
+                testOutcome, infrastructureOutcome, qualityGateStatus, terminationReason, terminationPhase,
+                reason, snapshotDigest, queueStartedAt, queueDeadlineAt,
+                cancelling ? requestedAt : cancellationRequestedAt, cancellationAcknowledgedAt, completedAt,
+                createdBy, createdAt, at);
+    }
+
+    /**
+     * Settles a stopping run. The outcome was decided when it entered STOPPING and is not revisited here, so a
+     * reconciler cannot turn a lost lease into a cancellation or the reverse.
+     */
+    public TestRun settled(Instant at) {
+        if (lifecycleState != RunLifecycle.STOPPING) {
+            throw new IllegalStateException("Only a stopping run can be settled.");
+        }
+        TerminationReason reason = stopReason.terminationReason();
+        boolean cancelling = reason == TerminationReason.USER_REQUESTED;
+        if (at == null || at.isBefore(updatedAt)) {
+            throw new IllegalArgumentException("A run cannot end before its own last update.");
+        }
+        return new TestRun(
+                runId,
+                projectId,
+                Math.addExact(runVersion, 1),
+                RunLifecycle.COMPLETED,
+                cancelling ? CancellationStatus.ACKNOWLEDGED : cancellationStatus,
+                TestOutcome.NOT_AVAILABLE,
+                reason.infrastructureOutcome(),
+                QualityGateStatus.NOT_EVALUATED,
+                reason,
+                reason.phase(),
+                stopReason,
+                snapshotDigest,
+                queueStartedAt,
+                queueDeadlineAt,
+                cancellationRequestedAt,
+                cancelling ? at : cancellationAcknowledgedAt,
+                at,
+                createdBy,
+                createdAt,
+                at);
     }
 
     private TestRun terminated(TerminationReason reason, Instant requestedAt, Instant at) {
@@ -119,6 +215,7 @@ public record TestRun(
                 QualityGateStatus.NOT_EVALUATED,
                 reason,
                 reason.phase(),
+                stopReason,
                 snapshotDigest,
                 queueStartedAt,
                 queueDeadlineAt,

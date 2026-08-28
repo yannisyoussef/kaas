@@ -17,6 +17,7 @@ class RunLifecycleTest {
     private static final UUID PROJECT = UUID.fromString("22222222-0000-4000-8000-000000000002");
     private static final String DIGEST = "sha256:" + "a".repeat(64);
     private static final Instant NOW = Instant.parse("2026-08-28T12:00:00Z");
+    private static final java.time.Duration LEASE = java.time.Duration.ofSeconds(30);
 
     @Test
     void schedulingAndEarlyTerminationAreTheOnlyTransitionsLeavingCreated() {
@@ -29,15 +30,21 @@ class RunLifecycleTest {
     }
 
     @Test
-    void theClaimTransitionRemainsDefinedButIsNotReachableFromAnyImplementedCode() {
-        // Defined by the state machine so the contract stays honest about the target design.
-        assertThat(RunLifecycle.QUEUED.canTransitionTo(RunLifecycle.CLAIMED)).isTrue();
-        // But no domain operation performs it. Every mutator the aggregate exposes is named here, so adding one
-        // that reaches a worker-owned phase cannot happen quietly.
+    void provisioningRemainsDefinedButIsNotReachableFromAnyImplementedCode() {
+        // Claiming is implemented now, so the frontier has moved: the next transition is the one that would hand
+        // a worker authority to fetch source and secrets, and nothing performs it.
+        assertThat(RunLifecycle.CLAIMED.canTransitionTo(RunLifecycle.PROVISIONING)).isTrue();
+        // Every mutator the aggregate exposes is named here, so adding one that starts execution — or that
+        // reaches COMPLETED from an owned state without fencing through STOPPING — cannot happen quietly.
         assertThat(TestRun.class.getDeclaredMethods())
                 .filteredOn(method -> method.getReturnType() == TestRun.class && !method.isSynthetic())
                 .extracting(java.lang.reflect.Method::getName)
-                .containsExactlyInAnyOrder("created", "queued", "cancelled", "expired", "terminated");
+                .containsExactlyInAnyOrder(
+                        "created", "queued", "claimed", "stopping", "settled", "cancelled", "expired",
+                        "terminated");
+        // Owned work has exactly one way out, and it goes through STOPPING.
+        assertThat(RunLifecycle.CLAIMED.canTransitionTo(RunLifecycle.COMPLETED)).isFalse();
+        assertThat(RunLifecycle.STOPPING.canTransitionTo(RunLifecycle.COMPLETED)).isTrue();
     }
 
     @Test
@@ -72,8 +79,8 @@ class RunLifecycleTest {
         // put a run into STOPPING — which is exactly why the branch would otherwise never be executed by a test.
         TestRun stopping = new TestRun(
                 RUN, PROJECT, 5, RunLifecycle.STOPPING, CancellationStatus.NOT_REQUESTED, null, null,
-                QualityGateStatus.NOT_EVALUATED, null, null, DIGEST, NOW.plusSeconds(1), NOW.plusSeconds(301),
-                null, null, null, "creator", NOW, NOW.plusSeconds(2));
+                QualityGateStatus.NOT_EVALUATED, null, null, StopReason.LEASE_LOST, DIGEST, NOW.plusSeconds(1),
+                NOW.plusSeconds(301), null, null, null, "creator", NOW, NOW.plusSeconds(2));
         assertThat(stopping.lifecycleState().canTransitionTo(RunLifecycle.COMPLETED)).isTrue();
         assertThatThrownBy(() -> stopping.cancelled(NOW.plusSeconds(3), NOW.plusSeconds(4)))
                 .isInstanceOf(IllegalStateException.class)
@@ -148,15 +155,133 @@ class RunLifecycleTest {
     }
 
     @Test
-    void theInitialAttemptCannotCarryAnAssignmentOrANonInitialNumber() {
+    void theInitialAttemptIsBornUnassignedAndCannotCarryANonInitialNumber() {
         UUID attemptId = UUID.randomUUID();
-        assertThat(new ExecutionAttempt(attemptId, RUN, 1, ExecutionAttemptState.WAITING_FOR_CLAIM, NOW).state())
-                .isEqualTo(ExecutionAttemptState.WAITING_FOR_CLAIM);
+        ExecutionAttempt attempt = ExecutionAttempt.waitingForClaim(attemptId, RUN, NOW);
+        assertThat(attempt.state()).isEqualTo(ExecutionAttemptState.WAITING_FOR_CLAIM);
+        assertThat(attempt.assignment()).isNull();
         // Infrastructure retry is out of scope for the MVP, so attempt two cannot be modelled yet.
-        assertThatThrownBy(() ->
-                        new ExecutionAttempt(attemptId, RUN, 2, ExecutionAttemptState.WAITING_FOR_CLAIM, NOW))
+        assertThatThrownBy(() -> new ExecutionAttempt(
+                        attemptId, RUN, 2, ExecutionAttemptState.WAITING_FOR_CLAIM, NOW, null))
                 .isInstanceOf(IllegalArgumentException.class);
-        // There is no claimed or assigned state to reach before a worker exists.
-        assertThat(ExecutionAttemptState.values()).containsExactly(ExecutionAttemptState.WAITING_FOR_CLAIM);
+        // The state and the assignment are two views of one fact and may never disagree, in either direction.
+        assertThatThrownBy(() -> new ExecutionAttempt(
+                        attemptId, RUN, 1, ExecutionAttemptState.CLAIMED, NOW, null))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new ExecutionAttempt(
+                        attemptId, RUN, 1, ExecutionAttemptState.WAITING_FOR_CLAIM, NOW,
+                        WorkerAssignment.claim("worker-1", NOW, LEASE)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new ExecutionAttempt(
+                        attemptId, RUN, 1, ExecutionAttemptState.FENCED, NOW,
+                        WorkerAssignment.claim("worker-1", NOW, LEASE)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void anAssignmentIsHeldByExactlyOneWorkerUnderExactlyOneEpoch() {
+        ExecutionAttempt claimed =
+                ExecutionAttempt.waitingForClaim(UUID.randomUUID(), RUN, NOW).claimedBy("worker-1", NOW, LEASE);
+
+        assertThat(claimed.assignment().epoch()).isEqualTo(WorkerAssignment.FIRST_EPOCH);
+        assertThat(claimed.assignment().isHeldBy("worker-1", 1)).isTrue();
+        // Identity plus epoch, never one or the other. An epoch alone would let any worker act as the owner, and
+        // an identity alone would let a restarted worker act under an assignment it has already lost.
+        assertThat(claimed.assignment().isHeldBy("worker-2", 1)).isFalse();
+        assertThat(claimed.assignment().isHeldBy("worker-1", 2)).isFalse();
+
+        // A renewal is the same assignment continuing, so it may move only the lease window.
+        ExecutionAttempt renewed = claimed.heartbeat(NOW.plusSeconds(5), LEASE);
+        assertThat(renewed.assignment().epoch()).isEqualTo(1);
+        assertThat(renewed.assignment().workerId()).isEqualTo("worker-1");
+        assertThat(renewed.assignment().leaseStartedAt()).isEqualTo(NOW);
+        assertThat(renewed.assignment().leaseExpiresAt()).isEqualTo(NOW.plusSeconds(35));
+
+        // An expired lease is fenced, never renewed: taking ownership back by being late rather than correct is
+        // exactly what fencing exists to prevent.
+        assertThatThrownBy(() -> claimed.heartbeat(NOW.plusSeconds(31), LEASE))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("expired lease cannot be renewed");
+        // And a heartbeat cannot run backwards.
+        assertThatThrownBy(() -> renewed.heartbeat(NOW.plusSeconds(1), LEASE))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        ExecutionAttempt fenced = renewed.fenced(NOW.plusSeconds(40));
+        assertThat(fenced.state()).isEqualTo(ExecutionAttemptState.FENCED);
+        // The epoch survives fencing, because a later assignment has to be strictly greater than it.
+        assertThat(fenced.assignment().epoch()).isEqualTo(1);
+        assertThat(fenced.assignment().isHeldBy("worker-1", 1)).isFalse();
+        assertThatThrownBy(() -> fenced.heartbeat(NOW.plusSeconds(41), LEASE))
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> fenced.fenced(NOW.plusSeconds(42))).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void claimingAndStoppingAreTheOnlyWaysIntoAndOutOfOwnership() {
+        TestRun queued = TestRun.created(RUN, PROJECT, DIGEST, "creator", NOW)
+                .queued(NOW.plusSeconds(1), NOW.plusSeconds(301));
+
+        TestRun claimed = queued.claimed(NOW.plusSeconds(2));
+        assertThat(claimed.lifecycleState()).isEqualTo(RunLifecycle.CLAIMED);
+        assertThat(claimed.runVersion()).isEqualTo(3);
+        // A claim takes ownership of the run; it decides nothing about its outcome.
+        assertThat(claimed.testOutcome()).isNull();
+        assertThat(claimed.infrastructureOutcome()).isNull();
+        assertThat(claimed.completedAt()).isNull();
+        // Claiming after the queue deadline would leave the reaper and the consumer each believing they hold it.
+        assertThatThrownBy(() -> queued.claimed(NOW.plusSeconds(302)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("after its queue deadline");
+        // And a run already asked to stop cannot be taken.
+        assertThatThrownBy(() -> queued.stopping(StopReason.USER_REQUESTED, NOW, NOW.plusSeconds(2)))
+                .isInstanceOf(IllegalStateException.class);
+
+        // Owned work cannot finish in one step: the assignment has to be fenced first.
+        assertThatThrownBy(() -> claimed.cancelled(NOW.plusSeconds(3), NOW.plusSeconds(3)))
+                .isInstanceOf(IllegalStateException.class);
+
+        TestRun stopping = claimed.stopping(StopReason.USER_REQUESTED, NOW.plusSeconds(3), NOW.plusSeconds(3));
+        assertThat(stopping.lifecycleState()).isEqualTo(RunLifecycle.STOPPING);
+        assertThat(stopping.cancellationStatus()).isEqualTo(CancellationStatus.REQUESTED);
+        // No outcome yet: the run has not finished, and writing one now would let a crash leave a run claiming a
+        // result it never reached.
+        assertThat(stopping.infrastructureOutcome()).isNull();
+        assertThat(stopping.completedAt()).isNull();
+
+        TestRun settled = stopping.settled(NOW.plusSeconds(4));
+        assertThat(settled.lifecycleState()).isEqualTo(RunLifecycle.COMPLETED);
+        assertThat(settled.runVersion()).isEqualTo(5);
+        assertThat(settled.infrastructureOutcome()).isEqualTo(InfrastructureOutcome.CANCELLED);
+        assertThat(settled.terminationReason()).isEqualTo(TerminationReason.USER_REQUESTED);
+        assertThat(settled.cancellationStatus()).isEqualTo(CancellationStatus.ACKNOWLEDGED);
+        assertThat(settled.testOutcome()).isEqualTo(TestOutcome.NOT_AVAILABLE);
+        assertThat(settled.qualityGateStatus()).isEqualTo(QualityGateStatus.NOT_EVALUATED);
+    }
+
+    @Test
+    void aLostLeaseIsAnInfrastructureFailureAndNeverACancellationOrATimeout() {
+        TestRun settled = TestRun.created(RUN, PROJECT, DIGEST, "creator", NOW)
+                .queued(NOW.plusSeconds(1), NOW.plusSeconds(301))
+                .claimed(NOW.plusSeconds(2))
+                .stopping(StopReason.LEASE_LOST, null, NOW.plusSeconds(40))
+                .settled(NOW.plusSeconds(41));
+
+        assertThat(settled.terminationReason()).isEqualTo(TerminationReason.LEASE_LOST);
+        assertThat(settled.terminationPhase()).isEqualTo(TerminationPhase.CLAIM);
+        assertThat(settled.infrastructureOutcome()).isEqualTo(InfrastructureOutcome.FAILED);
+        // Nobody asked, so nothing about it may claim anybody did — and it is not a timeout either, because the
+        // platform did reach this run; it lost the worker that had it.
+        assertThat(settled.cancellationStatus()).isEqualTo(CancellationStatus.NOT_REQUESTED);
+        assertThat(settled.cancellationRequestedAt()).isNull();
+        assertThat(settled.testOutcome()).isEqualTo(TestOutcome.NOT_AVAILABLE);
+
+        // The two stop reasons each require the evidence that belongs to them.
+        TestRun claimed = TestRun.created(RUN, PROJECT, DIGEST, "creator", NOW)
+                .queued(NOW.plusSeconds(1), NOW.plusSeconds(301))
+                .claimed(NOW.plusSeconds(2));
+        assertThatThrownBy(() -> claimed.stopping(StopReason.LEASE_LOST, NOW.plusSeconds(3), NOW.plusSeconds(3)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> claimed.stopping(StopReason.USER_REQUESTED, null, NOW.plusSeconds(3)))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

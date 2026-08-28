@@ -77,6 +77,10 @@ import tools.jackson.databind.ObjectMapper;
         properties = {
             "kaas.scheduling.auto.enabled=false",
             "kaas.outbox.relay.enabled=false",
+            // No broker in this suite, and no claim: a consumer would find nothing and a reconciler would
+            // have nothing to reconcile, but both would add background writes to assertions about state.
+            "kaas.consumer.enabled=false",
+            "kaas.claim.reconcile.enabled=false",
             "kaas.outbox.relay.max-attempts=3",
             "kaas.outbox.relay.base-backoff=PT10S",
             "kaas.outbox.relay.max-backoff=PT40S",

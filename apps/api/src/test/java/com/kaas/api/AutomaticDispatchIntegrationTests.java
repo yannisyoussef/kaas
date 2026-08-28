@@ -64,7 +64,12 @@ import tools.jackson.databind.ObjectMapper;
             "kaas.outbox.relay.interval=PT0.2S",
             "kaas.outbox.relay.initial-delay=PT0.2S",
             "kaas.outbox.relay.batch-size=5",
-            "kaas.outbox.relay.claim-ttl=PT1M"
+            "kaas.outbox.relay.claim-ttl=PT1M",
+            // The consumer is off here on purpose. This test asserts that a run reaches the broker with nobody
+            // driving it, which it does by reading the message off the queue — and a live consumer would take
+            // it first. That the consumer then claims it is proved end to end in DispatchConsumerInboxTests.
+            "kaas.consumer.enabled=false",
+            "kaas.claim.reconcile.enabled=false"
         })
 class AutomaticDispatchIntegrationTests {
     private static final String ISSUER = "https://issuer.kaas.test";

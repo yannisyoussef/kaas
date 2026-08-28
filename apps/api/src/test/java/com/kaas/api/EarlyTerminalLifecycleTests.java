@@ -85,6 +85,10 @@ import tools.jackson.databind.ObjectMapper;
             "kaas.scheduling.auto.enabled=false",
             "kaas.reaping.auto.enabled=false",
             "kaas.outbox.relay.enabled=false",
+            // No broker in this suite, and no claim: a consumer would find nothing and a reconciler would
+            // have nothing to reconcile, but both would add background writes to assertions about state.
+            "kaas.consumer.enabled=false",
+            "kaas.claim.reconcile.enabled=false",
             // Short enough that a real deadline can actually pass inside a test.
             "kaas.scheduling.queue-timeout=PT2S",
             "kaas.admission.max-active-runs-per-organization=4",
@@ -511,7 +515,7 @@ class EarlyTerminalLifecycleTests {
         Tenant tenant = tenant();
         UUID runId = createRun(tenant);
         scheduler.scheduleDue();
-        String guard = "only scheduling and early terminal transitions are supported";
+        String guard = "only scheduling, claim, stop, and terminal transitions are supported";
 
         // A terminal state with no completion time is not a state. The guard rejects it first; the CHECK behind
         // it is proved separately below, because a defence that is never reached is not a defence.
@@ -764,7 +768,7 @@ class EarlyTerminalLifecycleTests {
         Tenant tenant = tenant();
         UUID runId = createRun(tenant);
         scheduler.scheduleDue();
-        String guard = "only scheduling and early terminal transitions are supported";
+        String guard = "only scheduling, claim, stop, and terminal transitions are supported";
 
         // A system expiry pinned to a named tenant, and a tenant cancellation wearing the platform's identity,
         // are the same forgery in opposite directions. The scheduling branch has always pinned its actor; the
@@ -937,12 +941,16 @@ class EarlyTerminalLifecycleTests {
     void terminationRefusesEveryPhaseAWorkerWouldOwn() throws Exception {
         Tenant tenant = tenant();
         UUID runId = createRun(tenant);
-        // CLAIMED is unreachable through any implemented path, so it has to be forged to test the refusal at all.
-        // The point is that the use case does not rely on the database alone.
+        // PROVISIONING is unreachable through any implemented path, so it has to be forged to test the refusal at
+        // all. The point is that the use case does not rely on the database alone. It is forged after scheduling
+        // so the run has the attempt every owned state requires.
+        scheduler.scheduleDue();
         jdbc.update("alter table test_runs disable trigger test_runs_supported_update");
+        jdbc.update("alter table test_runs disable trigger test_run_scheduling_bundle_complete");
         try {
-            jdbc.update("update test_runs set lifecycle_state = 'STOPPING' where run_id = ?", runId);
+            jdbc.update("update test_runs set lifecycle_state = 'PROVISIONING' where run_id = ?", runId);
         } finally {
+            jdbc.update("alter table test_runs enable trigger test_run_scheduling_bundle_complete");
             jdbc.update("alter table test_runs enable trigger test_runs_supported_update");
         }
 
@@ -950,8 +958,9 @@ class EarlyTerminalLifecycleTests {
 
         assertThat(response.statusCode()).isEqualTo(409);
         assertThat(response.body()).contains("RUN_NOT_CANCELLABLE");
-        assertThat(lifecycleOf(runId)).isEqualTo("STOPPING");
-        assertThat(count("run_lifecycle_events", runId)).isZero();
+        assertThat(lifecycleOf(runId)).isEqualTo("PROVISIONING");
+        // The scheduling event is the only one it has; no termination was recorded.
+        assertThat(count("run_lifecycle_events", runId)).isEqualTo(1);
     }
 
     @Test

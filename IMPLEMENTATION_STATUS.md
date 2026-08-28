@@ -2,7 +2,7 @@
 
 Status date: 2026-08-28
 
-This document describes repository reality after the early terminal lifecycle slice. Product vision and execution architecture do not imply runtime capability.
+This document describes repository reality after the dispatch consumption, claim, and lease slice. Product vision and execution architecture do not imply runtime capability.
 
 ## Implemented and validated
 
@@ -51,13 +51,21 @@ This document describes repository reality after the early terminal lifecycle sl
 - Admission capacity is genuinely released. Before this slice the ceiling counted runs that could never leave, so an organization at its limit was permanently stuck.
 - PostgreSQL V7 rewrite of the scheduling-only guard set as a unit — `guard_supported_test_run_update`, `require_complete_scheduling_bundle`, `guard_run_lifecycle_event`, `ck_run_lifecycle_events_schedule` (replaced by `ck_run_lifecycle_events_transition`), `guard_outbox_message`, `guard_run_scheduling_control` — permitting exactly four transitions and failing closed on everything else, plus terminal columns, ten validated check constraints across the three tables, a nullable lifecycle-event attempt reference, and partial indexes for the reaper's selection and the relay's dead-letter count.
 - Migration-upgrade testing as a permanent gate: every migration is verified against an empty database and against a populated previous-version database with that version's triggers installed, and the populated fixture is proven to reach what the upgrade changes before the upgrade runs.
-- Final Java 25/Gradle 9.7.1 clean verification: 126 API tests plus 1 runner test passed with zero failures/skips using PostgreSQL and RabbitMQ Testcontainers; contract, web, audit, Compose, and whitespace gates also passed.
+- The dispatch consumer ships **disabled by default**. It is complete and proven end to end against a real broker, but nothing in the repository can yet send a heartbeat, so enabling it without a worker claims every run and then loses its lease sixty seconds later — recording FAILED / LEASE_LOST / CLAIM, which asserts the platform reached the run and lost the worker holding it when no worker ever existed. Until a heartbeating worker exists, the queue deadline's TIMED_OUT is the honest ending. Starting the consumer with lease reconciliation disabled is refused outright, because claimed runs would then hold admission capacity with nothing able to release them.
+- Production RabbitMQ dispatch consumer with a durable inbox: strict contract validation of the exact published bytes (unknown properties rejected, size checked before parsing, strict UTF-8, semantic digest re-derived), identity corroborated against the persisted dispatch row before any state is read, and a decision committed to PostgreSQL before the broker is acknowledged.
+- Consumer inbox keyed by application message identity rather than delivery tag, with redelivery counted on the existing decision instead of recorded as a second one, and a known identity carrying different bytes recorded as an integrity conflict rather than resolved.
+- Requeue reserved for the control plane's own failures and paced so an outage cannot become a hot loop; malformed, unsupported, and conflicting messages refused without requeue to a consumer dead-letter exchange; stale messages acknowledged rather than dead-lettered.
+- Authoritative QUEUED to CLAIMED claim: compare-and-set on the run, the assignment on its attempt, and the lifecycle event in one transaction, with assignment epoch 1 as the fencing token and a server-controlled worker identity that is audit rather than authorization.
+- Server-controlled worker lease with an internal heartbeat surface on its own security chain: 30-second lease, 10-second heartbeat, 30-second recovery window. A heartbeat renews only the assignment it can name, bumps no version, emits no event, and cannot revive an expired or fenced lease.
+- Lease-expiry recovery and cancellation of owned work, both through CLAIMED to STOPPING to COMPLETED with the assignment fenced in the same transaction as the lifecycle move, settling as FAILED/LEASE_LOST/CLAIM or CANCELLED/USER_REQUESTED/CANCELLATION. Claimed work always releases admission capacity.
+- PostgreSQL V8 rewrite of the lifecycle guard set as a unit for ownership: the attempt guard moves from insert-only to claim/heartbeat/fence, the bundle invariant gains CLAIMED and STOPPING branches, a terminal run may retain no live assignment, and every transition's actor is pinned to the identity entitled to it.
+- Final Java 25/Gradle 9.7.1 clean verification: 154 API tests plus 1 runner test passed with zero failures/skips using PostgreSQL and RabbitMQ Testcontainers; contract, web, audit, Compose, and whitespace gates also passed.
 
 ## Scaffolded, not product functionality
 
 - The runner prints a status message and cannot execute Karate, shell commands, or external processes.
 - The web application contains a landing page and placeholder dashboard with no API client or product data.
-- Run create/get/list/snapshot/cancellations OpenAPI paths are implemented. Events/results/artifacts and execution JSON Schemas remain proposed contracts.
+- Run create/get/list/snapshot/cancellations OpenAPI paths are implemented. Events/results/artifacts and execution JSON Schemas remain proposed contracts. The worker heartbeat is an internal service operation, deliberately outside the public contract.
 - Docker Compose PostgreSQL is configured for the API. RabbitMQ and MinIO are not connected to feature lifecycle.
 - Docker Compose binds PostgreSQL, RabbitMQ, and MinIO to loopback and defines development health checks. Configuration validation passes; container startup was not verified because the local Docker daemon was unavailable.
 
@@ -123,7 +131,7 @@ No item above is runtime behavior. KAA-004 remains open: Docker/host/daemon/netw
 
 ## Current vertical slice
 
-Authenticated, organization-scoped Project/FeatureRevision and Environment/RunProfile lifecycles, TestRun/RunSnapshot persistence, the single CREATED to QUEUED scheduling transition, at-least-once publication of the resulting dispatch intent to RabbitMQ, and per-organization admission control with durable scheduler backoff are implemented. A background scheduler triggers the transition and a separate relay loop publishes the outbox; PostgreSQL remains authoritative for run state, attempt identity, dispatch intent, and delivery state. Queue-time dispatch intent is deliberately not a claim-time execution command: no assignment epoch, lease, or runtime capability exists yet. Worker claim, consumption, and execution remain disabled until their separate protocol and hostile-execution release gates are implemented and validated.
+Authenticated, organization-scoped Project/FeatureRevision and Environment/RunProfile lifecycles, TestRun/RunSnapshot persistence, the single CREATED to QUEUED scheduling transition, at-least-once publication of the resulting dispatch intent to RabbitMQ, and per-organization admission control with durable scheduler backoff are implemented. A background scheduler triggers the transition and a separate relay loop publishes the outbox; PostgreSQL remains authoritative for run state, attempt identity, dispatch intent, and delivery state. Durable consumption, worker claim, assignment-epoch fencing, and a server-controlled lease with heartbeats and expiry recovery are implemented; the consumer is shipped disabled by default because nothing yet heartbeats, and enabling it without a worker would terminalize every run as a lost lease, which is a diagnosis no worker earned. Queue-time dispatch intent is still deliberately not a claim-time execution command: claiming records ownership of an infrastructure attempt and issues no execution command and no source or secret capability. Execution remains absent until its separate protocol and hostile-execution release gates are implemented and validated.
 
 ## Security gate
 

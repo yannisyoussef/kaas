@@ -1,6 +1,7 @@
 package com.kaas.api.controlplane.application;
 
 import com.kaas.api.controlplane.domain.RunLifecycle;
+import com.kaas.api.controlplane.domain.StopReason;
 import com.kaas.api.controlplane.domain.TerminationReason;
 import com.kaas.api.controlplane.domain.TestRun;
 import com.kaas.api.security.TenantPrincipal;
@@ -36,13 +37,19 @@ public class RunTerminationService {
 
     private final RunIntentRepository runs;
     private final RunTerminationRepository terminations;
+    private final WorkerLeaseRepository leases;
     private final Clock clock;
     private final MeterRegistry meters;
 
     public RunTerminationService(
-            RunIntentRepository runs, RunTerminationRepository terminations, Clock clock, MeterRegistry meters) {
+            RunIntentRepository runs,
+            RunTerminationRepository terminations,
+            WorkerLeaseRepository leases,
+            Clock clock,
+            MeterRegistry meters) {
         this.runs = runs;
         this.terminations = terminations;
+        this.leases = leases;
         this.clock = clock;
         this.meters = meters;
     }
@@ -62,6 +69,12 @@ public class RunTerminationService {
         UUID organizationId = principal.organizationId();
         var locked = terminations.lockTerminable(organizationId, runId);
         if (locked.isEmpty()) {
+            // Nothing unowned to cancel. A run a worker holds takes the longer road: its assignment has to be
+            // fenced before it can end, so cancelling it is a request rather than a completion.
+            var owned = requestStop(principal, runId);
+            if (owned.isPresent()) {
+                return owned.orElseThrow();
+            }
             return alreadyDecided(organizationId, runId);
         }
         TestRun previous = locked.orElseThrow();
@@ -70,6 +83,64 @@ public class RunTerminationService {
                 organizationId, previous, cancelled, UUID.randomUUID(), principal.principalId());
         terminated(organizationId, cancelled, TerminationReason.USER_REQUESTED);
         return cancelled;
+    }
+
+    /**
+     * Cancels a run a worker already owns.
+     *
+     * <p>Unlike unowned work this cannot finish in one step. An assignment exists, and it has to be taken back
+     * before the run can be called over — so the request is recorded, the assignment is fenced, and the run
+     * enters STOPPING for the reconciler to settle. That is why this returns a pending run rather than a
+     * terminal one, and why the endpoint answers 202 for it.
+     *
+     * @return the run in STOPPING, or empty when it was not owned and the caller should fall back to cancelling
+     *     unowned work
+     */
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public Optional<TestRun> requestStop(TenantPrincipal principal, UUID runId) {
+        Instant requestedAt = clock.instant();
+        UUID organizationId = principal.organizationId();
+        var locked = leases.lockOwnedByRun(runId);
+        if (locked.isEmpty()) {
+            return Optional.empty();
+        }
+        var owned = locked.orElseThrow();
+        // Tenant scoping is checked against the row, because the lookup is by run alone: a worker holds no tenant
+        // identity, so the repository cannot scope for us. A run belonging to another organization must be
+        // indistinguishable from one that does not exist.
+        if (!owned.organizationId().equals(organizationId)) {
+            throw ApiException.notFound();
+        }
+        TestRun run = owned.run();
+        if (run.lifecycleState() != RunLifecycle.CLAIMED) {
+            // Already stopping. If it is stopping *because somebody cancelled it*, this request is a duplicate of
+            // that one and returning the run is honest. If it is stopping for any other reason, it is not: the
+            // run will settle FAILED with no cancellation recorded anywhere, and answering "accepted, pending"
+            // would tell the caller its cancellation is durable when nothing of the kind exists. That is the same
+            // false-cause-in-an-audited-record this service refuses to write one state later.
+            if (run.stopReason() == StopReason.USER_REQUESTED) {
+                return Optional.of(run);
+            }
+            throw ApiException.conflict(
+                    "RUN_NOT_CANCELLABLE", "This run is already stopping for a reason nobody requested.");
+        }
+        Instant at = terminalInstant(run, requestedAt);
+        TestRun stopping = run.stopping(StopReason.USER_REQUESTED, requestedAt, at);
+        leases.persistStop(
+                organizationId,
+                run,
+                stopping,
+                owned.attempt().fenced(at),
+                UUID.randomUUID(),
+                principal.principalId());
+        LOGGER.atInfo()
+                .addKeyValue("event", "RUN_STOP_REQUESTED")
+                .addKeyValue("organizationId", organizationId)
+                .addKeyValue("projectId", stopping.projectId())
+                .addKeyValue("runId", runId)
+                .addKeyValue("runVersion", stopping.runVersion())
+                .log("Fenced an owned run's assignment at the tenant's request");
+        return Optional.of(stopping);
     }
 
     /**

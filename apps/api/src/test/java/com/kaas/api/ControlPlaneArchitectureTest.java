@@ -26,6 +26,10 @@ class ControlPlaneArchitectureTest {
                         .filter(imported -> imported.getPackageName().contains(".outbox.domain"))
                         .count())
                 .isGreaterThan(5L);
+        assertThat(classes.stream()
+                        .filter(imported -> imported.getPackageName().contains(".consumer."))
+                        .count())
+                .isGreaterThan(5L);
     }
 
     @Test
@@ -63,6 +67,60 @@ class ControlPlaneArchitectureTest {
                 .should()
                 .dependOnClassesThat()
                 .resideInAPackage("..outbox..")
+                .check(classes);
+    }
+
+    @Test
+    void theConsumerIsAnInboundAdapterAndOwnsNoLifecycleDecisions() {
+        // The consumer package may call the control plane's use cases — that is what an inbound adapter does —
+        // but nothing in the control plane may depend on it. A dependency in that direction would mean a broker
+        // concept had reached the lifecycle model, and the lifecycle must be decidable without a broker at all.
+        noClasses()
+                .that()
+                .resideInAnyPackage("..controlplane..", "..outbox..")
+                .should()
+                .dependOnClassesThat()
+                .resideInAPackage("..consumer..")
+                .allowEmptyShould(true)
+                .check(classes);
+        // The consumer's own domain stays framework-free for the same reason every other domain does.
+        noClasses()
+                .that()
+                .resideInAPackage("..consumer.domain..")
+                .should()
+                .dependOnClassesThat()
+                .resideOutsideOfPackages("java..", "com.kaas.api.consumer.domain..")
+                .check(classes);
+        // And the broker client stays in the consumer's infrastructure, exactly as it does for the relay.
+        noClasses()
+                .that()
+                .resideInAnyPackage("..consumer.domain..", "..consumer.application..")
+                .should()
+                .dependOnClassesThat()
+                .resideInAnyPackage("org.springframework.amqp..", "com.rabbitmq..")
+                .allowEmptyShould(true)
+                .check(classes);
+    }
+
+    @Test
+    void claimingGrantsNoExecutionAuthority() {
+        // The whole point of stopping at CLAIMED is that ownership and permission to execute are different
+        // things. If any of these ever appear on the claim path, that distinction has quietly collapsed.
+        noClasses()
+                .that()
+                .resideInAnyPackage("..controlplane..", "..consumer..")
+                .should()
+                .dependOnClassesThat()
+                .resideInAnyPackage(
+                        "com.kaas.runner..",
+                        "com.intuit.karate..",
+                        "io.minio..",
+                        "com.github.dockerjava..",
+                        "org.springframework.vault..",
+                        "software.amazon.awssdk.services.secretsmanager..",
+                        "com.azure.security.keyvault..",
+                        "com.google.cloud.secretmanager..")
+                .allowEmptyShould(true)
                 .check(classes);
     }
 

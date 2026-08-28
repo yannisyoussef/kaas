@@ -75,6 +75,10 @@ import tools.jackson.databind.ObjectMapper;
         properties = {
             "kaas.scheduling.auto.enabled=false",
             "kaas.outbox.relay.enabled=false",
+            // No broker in this suite, and no claim: a consumer would find nothing and a reconciler would
+            // have nothing to reconcile, but both would add background writes to assertions about state.
+            "kaas.consumer.enabled=false",
+            "kaas.claim.reconcile.enabled=false",
             // Small, explicit ceilings so the boundary is reachable in a test.
             "kaas.admission.max-active-runs-per-organization=5",
             "kaas.admission.max-queued-runs-per-organization=2",

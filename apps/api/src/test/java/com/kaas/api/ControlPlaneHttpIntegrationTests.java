@@ -55,7 +55,14 @@ import tools.jackson.databind.ObjectMapper;
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         // These suites assert CREATED-state invariants, so the production timers must not act on them.
-        properties = {"kaas.scheduling.auto.enabled=false", "kaas.outbox.relay.enabled=false"})
+        properties = {
+            "kaas.scheduling.auto.enabled=false",
+            "kaas.outbox.relay.enabled=false",
+            // No broker in this suite and nothing claimed: both background components would only add writes
+            // that assertions about state would then have to tolerate.
+            "kaas.consumer.enabled=false",
+            "kaas.claim.reconcile.enabled=false"
+        })
 class ControlPlaneHttpIntegrationTests {
     private static final String ISSUER = "https://issuer.kaas.test";
     private static final String AUDIENCE = "kaas-api";

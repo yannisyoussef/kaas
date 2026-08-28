@@ -719,8 +719,25 @@ paths:
       responses:
         '200':
           description: >-
-            The run is cancelled. This is the only success this operation can return today; a 202 arrives with
-            worker claiming, when a phase a worker owns genuinely has to be asked to stop.
+            The run is already over. Returned when the run was not owned by a worker, so cancelling it
+            completed in the same transaction, and when an earlier cancellation had already been acknowledged.
+          headers:
+            Location:
+              $ref: '#/components/headers/RunLocation'
+            ETag:
+              $ref: '#/components/headers/RunEtag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '202':
+          description: >-
+            Cancellation was durably requested and termination is pending. Returned when a worker owned the run:
+            its assignment is already fenced and the run is STOPPING, but no outcome exists yet. The run settles
+            as CANCELLED shortly afterwards, and the representation returned here reports lifecycleState
+            STOPPING with cancellationStatus REQUESTED and null outcomes.
           headers:
             Location:
               $ref: '#/components/headers/RunLocation'
@@ -1519,11 +1536,15 @@ components:
         Clients never supply queue timing, and the execution attempt that scheduling creates is deliberately
         withheld from this public representation because it is infrastructure history. A background scheduler
         performs the transition shortly after creation, so a client may observe CREATED briefly and then QUEUED;
-        both are normal. A run that no worker has taken can also reach COMPLETED directly, either because a
-        tenant cancelled it or because its queue deadline passed; in both cases testOutcome is NOT_AVAILABLE and
-        qualityGateStatus stays NOT_EVALUATED, because nothing ran. Nothing between QUEUED and COMPLETED is
-        implemented.
-      required: [runId, projectId, runVersion, lifecycleState, cancellationStatus, testOutcome, infrastructureOutcome, qualityGateStatus, terminationReason, terminationPhase, snapshotDigest, queueStartedAt, queueDeadlineAt, cancellationRequestedAt, cancellationAcknowledgedAt, completedAt, createdBy, createdAt, updatedAt]
+        both are normal. A dispatch consumer may then claim the run, which moves it to CLAIMED and binds one
+        worker instance to it under an assignment epoch and a server-controlled lease; a claim grants ownership
+        of the infrastructure attempt and no authority to execute anything. A run that no worker has taken can
+        reach COMPLETED directly, either because a tenant cancelled it or because its queue deadline passed. A
+        run somebody owns goes through STOPPING first — its assignment has to be fenced before it can be called
+        over — and settles as CANCELLED when a tenant asked, or FAILED when the worker's lease was lost. In every
+        one of these cases testOutcome is NOT_AVAILABLE and qualityGateStatus stays NOT_EVALUATED, because
+        nothing ran. PROVISIONING and everything past it are not implemented.
+      required: [runId, projectId, runVersion, lifecycleState, cancellationStatus, testOutcome, infrastructureOutcome, qualityGateStatus, terminationReason, terminationPhase, stopReason, snapshotDigest, queueStartedAt, queueDeadlineAt, cancellationRequestedAt, cancellationAcknowledgedAt, completedAt, createdBy, createdAt, updatedAt]
       properties:
         runId:
           type: string
@@ -1548,11 +1569,13 @@ components:
           enum: [NOT_EVALUATED, PASSED, FAILED]
         terminationReason:
           type: [string, 'null']
-          enum: [USER_REQUESTED, QUEUE_DEADLINE, null]
+          enum: [USER_REQUESTED, QUEUE_DEADLINE, LEASE_LOST, null]
           description: >-
             Why the run ended, and null until it has. USER_REQUESTED always pairs with infrastructureOutcome
-            CANCELLED and QUEUE_DEADLINE with TIMED_OUT; a queue timeout is never reported as a cancellation.
-            The vocabulary is extended deliberately as later terminal transitions are implemented.
+            CANCELLED, QUEUE_DEADLINE with TIMED_OUT, and LEASE_LOST with FAILED. A queue timeout is never
+            reported as a cancellation, and a lost lease is never reported as a timeout: a queue deadline means
+            the platform never got to the run, while a lost lease means it did and then lost the worker holding
+            it. The vocabulary is extended deliberately as later terminal transitions are implemented.
         terminationPhase:
           type: [string, 'null']
           enum: [QUEUE, CLAIM, PROVISIONING, EXECUTION, RESULT_COLLECTION, RESULT_PROCESSING, ARTIFACT_UPLOAD, CANCELLATION, null]
@@ -1586,6 +1609,13 @@ components:
           type: [string, 'null']
           format: date-time
           description: Server-owned instant the run became terminal. Non-null exactly when lifecycleState is COMPLETED.
+        stopReason:
+          type: [string, 'null']
+          enum: [USER_REQUESTED, LEASE_LOST, null]
+          description: >-
+            Why a run somebody owned began stopping, set when it enters STOPPING and retained through
+            terminalization. Null for a run that never reached an owned state. It fixes the outcome the run will
+            settle with, so a reconciler cannot turn a lost lease into a cancellation or the reverse.
         createdBy:
           type: string
           minLength: 1

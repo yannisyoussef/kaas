@@ -5,10 +5,11 @@ package com.kaas.api.controlplane.domain;
  * structured errors, so a control-plane termination and a runner-reported failure describe phases in the same
  * words rather than in two enums that would immediately need reconciling.
  *
- * <p>Only the phases this slice can actually produce are modelled. The later phases arrive with the transitions
- * that can reach them.
+ * <p>Only the phases that are actually reachable are modelled. The later ones arrive with the transitions that
+ * can reach them.
  */
 public enum TerminationPhase {
     QUEUE,
+    CLAIM,
     CANCELLATION
 }
