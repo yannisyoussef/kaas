@@ -54,7 +54,7 @@ INSERT ──► pending ─┼──► claimed ──┬──► pending@avai
                     └──◄ claim expiry (crashed relay)
 ```
 
-`published_at` and `terminal_disposition` are mutually exclusive. Publication is final; a terminal disposition can be reversed only by an explicit requeue that resets the attempt budget, which exists so that a broker outage is recoverable rather than permanent. The database guard permits exactly six transitions — claim, release, success, retry, terminal, requeue — and every one of them must leave the message's identity, payload, digest, tenancy, type, version, and `occurred_at` byte-identical. The claim rules live in the guard too: a live lease cannot be stolen, a backed-off row cannot be claimed early, and an outcome cannot be recorded against an unclaimed row.
+`published_at` and `terminal_disposition` are mutually exclusive. Publication is final; a terminal disposition can be reversed only by an explicit requeue that resets the attempt budget, which exists so that a broker outage is recoverable rather than permanent. The database guard permits exactly seven transitions — claim, release, success, retry, terminal, requeue, and (since the [early terminal lifecycle slice](early-terminal-lifecycle-slice.md)) suppression — and every one of them must leave the message's identity, payload, digest, tenancy, type, version, and `occurred_at` byte-identical. Suppression is the only one not written by the relay: it withdraws an unclaimed message whose run ended, spends no attempt, records no failure, and is not a dead letter. Requeue is correspondingly narrowed to delivery failures, because replaying a suppressed message would dispatch work nobody is waiting for. The claim rules live in the guard too: a live lease cannot be stolen, a backed-off row cannot be claimed early, and an outcome cannot be recorded against an unclaimed row.
 
 A message that fails and later succeeds clears its failure code on publication; the attempt count preserves the history.
 
@@ -141,3 +141,5 @@ store in a deployment.
 ## Constraints the worker-claim slice must rewrite
 
 Intact and deliberately not weakened here: `require_complete_scheduling_bundle` (its `ELSIF` rejects any transition out of `QUEUED`), `guard_initial_execution_attempt` (requires `queued_at = created_at`, impossible for attempt #2), `ck_run_lifecycle_events_schedule` (pins `sequence = 1`), and the single-attempt uniqueness and check constraints. They must be rewritten together.
+
+**Since superseded in part.** The [early terminal lifecycle slice](early-terminal-lifecycle-slice.md) rewrote that set as a unit, and added a suppression transition to `guard_outbox_message` so a dispatch for a run that ended before publication is withdrawn rather than sent. What still belongs to the worker-claim slice is `guard_initial_execution_attempt`, the single-attempt constraints, and the `QUEUED` branch of `require_complete_scheduling_bundle`.

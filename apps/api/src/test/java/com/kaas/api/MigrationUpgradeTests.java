@@ -65,6 +65,7 @@ class MigrationUpgradeTests {
         Flyway.configure().dataSource(jdbcUrl(database), POSTGRES.getUsername(), POSTGRES.getPassword()).target(baseline).load().migrate();
         assertThat(appliedVersions(database)).isEqualTo(versions.subList(0, versions.size() - 1));
         seedRepresentativeRows(database);
+        assertTheFixtureReachesWhatTheUpgradeChanges(database);
 
         // The remaining migrations now run against real rows, with every runtime trigger of the previous version
         // still installed. A migration that transforms data must cope with the guards that were protecting it.
@@ -72,6 +73,32 @@ class MigrationUpgradeTests {
 
         assertThat(appliedVersions(database)).isEqualTo(versions);
         assertRepresentativeRowsSurvived(database);
+    }
+
+    /**
+     * Proves, before the upgrade runs, that the fixture actually holds rows the pending migrations will act on.
+     *
+     * <p>This is the same rule as for a backfill, applied to the other way a migration touches existing data. A
+     * migration that adds a validating CHECK, drops a NOT NULL, or replaces a guard is checked against every row
+     * already in the table — so over an empty table it proves exactly nothing, and would pass while shipping a
+     * constraint production data violates. Asserting emptiness here is the point: if a future fixture change
+     * empties one of these, this fails loudly instead of going quietly green.
+     */
+    private void assertTheFixtureReachesWhatTheUpgradeChanges(String database) throws Exception {
+        // V7 adds validating CHECKs to test_runs, so the table must be non-empty and must already hold the
+        // states those CHECKs reason about.
+        assertThat(count(database, "test_runs where lifecycle_state = 'CREATED'")).isPositive();
+        assertThat(count(database, "test_runs where lifecycle_state = 'QUEUED'")).isPositive();
+        assertThat(count(database, "test_runs where cancellation_status = 'NOT_REQUESTED'")).isPositive();
+        // It relaxes run_lifecycle_events.attempt_id and replaces that table's transition CHECK, which is
+        // validated against every existing event.
+        assertThat(count(database, "run_lifecycle_events where attempt_id is not null")).isPositive();
+        assertThat(count(database, "run_lifecycle_events where run_version <> sequence + 1")).isZero();
+        // And it rewrites the outbox accounting CHECKs, which are validated against every delivery state.
+        assertThat(count(database, "outbox_messages where terminal_disposition is not null")).isPositive();
+        assertThat(count(database, "outbox_messages where published_at is not null")).isPositive();
+        assertThat(count(database, "outbox_messages where published_at is null"
+                        + " and terminal_disposition is null")).isPositive();
     }
 
     /** Everything the upgrade must not lose, damage, or silently rewrite. */
@@ -113,6 +140,25 @@ class MigrationUpgradeTests {
         // The new structures exist and start empty: absence of a control row means immediately eligible, so no
         // backfill is required and none may have been invented.
         assertThat(count(database, "run_scheduling_control")).isZero();
+
+        // V7 adds terminal state to a table that already had rows. It transforms nothing, and the assertion that
+        // it transformed nothing is the point: every pre-existing run must still be unfinished, with no invented
+        // completion time, reason, or cancellation.
+        assertThat(count(database, "test_runs where completed_at is not null"
+                        + " or termination_reason is not null or termination_phase is not null"
+                        + " or cancellation_requested_at is not null"
+                        + " or cancellation_acknowledged_at is not null"))
+                .isZero();
+        assertThat(count(database, "test_runs where lifecycle_state <> 'COMPLETED'")).isEqualTo(5);
+        // The lifecycle events kept their attempts; relaxing the column did not blank anything.
+        assertThat(count(database, "run_lifecycle_events where attempt_id is null")).isZero();
+        // And no delivery state was reinterpreted as a suppression.
+        assertThat(count(database, "outbox_messages where terminal_disposition like 'SUPPRESSED%'")).isZero();
+        assertThat(count(database, "outbox_messages where terminal_disposition = 'RETRIES_EXHAUSTED'"))
+                .isEqualTo(1);
+        // The reaper's index exists, because a queue deadline nothing can select efficiently is a promise the
+        // platform cannot keep at scale.
+        assertThat(count(database, "pg_indexes where indexname = 'ix_test_runs_queue_deadline'")).isEqualTo(1);
     }
 
     /**

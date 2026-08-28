@@ -1,17 +1,10 @@
 package com.kaas.api.controlplane.infrastructure;
 
 import com.kaas.api.controlplane.application.RunSchedulingRepository;
-import com.kaas.api.controlplane.domain.CancellationStatus;
 import com.kaas.api.controlplane.domain.ExecutionAttempt;
 import com.kaas.api.controlplane.domain.ExecutionDispatch;
-import com.kaas.api.controlplane.domain.InfrastructureOutcome;
-import com.kaas.api.controlplane.domain.QualityGateStatus;
-import com.kaas.api.controlplane.domain.RunLifecycle;
 import com.kaas.api.controlplane.domain.SchedulableRun;
-import com.kaas.api.controlplane.domain.TestOutcome;
 import com.kaas.api.controlplane.domain.TestRun;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
@@ -63,11 +56,7 @@ class JdbcRunSchedulingRepository implements RunSchedulingRepository {
                  order by rank_in_org, created_at, run_id
                  limit ?
                 """,
-                (resultSet, rowNumber) -> new SchedulableRun(
-                        resultSet.getObject("organization_id", UUID.class),
-                        resultSet.getObject("project_id", UUID.class),
-                        resultSet.getObject("run_id", UUID.class),
-                        resultSet.getLong("run_version")),
+                SchedulableRunRowMapper.INSTANCE,
                 queuedCapacity,
                 batchSize);
     }
@@ -75,16 +64,14 @@ class JdbcRunSchedulingRepository implements RunSchedulingRepository {
     @Override
     public Optional<TestRun> lockCreated(UUID organizationId, UUID runId, long expectedRunVersion) {
         return jdbc.query(
-                        """
-                        select run_id, project_id, run_version, lifecycle_state, cancellation_status,
-                               test_outcome, infrastructure_outcome, quality_gate_status, snapshot_sha256,
-                               queued_at, queue_deadline_at, created_by, created_at, updated_at
-                          from test_runs
-                         where organization_id = ? and run_id = ? and lifecycle_state = 'CREATED'
-                           and cancellation_status = 'NOT_REQUESTED' and run_version = ?
-                         for update
-                        """,
-                        JdbcRunSchedulingRepository::run,
+                        TestRunRowMapper.SELECT_COLUMNS
+                                + """
+                                  from test_runs
+                                 where organization_id = ? and run_id = ? and lifecycle_state = 'CREATED'
+                                   and cancellation_status = 'NOT_REQUESTED' and run_version = ?
+                                 for update
+                                """,
+                        TestRunRowMapper.INSTANCE,
                         organizationId,
                         runId,
                         expectedRunVersion)
@@ -167,25 +154,6 @@ class JdbcRunSchedulingRepository implements RunSchedulingRepository {
                 Timestamp.from(dispatch.occurredAt()), Timestamp.from(dispatch.occurredAt()));
     }
 
-    private static TestRun run(ResultSet resultSet, int rowNumber) throws SQLException {
-        String testOutcome = resultSet.getString("test_outcome");
-        String infrastructureOutcome = resultSet.getString("infrastructure_outcome");
-        Timestamp queuedAt = resultSet.getTimestamp("queued_at");
-        Timestamp queueDeadlineAt = resultSet.getTimestamp("queue_deadline_at");
-        return new TestRun(
-                resultSet.getObject("run_id", UUID.class), resultSet.getObject("project_id", UUID.class),
-                resultSet.getLong("run_version"), RunLifecycle.valueOf(resultSet.getString("lifecycle_state")),
-                CancellationStatus.valueOf(resultSet.getString("cancellation_status")),
-                testOutcome == null ? null : TestOutcome.valueOf(testOutcome),
-                infrastructureOutcome == null ? null : InfrastructureOutcome.valueOf(infrastructureOutcome),
-                QualityGateStatus.valueOf(resultSet.getString("quality_gate_status")),
-                digest(resultSet.getString("snapshot_sha256")),
-                queuedAt == null ? null : queuedAt.toInstant(),
-                queueDeadlineAt == null ? null : queueDeadlineAt.toInstant(),
-                resultSet.getString("created_by"), resultSet.getTimestamp("created_at").toInstant(),
-                resultSet.getTimestamp("updated_at").toInstant());
-    }
-
     private static final String SHA256 = "sha256:";
 
     private static String hex(String digest) {
@@ -195,7 +163,4 @@ class JdbcRunSchedulingRepository implements RunSchedulingRepository {
         return digest.substring(SHA256.length());
     }
 
-    private static String digest(String hex) {
-        return SHA256 + hex;
-    }
 }

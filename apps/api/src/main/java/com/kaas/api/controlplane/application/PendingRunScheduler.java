@@ -7,6 +7,7 @@ import com.kaas.api.controlplane.domain.SchedulingBackoff;
 import com.kaas.api.controlplane.domain.SchedulingFailure;
 import com.kaas.api.controlplane.domain.RunLifecycle;
 import com.kaas.api.controlplane.domain.ScheduleDisposition;
+import com.kaas.api.controlplane.domain.ScheduleRunResult;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
@@ -112,7 +113,7 @@ public class PendingRunScheduler {
             }
         }
         try {
-            quarantinedRuns.set(control.countQuarantined());
+            quarantinedRuns.set(control.countQuarantined(RunLifecycle.CREATED));
         } catch (RuntimeException unavailable) {
             // A stale gauge is better than a failing metrics scrape during a database outage.
         }
@@ -130,15 +131,25 @@ public class PendingRunScheduler {
                 if (!admissionPolicy.admitsAnotherQueuedRun(admission.countQueuedRuns(pending.organizationId()))) {
                     return null;
                 }
-                return scheduler.schedule(pending.organizationId(), pending.runId(), pending.runVersion());
+                var scheduled = scheduler.schedule(
+                        pending.organizationId(), pending.runId(), pending.runVersion());
+                if (scheduled.disposition() == ScheduleDisposition.SCHEDULED) {
+                    // Cleared inside the transition, not after it. Clearing afterwards left a window — and, if
+                    // the process died or the delete failed, a permanent state — in which a scheduler-written
+                    // control row described a run that was already QUEUED. That row is now the reaper's to read:
+                    // it would withhold an expired run until next_attempt_at, and a failed clear would record a
+                    // scheduling failure against a run that had in fact been scheduled, quarantining it and
+                    // leaving it QUEUED, past its deadline, un-reapable, holding admission capacity forever.
+                    return new Scheduled(scheduled, control.clear(pending.runId()));
+                }
+                return new Scheduled(scheduled, false);
             });
             if (result == null) {
                 defer(pending);
                 return false;
             }
-            if (result.disposition() == ScheduleDisposition.SCHEDULED) {
-                // No stale eligibility may outlive the transition it was gating.
-                if (control.clear(pending.runId())) {
+            if (result.outcome().disposition() == ScheduleDisposition.SCHEDULED) {
+                if (result.backoffCleared()) {
                     LOGGER.atInfo()
                             .addKeyValue("event", "RUN_SCHEDULING_RECOVERED")
                             .addKeyValue("runId", pending.runId())
@@ -146,7 +157,7 @@ public class PendingRunScheduler {
                 }
                 return true;
             }
-            if (result.run().lifecycleState() == RunLifecycle.CREATED) {
+            if (result.outcome().run().lifecycleState() == RunLifecycle.CREATED) {
                 // A disposition that leaves the run CREATED and selectable would be re-armed instantly by
                 // clearing, so it backs off instead. No such disposition exists today; this makes sure adding
                 // one cannot silently create a hot loop.
@@ -169,6 +180,9 @@ public class PendingRunScheduler {
             return false;
         }
     }
+
+    /** One scheduling attempt's outcome plus whether it also removed durable backoff, both decided atomically. */
+    private record Scheduled(ScheduleRunResult outcome, boolean backoffCleared) {}
 
     private void defer(SchedulableRun pending) {
         control.recordAttempt(SchedulingAttempt.of(

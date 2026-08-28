@@ -695,13 +695,21 @@ paths:
       tags: [Runs]
       operationId: cancelRun
       summary: Request cancellation without deleting the run
-      x-kaas-implementation-status: PROPOSED
+      x-kaas-implementation-status: IMPLEMENTED
       description: >-
-        Creates the single cancellation intent for a run. Repeating an accepted request is idempotent. CREATED or
-        QUEUED may complete cancellation immediately; an active worker phase transitions toward STOPPING. A request
-        after result processing has begun is a lifecycle conflict because accepted evidence wins the race.
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
+        Creates the single cancellation intent for a run. CREATED and QUEUED are implemented and complete
+        immediately: no worker owns the run, so stopping it needs nobody's cooperation and there is no STOPPING
+        phase to pass through. The response is 200 with the terminal run, whose infrastructureOutcome is
+        CANCELLED, testOutcome NOT_AVAILABLE, and qualityGateStatus NOT_EVALUATED. Any dispatch that has not yet
+        been claimed for publication is withdrawn in the same transaction, so a cancelled run never reaches a
+        worker; one already claimed by the relay is allowed to publish and become stale, because a message handed
+        to the broker cannot be recalled. An active worker phase will transition toward STOPPING once claiming is
+        implemented; today it is a lifecycle conflict. A request after result processing has begun is likewise a
+        lifecycle conflict because accepted evidence wins the race, and so is a request for a run that already
+        completed for another reason: reporting a queue timeout as a cancellation would put a cause nobody caused
+        into an audited record. Repeating an accepted request is idempotent and returns the same run unchanged.
+        No Idempotency-Key is required, because the run itself is the idempotency scope — there is only one run
+        to cancel, so a key scoped to this path could not catch a mistake the run's own state does not.
       requestBody:
         required: true
         content:
@@ -710,35 +718,30 @@ paths:
               $ref: '#/components/schemas/CancellationRequest'
       responses:
         '200':
-          description: Cancellation was immediate or had already been acknowledged.
+          description: >-
+            The run is cancelled. This is the only success this operation can return today; a 202 arrives with
+            worker claiming, when a phase a worker owns genuinely has to be asked to stop.
           headers:
             Location:
               $ref: '#/components/headers/RunLocation'
             ETag:
               $ref: '#/components/headers/RunEtag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Run'
-        '202':
-          description: Cancellation was durably requested and worker termination is pending.
-          headers:
-            Location:
-              $ref: '#/components/headers/RunLocation'
-            ETag:
-              $ref: '#/components/headers/RunEtag'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Run'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/LifecycleConflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/ValidationProblem'
         '429':
@@ -1512,12 +1515,15 @@ components:
       type: object
       description: >-
         Current public TestRun aggregate. Create returns runVersion 1 in CREATED with null queue timing. The
-        internal scheduler implements the single CREATED to QUEUED transition, which yields runVersion 2 with
-        server-owned queue timing. Clients never supply queue timing, and the execution attempt that scheduling
-        creates is deliberately withheld from this public representation because it is infrastructure history.
-        A background scheduler performs the transition shortly after creation, so a client may observe CREATED
-        briefly and then QUEUED; both are normal. Nothing beyond QUEUED is implemented.
-      required: [runId, projectId, runVersion, lifecycleState, cancellationStatus, testOutcome, infrastructureOutcome, qualityGateStatus, snapshotDigest, queueStartedAt, queueDeadlineAt, createdBy, createdAt, updatedAt]
+        internal scheduler implements CREATED to QUEUED, which yields runVersion 2 with server-owned queue timing.
+        Clients never supply queue timing, and the execution attempt that scheduling creates is deliberately
+        withheld from this public representation because it is infrastructure history. A background scheduler
+        performs the transition shortly after creation, so a client may observe CREATED briefly and then QUEUED;
+        both are normal. A run that no worker has taken can also reach COMPLETED directly, either because a
+        tenant cancelled it or because its queue deadline passed; in both cases testOutcome is NOT_AVAILABLE and
+        qualityGateStatus stays NOT_EVALUATED, because nothing ran. Nothing between QUEUED and COMPLETED is
+        implemented.
+      required: [runId, projectId, runVersion, lifecycleState, cancellationStatus, testOutcome, infrastructureOutcome, qualityGateStatus, terminationReason, terminationPhase, snapshotDigest, queueStartedAt, queueDeadlineAt, cancellationRequestedAt, cancellationAcknowledgedAt, completedAt, createdBy, createdAt, updatedAt]
       properties:
         runId:
           type: string
@@ -1540,6 +1546,19 @@ components:
           enum: [SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, null]
         qualityGateStatus:
           enum: [NOT_EVALUATED, PASSED, FAILED]
+        terminationReason:
+          type: [string, 'null']
+          enum: [USER_REQUESTED, QUEUE_DEADLINE, null]
+          description: >-
+            Why the run ended, and null until it has. USER_REQUESTED always pairs with infrastructureOutcome
+            CANCELLED and QUEUE_DEADLINE with TIMED_OUT; a queue timeout is never reported as a cancellation.
+            The vocabulary is extended deliberately as later terminal transitions are implemented.
+        terminationPhase:
+          type: [string, 'null']
+          enum: [QUEUE, CLAIM, PROVISIONING, EXECUTION, RESULT_COLLECTION, RESULT_PROCESSING, ARTIFACT_UPLOAD, CANCELLATION, null]
+          description: >-
+            Where in the run's life it ended, using the same phase vocabulary as a runner structured error. Only
+            QUEUE and CANCELLATION are reachable today.
         snapshotDigest:
           $ref: '#/components/schemas/Sha256Digest'
         queueStartedAt:
@@ -1551,7 +1570,22 @@ components:
           format: date-time
           description: >-
             Server-owned queue expiry, computed as queueStartedAt plus the configured queue timeout. Null in
-            CREATED; queue timing never starts before the run is QUEUED.
+            CREATED; queue timing never starts before the run is QUEUED. Once it passes, the run is completed
+            with infrastructureOutcome TIMED_OUT rather than waiting indefinitely.
+        cancellationRequestedAt:
+          type: [string, 'null']
+          format: date-time
+          description: When a tenant asked for the run to stop. Null unless someone did.
+        cancellationAcknowledgedAt:
+          type: [string, 'null']
+          format: date-time
+          description: >-
+            When the control plane made the cancellation true. For a run no worker had taken this is the same
+            instant the run completed, because stopping unowned work needs nobody's cooperation.
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+          description: Server-owned instant the run became terminal. Non-null exactly when lifecycleState is COMPLETED.
         createdBy:
           type: string
           minLength: 1
@@ -1730,7 +1764,7 @@ components:
           minimum: 400
           maximum: 599
         code:
-          enum: [UNAUTHENTICATED, FORBIDDEN, NOT_FOUND, VALIDATION_FAILED, IDEMPOTENCY_CONFLICT, PROJECT_NAME_CONFLICT, FEATURE_PATH_CONFLICT, SECRET_REFERENCE_NAME_CONFLICT, ENVIRONMENT_NAME_CONFLICT, RUN_PROFILE_NAME_CONFLICT, CONFLICT, LIFECYCLE_CONFLICT, RESULT_NOT_READY, UNSUPPORTED_OPERATION, PAYLOAD_TOO_LARGE, RATE_LIMITED, EVENT_HISTORY_GAP, INTERNAL_ERROR]
+          enum: [UNAUTHENTICATED, FORBIDDEN, NOT_FOUND, VALIDATION_FAILED, IDEMPOTENCY_CONFLICT, PROJECT_NAME_CONFLICT, FEATURE_PATH_CONFLICT, SECRET_REFERENCE_NAME_CONFLICT, ENVIRONMENT_NAME_CONFLICT, RUN_PROFILE_NAME_CONFLICT, CONFLICT, LIFECYCLE_CONFLICT, RUN_ALREADY_TERMINAL, RUN_NOT_CANCELLABLE, RUN_QUOTA_EXCEEDED, RESULT_NOT_READY, UNSUPPORTED_OPERATION, PAYLOAD_TOO_LARGE, RATE_LIMITED, EVENT_HISTORY_GAP, INTERNAL_ERROR]
         detail:
           type: string
           maxLength: 2048

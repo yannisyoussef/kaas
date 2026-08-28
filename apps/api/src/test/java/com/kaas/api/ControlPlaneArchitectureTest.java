@@ -49,6 +49,24 @@ class ControlPlaneArchitectureTest {
     }
 
     @Test
+    void onlyTheControlPlanesPersistenceAdapterMayNameTheDeliveryContext() {
+        // The control plane writes outbox rows directly — that is the transactional outbox pattern, and it is
+        // deliberate. What must not spread is knowledge of the delivery context into the lifecycle model or its
+        // use cases, where an outbox concept would start shaping decisions that belong to the run.
+        //
+        // JdbcRunTerminationRepository imports TerminalDisposition rather than repeating its constants as a third
+        // set of string literals, and this rule is what confines that to the adapter. Without it, "no compile-time
+        // dependency on the delivery context" would be a convention nothing protects.
+        noClasses()
+                .that()
+                .resideInAnyPackage("..controlplane.domain..", "..controlplane.application..", "..controlplane.api..")
+                .should()
+                .dependOnClassesThat()
+                .resideInAPackage("..outbox..")
+                .check(classes);
+    }
+
+    @Test
     void apiDoesNotDependOnPersistenceAdapters() {
         noClasses()
                 .that()

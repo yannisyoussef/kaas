@@ -1,6 +1,7 @@
 package com.kaas.api.controlplane.infrastructure;
 
 import com.kaas.api.controlplane.application.SchedulingControlRepository;
+import com.kaas.api.controlplane.domain.RunLifecycle;
 import com.kaas.api.controlplane.domain.SchedulingAttempt;
 import com.kaas.api.controlplane.domain.SchedulingOutcome;
 import java.util.UUID;
@@ -86,9 +87,17 @@ class JdbcSchedulingControlRepository implements SchedulingControlRepository {
     }
 
     @Override
-    public long countQuarantined() {
+    public long countQuarantined(RunLifecycle lifecycleState) {
         Long quarantined = jdbc.queryForObject(
-                "select count(*) from run_scheduling_control where quarantined_at is not null", Long.class);
+                """
+                select count(*)
+                  from run_scheduling_control c
+                  join test_runs r on r.organization_id = c.organization_id
+                   and r.project_id = c.project_id and r.run_id = c.run_id
+                 where c.quarantined_at is not null and r.lifecycle_state = ?
+                """,
+                Long.class,
+                lifecycleState.name());
         return quarantined == null ? 0L : quarantined;
     }
 }

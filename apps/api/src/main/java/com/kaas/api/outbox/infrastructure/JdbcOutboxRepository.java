@@ -8,6 +8,8 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -132,10 +134,29 @@ class JdbcOutboxRepository implements OutboxRepository {
         return pending == null ? 0L : pending;
     }
 
+    /**
+     * Counts messages that failed to be delivered. Suppressed messages are deliberately excluded: they are
+     * terminal, but nothing went wrong — the run they would have dispatched ended before they were sent. Counting
+     * them here would turn every cancellation into a dead letter and make the relay's health say the broker is
+     * failing when it is not.
+     */
+    /**
+     * The predicate is derived from the enum rather than written out, so a disposition added on the wrong side of
+     * {@link TerminalDisposition#deliveryFailure()} cannot quietly land in or out of the dead-letter count. It
+     * matches ix_outbox_dead_letters exactly — an implied predicate would cost a heap scan with a per-row recheck
+     * on every health probe and every metrics scrape, over a table that is never pruned.
+     */
     @Override
     public long countTerminal() {
+        Object[] deliveryFailures = Arrays.stream(TerminalDisposition.values())
+                .filter(TerminalDisposition::deliveryFailure)
+                .map(TerminalDisposition::name)
+                .toArray();
+        String placeholders = String.join(", ", Collections.nCopies(deliveryFailures.length, "?"));
         Long terminal = jdbc.queryForObject(
-                "select count(*) from outbox_messages where terminal_disposition is not null", Long.class);
+                "select count(*) from outbox_messages where terminal_disposition in (" + placeholders + ")",
+                Long.class,
+                deliveryFailures);
         return terminal == null ? 0L : terminal;
     }
 

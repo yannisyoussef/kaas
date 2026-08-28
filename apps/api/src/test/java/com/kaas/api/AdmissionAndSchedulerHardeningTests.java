@@ -9,12 +9,14 @@ import com.kaas.api.controlplane.application.AdmissionRepository;
 import com.kaas.api.controlplane.application.PendingRunScheduler;
 import com.kaas.api.controlplane.application.RunSchedulingRepository;
 import com.kaas.api.controlplane.application.RunSchedulingService;
+import com.kaas.api.controlplane.application.RunTerminationService;
 import com.kaas.api.controlplane.application.SchedulingControlRepository;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import com.kaas.api.security.TenantPrincipal;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -121,6 +123,9 @@ class AdmissionAndSchedulerHardeningTests {
 
     @Autowired
     private MeterRegistry meters;
+
+    @Autowired
+    private RunTerminationService runTerminationService;
 
 
     /** Spied rather than mocked so scheduling really works unless a test deliberately breaks it. */
@@ -359,7 +364,8 @@ class AdmissionAndSchedulerHardeningTests {
         UUID deferred = runIds.get(QUEUED_LIMIT);
         assertThat(lifecycleOf(deferred)).isEqualTo("CREATED");
 
-        // Free one slot the way a completing run eventually will, and let the delay elapse.
+        // Free one slot the way capacity is now actually freed: by cancelling a queued run. Until this slice
+        // nothing could reach COMPLETED, and this test had to disable two triggers to fake it.
         completeQueuedRun(runIds.get(0));
         makeEligibleNow(deferred);
 
@@ -510,14 +516,30 @@ class AdmissionAndSchedulerHardeningTests {
     }
 
     @Test
-    void backoffStateOnlyEverDescribesARunAwaitingScheduling() throws Exception {
+    void backoffStateOnlyEverDescribesARunSomethingStillIntendsToActOn() throws Exception {
         Tenant tenant = tenant();
         UUID runId = UUID.fromString(json(createRun(tenant)).get("runId").stringValue());
         pendingRunScheduler.scheduleDue();
         assertThat(lifecycleOf(runId)).isEqualTo("QUEUED");
 
-        // The guard refuses control state for a run that is no longer awaiting scheduling, so a stale writer
-        // cannot resurrect eligibility for something already queued.
+        // A QUEUED run is legitimate control state now: the queue-deadline reaper backs off through the same
+        // table rather than growing a second retry framework, and it acts on runs that have already been queued.
+        jdbc.update(
+                """
+                insert into run_scheduling_control (run_id, organization_id, project_id, failure_count,
+                        next_attempt_at, last_attempt_at, last_failure_code)
+                values (?, ?, ?, 1, now(), now(), 'DATABASE_UNAVAILABLE')
+                """,
+                runId, tenant.organizationId(), tenant.projectId());
+
+        // Terminating the run must take that state with it. Nothing intends to act on a finished run, and a
+        // leftover row would keep a quarantine visible for work that no longer exists.
+        completeQueuedRun(runId);
+        assertThat(lifecycleOf(runId)).isEqualTo("COMPLETED");
+        assertThat(count("run_scheduling_control", runId)).isZero();
+
+        // And the guard refuses to let it come back, so a stale writer cannot re-arm eligibility for a run that
+        // is over.
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> jdbc.update(
                         """
                         insert into run_scheduling_control (run_id, organization_id, project_id, failure_count,
@@ -526,7 +548,7 @@ class AdmissionAndSchedulerHardeningTests {
                         """,
                         runId, tenant.organizationId(), tenant.projectId()))
                 .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class)
-                .hasMessageContaining("only applies to a run awaiting scheduling");
+                .hasMessageContaining("only applies to a run awaiting scheduling or termination");
     }
 
     @Test
@@ -557,24 +579,19 @@ class AdmissionAndSchedulerHardeningTests {
     }
 
     /**
-     * Frees capacity the way a completed run eventually will. No implemented transition can do this yet, and the
-     * schema actively forbids it: require_complete_scheduling_bundle rejects any move out of QUEUED while the
-     * attempt row exists. That constraint is one of the four the worker-claim slice must rewrite together, so
-     * the test disables it rather than pretending the transition exists.
+     * Frees capacity by cancelling a queued run through the implemented use case.
+     *
+     * <p>This used to disable {@code test_runs_supported_update} and {@code test_run_scheduling_bundle_complete}
+     * and forge a COMPLETED row, because no implemented transition could leave QUEUED and the schema actively
+     * forbade it. Both guards were rewritten in this slice, so the fake is gone: capacity is now released by the
+     * same path a tenant uses.
      */
     private void completeQueuedRun(UUID runId) {
-        jdbc.update("alter table test_runs disable trigger test_runs_supported_update");
-        jdbc.update("alter table test_runs disable trigger test_run_scheduling_bundle_complete");
-        try {
-            jdbc.update(
-                    "update test_runs set lifecycle_state = 'COMPLETED', test_outcome = 'PASSED',"
-                            + " infrastructure_outcome = 'SUCCEEDED', run_version = run_version + 1"
-                            + " where run_id = ?",
-                    runId);
-        } finally {
-            jdbc.update("alter table test_runs enable trigger test_run_scheduling_bundle_complete");
-            jdbc.update("alter table test_runs enable trigger test_runs_supported_update");
-        }
+        Map<String, Object> run = jdbc.queryForMap(
+                "select organization_id, created_by from test_runs where run_id = ?", runId);
+        runTerminationService.cancel(
+                new TenantPrincipal(String.valueOf(run.get("created_by")), (UUID) run.get("organization_id")),
+                runId);
     }
 
     private Duration delayOf(UUID runId) {

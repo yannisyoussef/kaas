@@ -18,7 +18,7 @@ Broker ordering is not a correctness dependency. A message is accepted only when
 | Execution claim | Attempt ID + `assignmentEpoch` and active-claim invariant | Return existing lease to same assignment | Competing worker/epoch → reject; stale epoch cannot renew |
 | Result processing | `resultId`, message ID, payload digest, command/run/attempt/epoch binding | ACK and return existing canonical/quarantined disposition | Conflicting digest or second result for attempt → quarantine/security reconciliation |
 | Artifact registration | `artifactId`, manifest ID, opaque reservation/reference, size and digest | No-op after verifying identical metadata | Reference reuse, metadata mismatch, wrong attempt/policy → reject/quarantine |
-| Cancellation | Natural one-cancellation-per-run plus scoped API idempotency key/fingerprint | Return current/original accepted response | Different fingerprint or lifecycle point-of-no-return → 409 |
+| Cancellation | **IMPLEMENTED** for CREATED/QUEUED: natural one-cancellation-per-run, by state. The run is the scope, so no idempotency key is required or used | Return the terminal run unchanged | Already terminal for another reason, or a phase early cancellation cannot end → 409 |
 
 Normalization for API fingerprints includes method, canonical path, authenticated scope, media type, and canonical request JSON; it excludes transport headers such as tracing. Submitted secret values are not part of these run requests.
 

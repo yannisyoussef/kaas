@@ -398,7 +398,7 @@ class SchedulingHttpIntegrationTests {
     void theDatabaseRejectsEveryMutationExceptTheImplementedScheduleTransition() throws Exception {
         CreatedRun created = createRun();
         UUID runId = created.runId();
-        String scheduleGuard = "only the exact CREATED to QUEUED scheduling transition is supported";
+        String scheduleGuard = "only scheduling and early terminal transitions are supported";
 
         // A CREATED run cannot be pushed straight into a future state, nor given queue timing by hand.
         assertRejectedBecause(scheduleGuard, "update test_runs set lifecycle_state = 'RUNNING' where run_id = ?", runId);
@@ -440,10 +440,10 @@ class SchedulingHttpIntegrationTests {
         // V5 narrowed this guard rather than removing it: delivery state may move, semantic content may not, and
         // an unclaimed row can never be marked published.
         assertRejectedBecause(
-                "only claim, release, publication, retry, terminal, and requeue transitions are supported",
+                "only claim, release, publication, retry, terminal, suppression, and requeue transitions are supported",
                 "update outbox_messages set published_at = now() where run_id = ?", runId);
         assertRejectedBecause(
-                "only claim, release, publication, retry, terminal, and requeue transitions are supported",
+                "only claim, release, publication, retry, terminal, suppression, and requeue transitions are supported",
                 "update outbox_messages set payload_sha256 = repeat('a', 64) where run_id = ?", runId);
         assertRejectedBecause(
                 "outbox messages are retained as delivery evidence",

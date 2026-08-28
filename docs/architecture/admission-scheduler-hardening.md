@@ -127,4 +127,6 @@ The populated test fails with the trigger's SQLSTATE; the fresh test still passe
 
 ## Constraints the worker-claim slice must still rewrite
 
-Unchanged and deliberately not weakened: `require_complete_scheduling_bundle`, `guard_initial_execution_attempt`, `ck_run_lifecycle_events_schedule`, and the single-attempt uniqueness and check constraints. They must be rewritten together.
+Unchanged and deliberately not weakened *in this slice*: `require_complete_scheduling_bundle`, `guard_initial_execution_attempt`, `ck_run_lifecycle_events_schedule`, and the single-attempt uniqueness and check constraints. They must be rewritten together.
+
+**Since superseded in part.** The [early terminal lifecycle slice](early-terminal-lifecycle-slice.md) rewrote that set as a unit to admit `CREATED → COMPLETED` and `QUEUED → COMPLETED`. What still belongs to the worker-claim slice is `guard_initial_execution_attempt`, the single-attempt constraints, and the `QUEUED` branch of `require_complete_scheduling_bundle`.

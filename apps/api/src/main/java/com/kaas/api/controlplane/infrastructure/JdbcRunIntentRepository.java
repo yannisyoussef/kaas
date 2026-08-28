@@ -3,21 +3,16 @@ package com.kaas.api.controlplane.infrastructure;
 import com.kaas.api.controlplane.application.RunIntentRepository;
 import com.kaas.api.controlplane.domain.ArtifactPolicy;
 import com.kaas.api.controlplane.domain.ArtifactType;
-import com.kaas.api.controlplane.domain.CancellationStatus;
 import com.kaas.api.controlplane.domain.ConfigurationValueType;
 import com.kaas.api.controlplane.domain.ConfigurationVariable;
 import com.kaas.api.controlplane.domain.EngineDescriptor;
-import com.kaas.api.controlplane.domain.InfrastructureOutcome;
 import com.kaas.api.controlplane.domain.PageResult;
-import com.kaas.api.controlplane.domain.QualityGateStatus;
-import com.kaas.api.controlplane.domain.RunLifecycle;
 import com.kaas.api.controlplane.domain.RunSelection;
 import com.kaas.api.controlplane.domain.RunSnapshot;
 import com.kaas.api.controlplane.domain.ScenarioRetry;
 import com.kaas.api.controlplane.domain.SecretBinding;
 import com.kaas.api.controlplane.domain.SnapshotFeature;
 import com.kaas.api.controlplane.domain.SnapshotRevision;
-import com.kaas.api.controlplane.domain.TestOutcome;
 import com.kaas.api.controlplane.domain.TestRun;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -152,13 +147,9 @@ class JdbcRunIntentRepository implements RunIntentRepository {
     @Override
     public Optional<TestRun> findRun(UUID organizationId, UUID runId) {
         return jdbc.query(
-                        """
-                        select run_id, project_id, run_version, lifecycle_state, cancellation_status,
-                               test_outcome, infrastructure_outcome, quality_gate_status, snapshot_sha256,
-                               queued_at, queue_deadline_at, created_by, created_at, updated_at
-                          from test_runs where organization_id = ? and run_id = ?
-                        """,
-                        JdbcRunIntentRepository::run,
+                        TestRunRowMapper.SELECT_COLUMNS
+                                + "  from test_runs where organization_id = ? and run_id = ?",
+                        TestRunRowMapper.INSTANCE,
                         organizationId,
                         runId)
                 .stream().findFirst();
@@ -170,14 +161,12 @@ class JdbcRunIntentRepository implements RunIntentRepository {
                 "select count(*) from test_runs where organization_id = ? and project_id = ?",
                 Long.class, organizationId, projectId);
         List<TestRun> runs = jdbc.query(
-                """
-                select run_id, project_id, run_version, lifecycle_state, cancellation_status,
-                       test_outcome, infrastructure_outcome, quality_gate_status, snapshot_sha256,
-                       queued_at, queue_deadline_at, created_by, created_at, updated_at
-                  from test_runs where organization_id = ? and project_id = ?
-                 order by created_at desc, run_id desc limit ? offset ?
-                """,
-                JdbcRunIntentRepository::run,
+                TestRunRowMapper.SELECT_COLUMNS
+                        + """
+                          from test_runs where organization_id = ? and project_id = ?
+                         order by created_at desc, run_id desc limit ? offset ?
+                        """,
+                TestRunRowMapper.INSTANCE,
                 organizationId, projectId, size, (long) page * size);
         int totalPages = total == 0 ? 0 : Math.toIntExact((total + size - 1) / size);
         return new PageResult<>(runs, page, size, total, totalPages);
@@ -273,24 +262,6 @@ class JdbcRunIntentRepository implements RunIntentRepository {
                 value.type() == ConfigurationValueType.STRING ? value.value() : null,
                 value.type() == ConfigurationValueType.INTEGER ? value.value() : null,
                 value.type() == ConfigurationValueType.BOOLEAN ? value.value() : null);
-    }
-
-    private static TestRun run(ResultSet resultSet, int rowNumber) throws SQLException {
-        String testOutcome = resultSet.getString("test_outcome");
-        String infrastructureOutcome = resultSet.getString("infrastructure_outcome");
-        Timestamp queuedAt = resultSet.getTimestamp("queued_at");
-        Timestamp queueDeadlineAt = resultSet.getTimestamp("queue_deadline_at");
-        return new TestRun(
-                resultSet.getObject("run_id", UUID.class), resultSet.getObject("project_id", UUID.class),
-                resultSet.getLong("run_version"), RunLifecycle.valueOf(resultSet.getString("lifecycle_state")),
-                CancellationStatus.valueOf(resultSet.getString("cancellation_status")),
-                testOutcome == null ? null : TestOutcome.valueOf(testOutcome),
-                infrastructureOutcome == null ? null : InfrastructureOutcome.valueOf(infrastructureOutcome),
-                QualityGateStatus.valueOf(resultSet.getString("quality_gate_status")),
-                digest(resultSet.getString("snapshot_sha256")),
-                queuedAt == null ? null : queuedAt.toInstant(),
-                queueDeadlineAt == null ? null : queueDeadlineAt.toInstant(), resultSet.getString("created_by"),
-                resultSet.getTimestamp("created_at").toInstant(), resultSet.getTimestamp("updated_at").toInstant());
     }
 
     private static String enumName(Enum<?> value) {

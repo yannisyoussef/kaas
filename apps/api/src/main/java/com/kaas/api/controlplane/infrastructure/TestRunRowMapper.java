@@ -1,0 +1,72 @@
+package com.kaas.api.controlplane.infrastructure;
+
+import com.kaas.api.controlplane.domain.CancellationStatus;
+import com.kaas.api.controlplane.domain.InfrastructureOutcome;
+import com.kaas.api.controlplane.domain.QualityGateStatus;
+import com.kaas.api.controlplane.domain.RunLifecycle;
+import com.kaas.api.controlplane.domain.TerminationPhase;
+import com.kaas.api.controlplane.domain.TerminationReason;
+import com.kaas.api.controlplane.domain.TestOutcome;
+import com.kaas.api.controlplane.domain.TestRun;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.UUID;
+import org.springframework.jdbc.core.RowMapper;
+
+/**
+ * One mapper for the run aggregate, shared by every adapter that reads it.
+ *
+ * <p>It is shared rather than repeated because the column list and the mapper have to move together. They were
+ * duplicated across two adapters while the run had no terminal state, and adding terminal columns to one
+ * projection but not the other would have produced runs that silently claimed to be unfinished.
+ */
+final class TestRunRowMapper implements RowMapper<TestRun> {
+    static final TestRunRowMapper INSTANCE = new TestRunRowMapper();
+
+    static final String SELECT_COLUMNS =
+            """
+            select run_id, project_id, run_version, lifecycle_state, cancellation_status, test_outcome,
+                   infrastructure_outcome, quality_gate_status, termination_reason, termination_phase,
+                   snapshot_sha256, queued_at, queue_deadline_at, cancellation_requested_at,
+                   cancellation_acknowledged_at, completed_at, created_by, created_at, updated_at
+            """;
+
+    private static final String SHA256 = "sha256:";
+
+    private TestRunRowMapper() {}
+
+    @Override
+    public TestRun mapRow(ResultSet resultSet, int rowNumber) throws SQLException {
+        String testOutcome = resultSet.getString("test_outcome");
+        String infrastructureOutcome = resultSet.getString("infrastructure_outcome");
+        String terminationReason = resultSet.getString("termination_reason");
+        String terminationPhase = resultSet.getString("termination_phase");
+        return new TestRun(
+                resultSet.getObject("run_id", UUID.class),
+                resultSet.getObject("project_id", UUID.class),
+                resultSet.getLong("run_version"),
+                RunLifecycle.valueOf(resultSet.getString("lifecycle_state")),
+                CancellationStatus.valueOf(resultSet.getString("cancellation_status")),
+                testOutcome == null ? null : TestOutcome.valueOf(testOutcome),
+                infrastructureOutcome == null ? null : InfrastructureOutcome.valueOf(infrastructureOutcome),
+                QualityGateStatus.valueOf(resultSet.getString("quality_gate_status")),
+                terminationReason == null ? null : TerminationReason.valueOf(terminationReason),
+                terminationPhase == null ? null : TerminationPhase.valueOf(terminationPhase),
+                SHA256 + resultSet.getString("snapshot_sha256"),
+                instant(resultSet, "queued_at"),
+                instant(resultSet, "queue_deadline_at"),
+                instant(resultSet, "cancellation_requested_at"),
+                instant(resultSet, "cancellation_acknowledged_at"),
+                instant(resultSet, "completed_at"),
+                resultSet.getString("created_by"),
+                resultSet.getTimestamp("created_at").toInstant(),
+                resultSet.getTimestamp("updated_at").toInstant());
+    }
+
+    private static Instant instant(ResultSet resultSet, String column) throws SQLException {
+        Timestamp value = resultSet.getTimestamp(column);
+        return value == null ? null : value.toInstant();
+    }
+}

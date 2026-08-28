@@ -60,6 +60,19 @@ public class SecurityConfiguration {
                 .build();
     }
 
+    /**
+     * The {@code kaas.} prefix is reserved for the platform's own actors and is refused here, at the only place a
+     * subject enters the system.
+     *
+     * <p>The subject becomes {@code test_runs.updated_by} and {@code run_lifecycle_events.actor}. Those are
+     * audit evidence, and the schema treats some of these names as proof of authorship — a scheduling event is
+     * only valid when its actor is {@code kaas.scheduler}, and a queue expiry only when it is
+     * {@code kaas.queue-reaper}. Without this, any token whose subject a client can choose could record its own
+     * actions as the platform's, and {@code created_by} is public in the run representation, so a tenant could
+     * make a run read as platform-authored.
+     */
+    private static final String RESERVED_ACTOR_PREFIX = "kaas.";
+
     private static AbstractAuthenticationToken authentication(Jwt jwt) {
         String subject = jwt.getSubject();
         Object organizationClaim = jwt.getClaims().get("org_id");
@@ -67,6 +80,7 @@ public class SecurityConfiguration {
                 || subject.isBlank()
                 || subject.length() > 255
                 || subject.codePoints().anyMatch(Character::isISOControl)
+                || subject.regionMatches(true, 0, RESERVED_ACTOR_PREFIX, 0, RESERVED_ACTOR_PREFIX.length())
                 || !(organizationClaim instanceof String value)
                 || jwt.getExpiresAt() == null) {
             throw invalidClaims();

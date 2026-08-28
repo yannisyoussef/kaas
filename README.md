@@ -22,11 +22,14 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | Production run scheduler | IMPLEMENTED + VALIDATED | Bounded, deterministically ordered batch invoking the established ScheduleRun use case; safe across replicas via compare-and-set |
 | Tenant admission control | IMPLEMENTED + VALIDATED | Per-organization ceilings on active and queued runs, enforced under an advisory lock so concurrent creates cannot overshoot; 429 RUN_QUOTA_EXCEEDED; idempotent replay still succeeds at capacity |
 | Durable scheduler backoff | IMPLEMENTED + VALIDATED | PostgreSQL-owned retry delay and quarantine that survive a restart and are shared across replicas; never mutates run lifecycle or version |
-| Migration-upgrade testing | IMPLEMENTED + VALIDATED | Every migration verified against an empty database and against a populated previous-version database with its triggers installed |
+| Early run cancellation | IMPLEMENTED + VALIDATED | POST /runs/{runId}/cancellations ends a CREATED or QUEUED run immediately, idempotent by state, tenant-scoped with concealed 404; no STOPPING phase because no worker owns the run |
+| Queue-deadline reaping | IMPLEMENTED + VALIDATED | The queue deadline is now enforced rather than merely recorded; an expired run is completed TIMED_OUT, never reported as cancelled, with durable backoff shared with the scheduler |
+| Dispatch suppression | IMPLEMENTED + VALIDATED | A dispatch no relay is currently holding is withdrawn in the terminating transaction, spending no attempt and counting as no dead letter; a message under a live relay lease is left to publish rather than falsely recalled |
+| Migration-upgrade testing | IMPLEMENTED + VALIDATED | Every migration verified against an empty database and against a populated previous-version database with its triggers installed, with the fixture proven to reach what the upgrade changes before it runs |
 | Runner bootstrap | SCAFFOLDED + VALIDATED | Reports that execution is disabled; launches no external process |
 | Next.js web scaffold | IMPLEMENTED + VALIDATED | Next.js 16.3.3; lint, typecheck, render test, build, production audit |
 | Contract tooling | IMPLEMENTED + VALIDATED | Strict AJV schemas/fixtures plus semantic checks; proposed contracts only |
-| OpenAPI contract | IMPLEMENTED + PROPOSED | Run create/get/list/snapshot and configuration APIs are implemented; cancellation/events/results/artifacts remain proposed |
+| OpenAPI contract | IMPLEMENTED + PROPOSED | Run create/get/list/snapshot/cancellations and configuration APIs are implemented; events/results/artifacts remain proposed |
 | Local PostgreSQL/RabbitMQ/MinIO definitions | SCAFFOLDED | Loopback-only Compose config with development health checks |
 | Modular control-plane boundaries | IMPLEMENTED | Capability packages with inward ports and ArchUnit enforcement |
 | PostgreSQL persistence | IMPLEMENTED | Flyway schema, JPA validation, tenant composite FKs, immutable-revision trigger, query indexes |
@@ -123,9 +126,11 @@ The checked-in values are local-development defaults, not production secret mana
 - [Outbox relay/RabbitMQ slice report](RABBITMQ_OUTBOX_RELAY_SLICE_REPORT.md)
 - [Implemented admission/scheduler hardening](docs/architecture/admission-scheduler-hardening.md)
 - [Admission/scheduler hardening report](ADMISSION_SCHEDULER_HARDENING_REPORT.md)
+- [Implemented early terminal lifecycle](docs/architecture/early-terminal-lifecycle-slice.md)
+- [Early terminal lifecycle slice report](EARLY_TERMINAL_LIFECYCLE_SLICE_REPORT.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Security release requirements](docs/security/threat-model.md)
 
 ## Scope discipline
 
-This slice bounds tenant amplification and makes scheduler retry durable. It deliberately does not implement a consumer, a consumer inbox, worker claim, assignment epochs, leases, ExecutionCommand production, SSE, secret values/storage/redemption/capabilities, source bundles or capabilities, object storage, Karate parsing/execution, a container launcher, network enforcement, results/artifacts, quality-gate execution, or full OpenTelemetry infrastructure. The queue may hold published dispatch intents that nothing consumes; that is intentional.
+This slice gives the run lifecycle its first exit: a tenant can cancel work no worker has taken, and a queue deadline that has passed now ends the run instead of holding capacity forever. It deliberately does not implement cancellation of any phase a worker owns, a STOPPING protocol, a consumer, a consumer inbox, worker claim, assignment epochs, leases, ExecutionCommand production, SSE, secret values/storage/redemption/capabilities, source bundles or capabilities, object storage, Karate parsing/execution, a container launcher, network enforcement, results/artifacts, quality-gate execution, or full OpenTelemetry infrastructure. The queue may hold published dispatch intents that nothing consumes; that is intentional.

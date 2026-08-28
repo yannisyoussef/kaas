@@ -1,11 +1,14 @@
 package com.kaas.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 import com.kaas.api.controlplane.application.PendingRunScheduler;
 import com.kaas.api.controlplane.application.RunSchedulingService;
+import com.kaas.api.controlplane.application.RunTerminationService;
+import com.kaas.api.security.TenantPrincipal;
 import com.kaas.api.controlplane.domain.ScheduleDisposition;
 import com.kaas.api.outbox.application.DispatchPublisher;
 import com.kaas.api.outbox.application.OutboxRelay;
@@ -120,6 +123,9 @@ class RelayFailureAndSchedulerIntegrationTests {
 
     @Autowired
     private RunSchedulingService scheduler;
+
+    @Autowired
+    private RunTerminationService terminations;
 
     /**
      * These tests share one context, one database, and one broker-less relay, and the relay batch is not scoped
@@ -381,26 +387,40 @@ class RelayFailureAndSchedulerIntegrationTests {
     }
 
     @Test
-    void aCancelledRunIsNeverScheduledEvenWhileItIsStillCreated() throws Exception {
+    void aCancelledRunIsNeverScheduledAndNeverDispatchesAnything() throws Exception {
         UUID runId = createRun();
-        // No cancellation endpoint exists yet, so the state is set directly. The scheduler must still refuse it:
-        // dispatching a cancelled run would hand work to a future worker that should never receive it.
-        withTestRunGuardDisabled(() -> jdbc.update(
-                "update test_runs set cancellation_status = 'REQUESTED' where run_id = ?", runId));
+        UUID organizationId = organizationOf(runId);
+        // This test used to forge CREATED + REQUESTED with the lifecycle guard disabled, because no cancellation
+        // existed. It now cancels for real, and the forged state is unreachable: cancelling unowned work is
+        // immediate, so a CREATED run that has been asked to stop is already over.
+        terminations.cancel(new TenantPrincipal(principalOf(runId), organizationId), runId);
 
         assertThat(pendingRunScheduler.scheduleDue()).isZero();
 
         assertThat(jdbc.queryForObject(
                         "select lifecycle_state from test_runs where run_id = ?", String.class, runId))
-                .isEqualTo("CREATED");
+                .isEqualTo("COMPLETED");
         assertThat(jdbc.queryForObject("select run_version from test_runs where run_id = ?", Long.class, runId))
-                .isEqualTo(1L);
+                .isEqualTo(2L);
+        // Nothing was ever dispatched: no attempt, no dispatch, and above all no durable broker message for work
+        // that will never run.
         assertThat(jdbc.queryForObject(
                         "select count(*) from execution_attempts where run_id = ?", Long.class, runId))
                 .isZero();
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from outbox_messages where run_id = ?", Long.class, runId))
+                .isZero();
         // The service refuses it too, so the repository predicate is not the only line of defence.
-        assertThat(scheduler.schedule(organizationOf(runId), runId, 1).disposition())
+        assertThat(scheduler.schedule(organizationId, runId, 1).disposition())
                 .isEqualTo(ScheduleDisposition.INVALID_STATE);
+
+        // And the intermediate state the old fixture forged is now rejected by the database itself, even with
+        // the lifecycle guard out of the way: a cancellation status without a request time is not a state.
+        UUID other = createRun();
+        assertThatThrownBy(() -> withTestRunGuardDisabled(() -> jdbc.update(
+                        "update test_runs set cancellation_status = 'REQUESTED' where run_id = ?", other)))
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class)
+                .hasMessageContaining("ck_test_runs_cancellation_timing");
     }
 
     private List<String> lifecycleOf(List<UUID> runIds) {
@@ -442,6 +462,10 @@ class RelayFailureAndSchedulerIntegrationTests {
 
     private Map<String, Object> outboxRow(UUID runId) {
         return jdbc.queryForMap("select * from outbox_messages where run_id = ?", runId);
+    }
+
+    private String principalOf(UUID runId) {
+        return jdbc.queryForObject("select created_by from test_runs where run_id = ?", String.class, runId);
     }
 
     private UUID organizationOf(UUID runId) {

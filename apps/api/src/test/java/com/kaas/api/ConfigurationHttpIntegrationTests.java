@@ -1800,13 +1800,13 @@ class ConfigurationHttpIntegrationTests {
                         UUID.fromString(runId)))
                 .isInstanceOf(DataIntegrityViolationException.class)
                 .satisfies(exception -> assertThat(rootCause(exception).getMessage())
-                        .contains("only the exact CREATED to QUEUED"));
+                        .contains("only scheduling and early terminal transitions"));
         assertThatThrownBy(() -> jdbc.update(
                         "update test_runs set run_version = 2, lifecycle_state = 'RUNNING' where run_id = ?",
                         UUID.fromString(runId)))
                 .isInstanceOf(DataIntegrityViolationException.class)
                 .satisfies(exception -> assertThat(rootCause(exception).getMessage())
-                        .contains("only the exact CREATED to QUEUED"));
+                        .contains("only scheduling and early terminal transitions"));
         assertThatThrownBy(() -> jdbc.update(
                         """
                         insert into test_runs
