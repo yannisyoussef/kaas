@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.kaas.dev/sandbox-security-attestation.schema.json",
+  "title": "SandboxSecurityAttestation",
+  "description": "Evidence that a deployment's sandbox enforces the controls the control plane requires before it will authorize any execution. This is the bridge between two modules that deliberately cannot see each other: the hostile-execution gate holds container-runtime access and lives in services/runner, and the control plane is build-guarded against depending on it. The gate's verdict therefore travels as this document rather than as a method call. It is emphatically NOT a boolean: a passing attestation must enumerate every mandatory control and its verdict, so absence of a control is absence of evidence rather than a silent pass, and adding a control to the runner invalidates every existing attestation until a fresh assessment is produced. No API accepts one — it arrives as deployment configuration — so nothing that authenticates to the control plane can assert its own security posture.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "securityProfileVersion",
+    "probeImageDigest",
+    "runtime",
+    "assessedAt",
+    "mandatoryControls",
+    "digest"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "kaas.sandbox-security-attestation.v1"},
+    "securityProfileVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Which sandbox security profile was assessed. An assessment for a different profile describes a different boundary and is refused."
+    },
+    "probeImageDigest": {
+      "$ref": "#/$defs/digest",
+      "description": "The content address of the probe image the assessment ran. A tag would be a mutable pointer to executable code."
+    },
+    "runtime": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "The container runtime the assessment ran against. Recorded and covered by the digest, but NOT currently compared against anything by the control plane — there is no configured expected runtime to compare it to. It is provenance for a human reading an audit trail, not a check, and this description says so rather than implying enforcement that does not exist."
+    },
+    "assessedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the assessment was taken. Freshness is enforced against database time, because this describes a running host rather than a source tree: a host reconfigured after the assessment is not described by it."
+    },
+    "mandatoryControls": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "propertyNames": {"pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
+      "additionalProperties": {"enum": ["PASS", "FAIL", "UNSUPPORTED"]},
+      "description": "Every mandatory control and its verdict. The control plane requires EXACT set equality against the controls it independently demands, in both directions: containment would let a truncated assessment pass by omitting the control it failed, and would let a build accept an assessment produced for a weaker control set."
+    },
+    "digest": {
+      "$ref": "#/$defs/digest",
+      "description": "A canonical semantic digest over this document's content, recomputed on load rather than trusted, so a document whose verdicts were edited does not keep the digest that described what it used to say."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+  }
+}

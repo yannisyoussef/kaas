@@ -130,6 +130,18 @@ class MigrationUpgradeTests {
                         + " and lifecycle_state = 'COMPLETED' and attempt_id is null")).isPositive();
         assertThat(count(database, "run_lifecycle_events where previous_state = 'QUEUED'"
                         + " and lifecycle_state = 'COMPLETED' and attempt_id is not null")).isPositive();
+
+        // V9 is where this method has nothing to demand, and saying so is the honest form of the check rather
+        // than an omission. It creates five new tables, seeds one platform-owned policy revision, and adds
+        // triggers only to tables it created in the same file. No statement in it transforms an existing row,
+        // no constraint it adds is validated against pre-existing data, and no foreign key it declares points
+        // from an old table to a new one. There is therefore no predicate a fixture row could satisfy — and
+        // seeding rows to "cover" V9 would be seeding rows nothing evaluates, which is the exact
+        // populated-but-unexercised fixture this method exists to prevent.
+        //
+        // What V9 *is* checked for lives in assertRepresentativeRowsSurvived below: that it invented no
+        // authority, and that its one seeded row is the one the migration wrote.
+        assertThat(count(database, "execution_attempts")).isPositive();
     }
 
     /** Everything the upgrade must not lose, damage, or silently rewrite. */
@@ -215,6 +227,24 @@ class MigrationUpgradeTests {
         assertThat(count(database, "dispatch_inbox")).isZero();
         assertThat(count(database, "pg_indexes where indexname = 'ix_execution_attempts_lease'")).isEqualTo(1);
         assertThat(count(database, "pg_indexes where indexname = 'ix_test_runs_stopping'")).isEqualTo(1);
+
+        // V9 invents no authority. An upgrade that materialised an authorization, a capability, or a command
+        // would be granting permission to execute to an assignment that never asked for it — and the run it
+        // pointed at would have been claimed by a worker that has since gone.
+        assertThat(count(database, "execution_authorizations")).isZero();
+        assertThat(count(database, "execution_capabilities")).isZero();
+        assertThat(count(database, "execution_capability_secret_references")).isZero();
+        assertThat(count(database, "execution_commands")).isZero();
+
+        // Exactly one policy revision, seeded by the migration itself: DENY_ALL, version one, platform-authored,
+        // and carrying the digest its own content implies. A digest that did not match would mean the seeded
+        // row and the code that verifies it had drifted, and every authorization would refuse forever.
+        assertThat(count(database, "network_policy_revisions")).isEqualTo(1);
+        assertThat(count(database, "network_policy_revisions where policy_type = 'DENY_ALL'"
+                        + " and policy_version = 1 and created_by = 'kaas.platform'"
+                        + " and canonical_digest = "
+                        + "'sha256:90bc5fe597d868eb21bc933950f31f10f4ea1f528e9e96a8eabdc7bd73a02450'"))
+                .isEqualTo(1);
     }
 
     /**

@@ -1762,10 +1762,21 @@ class ConfigurationHttpIntegrationTests {
                         Integer.class,
                         UUID.fromString(runId)))
                 .isEqualTo(1);
+        // Creating a run grants no execution authority.
+        //
+        // This used to assert that the execution tables did not exist at all, which was the strongest available
+        // statement while they did not. They exist now, so the assertion moves to what it was always really
+        // about: run creation must produce no authorization, no capability, and no command. A table's absence
+        // was a proxy for that; its emptiness is the property itself, and it keeps being checkable once the
+        // tables are populated by the paths that are genuinely allowed to populate them.
         assertThat(jdbc.queryForObject(
-                        "select count(*) from information_schema.tables where table_schema = 'public' and table_name in ('execution_commands','worker_assignments','runtime_capabilities')",
+                        "select count(*) from information_schema.tables where table_schema = 'public'"
+                                + " and table_name in ('worker_assignments','runtime_capabilities')",
                         Integer.class))
                 .isZero();
+        assertThat(jdbc.queryForObject("select count(*) from execution_authorizations", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from execution_capabilities", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from execution_commands", Integer.class)).isZero();
         assertThatThrownBy(() -> jdbc.update(
                         "update run_snapshots set engine_version = '9.9.9' where run_id = ?",
                         UUID.fromString(runId)))

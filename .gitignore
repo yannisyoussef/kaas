@@ -13,3 +13,6 @@ node_modules/
 
 # Prompt scratch files are not part of the product.
 prompts/
+
+# Agent worktrees and session state. Tooling scratch, never product.
+.claude/

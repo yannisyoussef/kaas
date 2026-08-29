@@ -9,6 +9,8 @@ const contracts = [
   { name: "runner-result", schema: "../runner-result.schema.json", fixtureDirectory: "../fixtures/runner-result", maxBytes: 16 * 1024 * 1024 },
   { name: "artifact-manifest", schema: "../artifact-manifest.schema.json", fixtureDirectory: "../fixtures/artifact-manifest", maxBytes: 1024 * 1024 },
   { name: "live-event", schema: "../live-event.schema.json", fixtureDirectory: "../fixtures/live-event", maxBytes: 64 * 1024 },
+  { name: "execution-command", schema: "../execution-command.schema.json", fixtureDirectory: "../fixtures/execution-command", maxBytes: 4 * 1024 * 1024 },
+  { name: "sandbox-security-attestation", schema: "../sandbox-security-attestation.schema.json", fixtureDirectory: "../fixtures/sandbox-security-attestation", maxBytes: 64 * 1024 },
 ];
 
 const expectedKeywordByName = new Map([
@@ -30,6 +32,17 @@ const expectedKeywordByName = new Map([
   ["invalid-dispatch-attempt.json", "const"],
   ["invalid-dispatch-message-type.json", "const"],
   ["invalid-dispatch-deadline.json", "format"],
+  // Execution command. Each names the keyword that must reject it, so a fixture that starts failing for a
+  // different reason than intended is caught rather than counted as still-covered.
+  ["invalid-secret-without-binding-key.json", "required"],
+  ["invalid-traversing-logical-path.json", "pattern"],
+  ["invalid-bearer-token-present.json", "additionalProperties"],
+  ["invalid-unenforceable-network-policy-shape.json", "const"],
+  // Sandbox security attestation.
+  ["invalid-boolean-shortcut.json", "type"],
+  ["invalid-unknown-verdict.json", "enum"],
+  ["invalid-tagged-probe-image.json", "pattern"],
+  ["invalid-missing-digest.json", "required"],
 ]);
 
 // Authority that only exists after a worker claim. A queue-time DispatchIntent must never carry it.

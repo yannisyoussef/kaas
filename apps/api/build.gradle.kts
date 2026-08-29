@@ -30,6 +30,13 @@ dependencies {
 tasks.withType<Test>().configureEach {
     maxParallelForks = 1
     jvmArgs("-javaagent:${mockitoAgent.asPath}")
+    // The shared mandatory-control contract is read at runtime by MandatoryControlContractTest, so Gradle does
+    // not know it is an input unless told. Without this the test is UP-TO-DATE and skipped in exactly the case
+    // it exists for — a change to that file — and CI restores the Gradle cache, so a pull request touching only
+    // the contract reproduces it. The assertions were sound; nothing was running them.
+    inputs.file(rootProject.file("packages/api-contracts/mandatory-sandbox-controls.json"))
+        .withPropertyName("mandatorySandboxControls")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
 }
 
 val verifyNoExecutionDependencies = tasks.register("verifyNoExecutionDependencies") {

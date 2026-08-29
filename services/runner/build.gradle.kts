@@ -30,6 +30,13 @@ tasks.withType<Test>().configureEach {
     environment("AWS_SECRET_ACCESS_KEY", "kaas-canary-must-not-cross-the-boundary")
     environment("GITHUB_TOKEN", "kaas-canary-must-not-cross-the-boundary")
     environment("KAAS_DATABASE_PASSWORD", "kaas-canary-must-not-cross-the-boundary")
+
+    // The shared mandatory-control contract, for the same reason: read at runtime, so invisible to the
+    // up-to-date check unless declared. A control added to the gate without the contract being updated must
+    // fail the build, and it cannot fail a test that never runs.
+    inputs.file(rootProject.file("packages/api-contracts/mandatory-sandbox-controls.json"))
+        .withPropertyName("mandatorySandboxControls")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
 }
 
 /**

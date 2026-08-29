@@ -1,0 +1,377 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.kaas.dev/execution-command.schema.json",
+  "title": "ExecutionCommand",
+  "description": "The immutable semantic description of what one authorized assignment would execute. This is the document the control plane persists and returns to a worker; it is deliberately NOT the broker message. runner-command.schema.json describes a broker envelope and is a SEPARATE, still-proposed contract: the two differ in shape today (that one has no networkPolicy type, requires an environmentSnapshot this document does not carry, and forbids properties this one requires), and an earlier version of this description wrongly claimed one carried the other as its payload. Reconciling them belongs to the slice that actually delivers a command. Nothing in the current slice executes this document.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "commandId",
+    "commandDigest",
+    "organizationId",
+    "projectId",
+    "runId",
+    "runVersion",
+    "attemptId",
+    "attemptNumber",
+    "assignmentEpoch",
+    "runSnapshotDigest",
+    "issuedAt",
+    "expiresAt",
+    "engine",
+    "sourceBundle",
+    "secretCapabilities",
+    "networkPolicy",
+    "sandboxSecurityProfile",
+    "configurationSnapshot",
+    "selection",
+    "parallelism",
+    "scenarioRetry",
+    "executionTimeoutSeconds",
+    "artifactPolicy"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "commandId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "commandDigest": {
+      "$ref": "#/$defs/digest",
+      "description": "A canonical SEMANTIC digest over every other field of this document, recomputed by the consumer from the parsed document rather than by hashing the bytes received. It establishes semantic identity and integrity against accidental or partial modification. It is NOT a signature and confers NO authenticity: it is unkeyed, so anyone who can produce a document can produce a matching digest. Authenticity, if a future slice needs it, requires a keyed signature over this value."
+    },
+    "organizationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "projectId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "runId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "runVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "attemptId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "attemptNumber": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "assignmentEpoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "description": "The fencing token this command's authority is scoped to. Authority from one epoch must never authorize another."
+    },
+    "runSnapshotDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "issuedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "engine": {
+      "type": "object",
+      "required": [
+        "type",
+        "version"
+      ],
+      "properties": {
+        "type": {
+          "const": "KARATE"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sourceBundle": {
+      "$ref": "#/$defs/sourceBundle"
+    },
+    "secretCapabilities": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/secretCapability"
+      },
+      "description": "Empty whenever no production secret provider exists, because a secret-bearing run is refused at authorization rather than issued a command it cannot honour."
+    },
+    "networkPolicy": {
+      "$ref": "#/$defs/networkPolicy"
+    },
+    "sandboxSecurityProfile": {
+      "$ref": "#/$defs/sandboxSecurityProfile"
+    },
+    "configurationSnapshot": {
+      "type": "object",
+      "maxProperties": 500,
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,127}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/scalar"
+      },
+      "description": "Resolved non-secret scalar configuration captured at run creation. A secret value never appears here."
+    },
+    "selection": {
+      "type": "object",
+      "required": [
+        "tags"
+      ],
+      "properties": {
+        "tags": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^@[A-Za-z0-9_.:-]{1,127}$"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "parallelism": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32
+    },
+    "scenarioRetry": {
+      "type": "object",
+      "required": [
+        "maxAttempts",
+        "delayMilliseconds"
+      ],
+      "properties": {
+        "maxAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "delayMilliseconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000
+        }
+      },
+      "additionalProperties": false,
+      "description": "Test-level scenario retry inside this execution attempt; it never creates a new infrastructure attempt."
+    },
+    "executionTimeoutSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 600,
+      "description": "Bounded by the sandbox's own wall-clock ceiling, so a command cannot ask for longer than any runtime would grant."
+    },
+    "artifactPolicy": {
+      "type": "object",
+      "required": [
+        "types",
+        "maxArtifactBytes",
+        "maxTotalBytes"
+      ],
+      "properties": {
+        "types": {
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "KARATE_HTML_REPORT",
+              "RAW_RESULT",
+              "EXECUTION_LOG",
+              "OTHER"
+            ]
+          }
+        },
+        "maxArtifactBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 104857600
+        },
+        "maxTotalBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 524288000
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?![A-Za-z][A-Za-z0-9+.-]*:)(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\\\)[A-Za-z0-9._~ -]+(?:/[A-Za-z0-9._~ -]+)*$",
+      "description": "Workspace-relative logical path; absolute paths, backslashes, traversal segments, and control characters are forbidden."
+    },
+    "scalar": {
+      "oneOf": [
+        {
+          "type": "string",
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+        },
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "boolean"
+        }
+      ]
+    },
+    "featureRevision": {
+      "type": "object",
+      "required": [
+        "featureId",
+        "revisionId",
+        "logicalPath",
+        "contentDigest"
+      ],
+      "properties": {
+        "featureId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "revisionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "logicalPath": {
+          "$ref": "#/$defs/logicalPath"
+        },
+        "contentDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sourceBundle": {
+      "type": "object",
+      "required": [
+        "contentDigest",
+        "features"
+      ],
+      "properties": {
+        "contentDigest": {
+          "$ref": "#/$defs/digest",
+          "description": "A canonical SEMANTIC digest over the sorted (logicalPath, contentDigest) pairs, not a hash of the archive bytes. A consumer verifies it by recanonicalizing what it extracted, not by hashing the file it received."
+        },
+        "features": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/featureRevision"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "What the bundle IS, not where it is or which credential fetches it. It deliberately carries no capability identifier: capabilities rotate on every delivery, so an identifier baked into an immutable document is stale from the second request onward, and a field the digest cannot cover is a field an attacker chooses and a consumer cannot verify. Capability identity is returned in the delivery envelope instead."
+    },
+    "secretCapability": {
+      "type": "object",
+      "required": [
+        "capabilityId",
+        "provider",
+        "referenceId",
+        "bindingKey",
+        "expiresAt"
+      ],
+      "properties": {
+        "capabilityId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "provider": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9.-]{1,63}$"
+        },
+        "referenceId": {
+          "type": "string",
+          "pattern": "^secret-ref:[A-Za-z0-9._~-]{8,240}$",
+          "description": "Opaque identifier that reveals no provider path and grants no access by possession."
+        },
+        "bindingKey": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,127}$"
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "networkPolicy": {
+      "type": "object",
+      "required": [
+        "policyRevisionId",
+        "type",
+        "version",
+        "digest"
+      ],
+      "properties": {
+        "policyRevisionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "type": {
+          "const": "DENY_ALL",
+          "description": "Only DENY_ALL is enforceable, so only DENY_ALL may appear on a command. The policy-revision model defines ALLOWLIST as well and authorization refuses it as NOT_ENFORCEABLE; pinning a const here means the contract refuses it too, rather than describing a document the platform would never issue."
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Reference to a separately enforced, immutable, platform-owned network policy; not launcher configuration, and never chosen by a worker."
+    },
+    "sandboxSecurityProfile": {
+      "type": "object",
+      "required": [
+        "profileVersion",
+        "assessmentDigest"
+      ],
+      "properties": {
+        "profileVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "assessmentDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Which sandbox boundary the platform expected when it authorized this, and the digest of the assessment presented for it. Host-sensitive diagnostics are deliberately absent: which controls a deployment cannot enforce is exactly what an attacker would want from an artifact that travels."
+    }
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "schemaVersion": "1.0",
+  "commandId": "3f8a2b10-0000-4000-8000-000000000001",
+  "commandDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "organizationId": "3f8a2b10-0000-4000-8000-0000000000aa",
+  "projectId": "3f8a2b10-0000-4000-8000-0000000000bb",
+  "runId": "3f8a2b10-0000-4000-8000-0000000000cc",
+  "runVersion": 3,
+  "attemptId": "3f8a2b10-0000-4000-8000-0000000000dd",
+  "attemptNumber": 1,
+  "assignmentEpoch": 1,
+  "runSnapshotDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "issuedAt": "2026-08-29T09:00:00Z",
+  "expiresAt": "2026-08-29T09:05:00Z",
+  "engine": {
+    "type": "KARATE",
+    "version": "1.4.1"
+  },
+  "networkPolicy": {
+    "policyRevisionId": "00000000-0000-4000-8000-00000000d001",
+    "type": "DENY_ALL",
+    "version": 1,
+    "digest": "sha256:90bc5fe597d868eb21bc933950f31f10f4ea1f528e9e96a8eabdc7bd73a02450"
+  },
+  "sandboxSecurityProfile": {
+    "profileVersion": "kaas.sandbox.v1",
+    "assessmentDigest": "sha256:fd77c19a7e96493f4731c8cd5a563157b56434830fe9049713fbf27ec829731e"
+  },
+  "selection": {
+    "tags": [
+      "@smoke"
+    ]
+  },
+  "parallelism": 4,
+  "scenarioRetry": {
+    "maxAttempts": 2,
+    "delayMilliseconds": 500
+  },
+  "executionTimeoutSeconds": 300,
+  "artifactPolicy": {
+    "types": [
+      "EXECUTION_LOG",
+      "RAW_RESULT"
+    ],
+    "maxArtifactBytes": 1048576,
+    "maxTotalBytes": 10485760
+  },
+  "sourceBundle": {
+    "contentDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "features": [
+      {
+        "featureId": "3f8a2b10-0000-4000-8000-0000000000f1",
+        "revisionId": "3f8a2b10-0000-4000-8000-0000000000f2",
+        "logicalPath": "features/login.feature",
+        "contentDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    ]
+  },
+  "secretCapabilities": [],
+  "configurationSnapshot": {},
+  "sourceCapabilityToken": "kaas_src_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+}

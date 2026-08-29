@@ -40,7 +40,11 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | Hostile-execution sandbox | EVIDENCED FOR A TRUSTED PROBE, NOT APPROVED FOR USER CONTENT | ADR-022 supersedes ADR-006. A container launcher and a probe image now exist and hold daemon access; the launcher runs one repository-controlled probe under a fixed profile, and no source, secret, or caller-supplied command can enter it |
 | Authentication and product APIs | IMPLEMENTED FOR CURRENT SLICES | External OIDC-compatible bearer JWT; trusted tenant claims only; full-parent scoping and cross-tenant concealment |
 | Run lifecycle/results/messaging/SSE semantics | DESIGNED + VALIDATED | Proposed ADRs, canonical docs, strict schemas, fixtures, and OpenAPI; no runtime adapters |
-| Karate execution | PLANNED + DISABLED | No dependency, launcher, consumer, or arbitrary execution path |
+| Karate execution | PLANNED + DISABLED | No engine dependency and no execution path. A container launcher exists for the security probe only (ADR-022), and an ExecutionCommand can now be produced (ADR-023) with nothing that executes it |
+| Execution authorization | IMPLEMENTED | Owning an attempt is not permission to execute it: a separate assignment-scoped decision, bounded by the lease, revalidated on every capability redemption |
+| Source capability | IMPLEMENTED | Short-lived assignment-scoped bearer token for the snapshot-pinned feature sources; plaintext never stored |
+| Secret capability | MODELLED, NEVER ISSUED | The envelope exists; no production secret provider does, so a secret-bearing run is refused at authorization |
+| Network policy | IMPLEMENTED FOR DENY_ALL | Platform-owned immutable revisions. ALLOWLIST is modelled and refused as not enforceable |
 
 Status meanings: **IMPLEMENTED** is present in code/tooling; **VALIDATED** has an automated passing check; **SCAFFOLDED** has only a minimal executable or contract shell; **DESIGNED** is documented intent; **PLANNED** has no active implementation.
 
@@ -138,4 +142,6 @@ The checked-in values are local-development defaults, not production secret mana
 
 ## Scope discipline
 
-This slice lets published work be received and authoritatively claimed, and gives claimed work a bounded way back out. It deliberately does not implement ExecutionCommand production, source capability issuance, secret capability issuance, provisioning, SSE, secret values/storage/redemption, source bundles, object storage, Karate parsing/execution, a container launcher, network enforcement, results/artifacts, quality-gate execution, or full OpenTelemetry infrastructure. A claim records who owns an infrastructure attempt and grants no permission to execute anything; that boundary is the point.
+The current slice adds the authorization layer between owning an attempt and executing it. It produces an ExecutionAuthorization, a short-lived source capability, and an immutable ExecutionCommand — and executes none of them.
+
+It deliberately does not implement provisioning, command delivery, SSE, secret values or storage or redemption against a real provider, object storage, Karate parsing or execution, network enforcement beyond deny-all, results, artifacts, quality-gate execution, or full OpenTelemetry infrastructure. A claim records who owns an infrastructure attempt; an authorization records that this specific assignment may execute; and nothing acts on either. That boundary is the point.

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "kaas.sandbox-security-attestation.v1",
+  "securityProfileVersion": "kaas.sandbox.v1",
+  "probeImageDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "runtime": "gvisor",
+  "assessedAt": "2026-08-29T10:30:00Z",
+  "mandatoryControls": {
+    "CAPABILITIES_DROPPED": "PASS",
+    "KERNEL_PATHS_MASKED": "PASS",
+    "MEMORY_LIMIT": "PASS",
+    "MINIMAL_ENVIRONMENT": "PASS",
+    "NETWORK_DENIED": "PASS",
+    "NON_ROOT_GID": "PASS",
+    "NON_ROOT_UID": "PASS",
+    "NO_DOCKER_SOCKET": "PASS",
+    "NO_HOST_DEVICES": "PASS",
+    "NO_HOST_MOUNTS": "PASS",
+    "NO_NEW_PRIVILEGES": "PASS",
+    "OUTPUT_BOUNDED": "PASS",
+    "PID_LIMIT": "PASS",
+    "READ_ONLY_ROOT": "PASS",
+    "WALL_CLOCK_TIMEOUT": "PASS",
+    "WRITABLE_TMPFS": "PASS",
+    "SECCOMP_FILTER": "UNSUPPORTED"
+  },
+  "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}

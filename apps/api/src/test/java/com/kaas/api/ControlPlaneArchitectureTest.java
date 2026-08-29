@@ -30,6 +30,19 @@ class ControlPlaneArchitectureTest {
                         .filter(imported -> imported.getPackageName().contains(".consumer."))
                         .count())
                 .isGreaterThan(5L);
+        // The execution rules were outside this guard entirely: rewriting all four selectors to a misspelled
+        // package left the whole class green, including this test. A rule that matches no class passes
+        // vacuously, and allowEmptyShould(true) is what makes that silent.
+        assertThat(classes.stream()
+                        .filter(imported -> imported.getPackageName().contains(".execution."))
+                        .count())
+                .as("the execution package selectors must match real classes")
+                .isGreaterThan(10L);
+        assertThat(classes.stream()
+                        .filter(imported -> imported.getPackageName().contains(".internal"))
+                        .count())
+                .as("the internal package selectors must match real classes")
+                .isGreaterThan(0L);
     }
 
     @Test
@@ -177,6 +190,102 @@ class ControlPlaneArchitectureTest {
                 .orShould()
                 .dependOnClassesThat()
                 .haveFullyQualifiedName("java.util.concurrent.ScheduledExecutorService")
+                .allowEmptyShould(true)
+                .check(classes);
+    }
+
+    @Test
+    void executionAuthorizationCannotLaunchAnythingOrReachAContainerRuntime() {
+        // The whole point of this slice is that a command can be produced and has nowhere to go. A dependency
+        // on a process API, a container client, or Karate would make that a matter of nobody having called it
+        // yet rather than of there being nothing to call.
+        noClasses()
+                .that()
+                .resideInAnyPackage("..execution..", "..internal..")
+                .should()
+                .dependOnClassesThat()
+                .resideInAnyPackage(
+                        "com.github.dockerjava..",
+                        "com.kaas.runner..",
+                        "com.intuit.karate..",
+                        "io.minio..",
+                        "org.springframework.vault..",
+                        "software.amazon.awssdk.services.secretsmanager..",
+                        "com.azure.security.keyvault..",
+                        "com.google.cloud.secretmanager..")
+                .orShould()
+                .dependOnClassesThat()
+                .haveFullyQualifiedName("java.lang.ProcessBuilder")
+                .orShould()
+                .dependOnClassesThat()
+                .haveFullyQualifiedName("java.lang.Runtime")
+                .allowEmptyShould(true)
+                .check(classes);
+    }
+
+    @Test
+    void issuingACommandCannotPublishItToABroker() {
+        // No AMQP anywhere in the execution package. A command that could be published is a command that will
+        // be published, and delivery belongs to a slice that has somewhere to deliver it to.
+        noClasses()
+                .that()
+                .resideInAnyPackage("..execution..", "..internal..")
+                .should()
+                .dependOnClassesThat()
+                .resideInAnyPackage("org.springframework.amqp..", "com.rabbitmq..", "..outbox..")
+                .allowEmptyShould(true)
+                .check(classes);
+    }
+
+    @Test
+    void noUserFacingControllerTouchesExecutionAuthority() {
+        // Execution authorization is not a tenant API. The public controllers must not be able to reach it even
+        // by accident, because an endpoint that authenticates a tenant and issues platform authority is the
+        // confused deputy this design exists to prevent.
+        noClasses()
+                .that()
+                .resideInAPackage("..controlplane.api..")
+                .should()
+                .dependOnClassesThat()
+                .resideInAPackage("..execution..")
+                .allowEmptyShould(true)
+                .check(classes);
+    }
+
+    @Test
+    void theSecretProviderAbstractionHasNoProductionSdkBehindIt() {
+        // The interface exists so the capability envelope can be designed while the thing it protects is
+        // absent. If an SDK appears here, the envelope stops being the only thing that was built.
+        noClasses()
+                .that()
+                .resideInAPackage("..execution.domain..")
+                .should()
+                .dependOnClassesThat()
+                .resideInAnyPackage(
+                        "org.springframework.vault..",
+                        "software.amazon.awssdk..",
+                        "com.azure..",
+                        "com.google.cloud..",
+                        "com.bettercloud..")
+                .allowEmptyShould(true)
+                .check(classes);
+    }
+
+    @Test
+    void noEndpointCanAcceptASandboxSecurityAttestation() {
+        // The load-bearing claim of the whole security-gate bridge: an attestation arrives as deployment
+        // configuration and there is no API that accepts one, so nothing which authenticates to this service can
+        // assert its own security posture. That claim was previously true only by inspection — one
+        // @RequestBody on any controller would have falsified it silently.
+        noClasses()
+                .that()
+                .resideOutsideOfPackage("..execution..")
+                .should()
+                .dependOnClassesThat()
+                .haveSimpleName("SandboxSecurityAttestation")
+                .orShould()
+                .dependOnClassesThat()
+                .haveSimpleName("SandboxSecurityAttestationSource")
                 .allowEmptyShould(true)
                 .check(classes);
     }

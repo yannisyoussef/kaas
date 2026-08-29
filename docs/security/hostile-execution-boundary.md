@@ -99,6 +99,37 @@ The read-only row is worth dwelling on. The obvious probe — write to `/` — p
 
 Two properties of this table matter more than any individual row. Every row is an **enumeration** rather than a question about a named path: asking whether `/host` existed found a mount at `/host` and nothing else, while the daemon socket at `/run/docker.sock`, a home directory at `/mnt/host`, and the host's root disk renamed to `/dev/loop0` all reported clean with the sandbox holding the host. And **absent evidence is a failure**, never a pass: five of these controls once reported success on a sandbox that produced no observations at all, which is what a failed start, an unreachable daemon, or an undrained output stream all look like.
 
+## Two independent gates
+
+A sandbox that provably confines what it runs is **not** permission to run anything in it. That distinction is
+the whole reason this document and [ADR-023](../adr/023-execution-authorization-and-assignment-scoped-capabilities.md)
+describe separate mechanisms.
+
+Everything above establishes one property: *if something runs here, this is what it can and cannot do.* It says
+nothing about whether a particular piece of work is allowed to run at all — whether the run that asked for it
+still exists, whether the worker asking still owns it, whether the egress policy it needs can be enforced, or
+whether its secrets can be supplied. Those are questions about authority, and a boundary cannot answer them.
+
+Execution therefore requires **both**:
+
+```
+approved sandbox boundary        AND        valid assignment-scoped authorization
+   (this document)                              (ADR-023)
+   "what could it do?"                          "may this run, now, by this worker?"
+```
+
+Neither substitutes for the other, and the failure modes of confusing them run in both directions. Treating a
+secure sandbox as permission would let any caller with a live lease execute anything, at any time, under any
+policy — the sandbox would faithfully confine work nobody authorized. Treating a valid authorization as safety
+would run authorized work inside a boundary nothing had demonstrated, which is the state every deployment is in
+by default here, and why authorization refuses when no assessment is present.
+
+The link between them is deliberately narrow. The gate produces a structured assessment; the control plane
+consumes it as evidence and binds the profile version and assessment digest into the authorization it issues, so
+an audit can answer *which boundary was this authorized against*. The control plane cannot call the gate — it is
+build-guarded against depending on the module that holds container-runtime access — and the gate knows nothing
+about runs, attempts, or authorizations. Each is useless alone and neither can weaken the other.
+
 ## Deployment-specific hardening
 
 Reported for operational visibility, never required, and never claimed where it cannot be shown:
