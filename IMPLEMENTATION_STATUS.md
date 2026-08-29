@@ -63,7 +63,7 @@ This document describes repository reality after the dispatch consumption, claim
 
 ## Scaffolded, not product functionality
 
-- The runner prints a status message and cannot execute Karate, shell commands, or external processes.
+- The runner prints a status message and cannot execute Karate or any caller-supplied command. It does now start containers: a trusted launcher runs one repository-controlled security probe, selected from a fixed server-side enumeration, under an immutable hardened profile. That component holds Docker daemon access and is the most privileged code in the repository.
 - The web application contains a landing page and placeholder dashboard with no API client or product data.
 - Run create/get/list/snapshot/cancellations OpenAPI paths are implemented. Events/results/artifacts and execution JSON Schemas remain proposed contracts. The worker heartbeat is an internal service operation, deliberately outside the public contract.
 - Docker Compose PostgreSQL is configured for the API. RabbitMQ and MinIO are not connected to feature lifecycle.
@@ -85,7 +85,7 @@ This document describes repository reality after the dispatch consumption, claim
 - SSE implementation.
 - Object-storage integration.
 - Secret values, provider mapping, storage, resolution, redemption, capability minting, or injection.
-- Karate dependencies, runner images, container launchers, or arbitrary test execution.
+- Karate dependencies, source or secret capability issuance, an egress policy model, or arbitrary test execution. A runner image and a container launcher now exist and are deliberately limited to the synthetic probe.
 - OpenTelemetry instrumentation.
 - Lifecycle mutation handlers beyond CREATED to QUEUED, consumer inbox, lease reconciliation, quality evaluation, outbox retention policy, and durable run event storage beyond the scheduling transition record.
 
@@ -127,7 +127,7 @@ This iteration resolves KAA-003, KAA-007, KAA-013, and KAA-015 at the **proposed
 - Run creation/read/cancellation/events/results/artifacts and RFC 9457-style errors are specified in OpenAPI.
 - Result, artifact, quality-gate, SSE replay, observability propagation, compatibility, and contract threat mitigations are documented.
 
-No item above is runtime behavior. KAA-004 remains open: Docker/host/daemon/network/secret/artifact isolation still needs a dedicated hostile-execution security architecture and executable release gate.
+No item above is runtime behavior. KAA-004 is now evidenced rather than closed: a hostile-execution security architecture (ADR-022) and an executable release gate exist and pass against a trusted synthetic probe on standard hardened Docker. It is not approved for user content — the sandbox shares the host kernel, and source capability, secret capability, and egress policy models do not exist.
 
 ## Current vertical slice
 
@@ -135,7 +135,7 @@ Authenticated, organization-scoped Project/FeatureRevision and Environment/RunPr
 
 ## Security gate
 
-Arbitrary execution remains disabled. Do not add Karate or a container launcher until the proposed execution security ADR has enforceable controls and adversarial tests for host isolation, egress, secrets, resources, timeouts, logs, artifacts, and cleanup.
+Arbitrary execution remains disabled, and `kaas.execution.enabled=true` refuses to start the application. A container launcher now exists under ADR-022 with enforceable controls and adversarial tests for host isolation, egress, resources, timeouts, and cleanup, exercised against a trusted synthetic probe. Do not add Karate, a source capability, or a secret capability until the prerequisites named in ADR-022 are met and the gate passes on the deployment's own runtime.
 
 See `CONTRACT_LIFECYCLE_ARCHITECTURE_REPORT.md` for the decisions, adversarial review, changed files, verification evidence, and deferred implementation work.
 

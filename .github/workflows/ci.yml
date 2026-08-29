@@ -20,7 +20,74 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
         with:
           cache-provider: basic
-      - run: ./gradlew clean check --no-daemon
+      # The sandbox suite is excluded here and runs in its own mandatory job below. It ran in both, which
+      # doubled a Docker-heavy suite inside this job's budget and, on any shared runner, put two launchers on
+      # one daemon at once -- the condition under which the orphan reconciler's reclamation window and the
+      # gate's container lifecycle interfere with each other.
+      - run: ./gradlew clean check --no-daemon -x :services:runner:test
+
+  # The hostile-execution gate is a separate, mandatory job rather than a suite that skips when no daemon is
+  # present. A security gate that quietly does not run is worse than one that fails: it produces a green build
+  # that means nothing. GitHub-hosted Ubuntu runners provide the Docker daemon these tests require; if a future
+  # runtime (gVisor, a microVM) cannot run here, this job must move to infrastructure that supports it rather
+  # than being made conditional.
+  #
+  # This job is a REQUIRED status check on the default branch. Three properties follow from that and must not
+  # be weakened:
+  #
+  #   1. It carries no job-level `if:`, no `continue-on-error`, and no path or branch filter. A required check
+  #      is satisfied by a conclusion of success, skipped, OR neutral, so a job that skips itself when its
+  #      prerequisites are missing would be indistinguishable from one that verified them.
+  #   2. Missing prerequisites FAIL. No daemon, no probe image, no evidence: all of them fail this job.
+  #   3. Its name is `hostile-execution-gate` and must stay globally unique across every workflow in this
+  #      repository, because required-check resolution matches on job name alone and cannot disambiguate two
+  #      jobs that share one.
+  hostile-execution-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+      - name: Confirm a container runtime is present
+        run: docker version
+      # cleanTest forces the sandbox suite to execute rather than be satisfied by an UP-TO-DATE result. A
+      # cached or incremental pass would report this gate green without having started a single container,
+      # which is the same failure the gate itself was just rebuilt to reject: absence of evidence is not
+      # evidence of enforcement.
+      - run: ./gradlew :services:runner:cleanTest :services:runner:check --no-daemon
+      - name: Confirm the gate actually produced evidence
+        run: |
+          set -euo pipefail
+          results=services/runner/build/test-results/test
+          if [ ! -d "$results" ]; then
+            echo "No test results were produced; the gate did not run." >&2
+            exit 1
+          fi
+          executed=$(cat "$results"/*.xml | grep -o 'tests="[0-9]*"' | grep -o '[0-9]*' | awk '{n+=$1} END {print n+0}')
+          skipped=$(cat "$results"/*.xml | grep -o 'skipped="[0-9]*"' | grep -o '[0-9]*' | awk '{n+=$1} END {print n+0}')
+          echo "executed=$executed skipped=$skipped"
+          # A floor rather than an exact count, so adding tests does not break the gate while removing the
+          # suite does. The boundary tests need a real daemon; the gate's red-path tests do not. If either
+          # family disappears, this job fails instead of reporting a green build over an empty suite.
+          if [ "$executed" -lt 40 ] || [ "$skipped" -ne 0 ]; then
+            echo "Expected at least 40 executed tests and no skips." >&2
+            exit 1
+          fi
+          for required in HostileExecutionBoundaryTests SecurityGateRedPathTests OrphanReconciliationTests; do
+            if ! ls "$results" | grep -q "$required"; then
+              echo "$required did not run." >&2
+              exit 1
+            fi
+          done
+      - name: Remove any sandbox left behind by a failed run
+        if: always()
+        run: docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f
 
   web:
     runs-on: ubuntu-latest

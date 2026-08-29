@@ -29,7 +29,7 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | Lease recovery | IMPLEMENTED + VALIDATED | Heartbeats on an internal service surface, expiry plus recovery window, fencing to STOPPING, and settlement to FAILED/LEASE_LOST so claimed work always releases capacity |
 | Dispatch suppression | IMPLEMENTED + VALIDATED | A dispatch no relay is currently holding is withdrawn in the terminating transaction, spending no attempt and counting as no dead letter; a message under a live relay lease is left to publish rather than falsely recalled |
 | Migration-upgrade testing | IMPLEMENTED + VALIDATED | Every migration verified against an empty database and against a populated previous-version database with its triggers installed, with the fixture proven to reach what the upgrade changes before it runs |
-| Runner bootstrap | SCAFFOLDED + VALIDATED | Reports that execution is disabled; launches no external process |
+| Runner bootstrap | SCAFFOLDED + VALIDATED | Reports that execution is disabled; runs no user-supplied content |
 | Next.js web scaffold | IMPLEMENTED + VALIDATED | Next.js 16.3.3; lint, typecheck, render test, build, production audit |
 | Contract tooling | IMPLEMENTED + VALIDATED | Strict AJV schemas/fixtures plus semantic checks; proposed contracts only |
 | OpenAPI contract | IMPLEMENTED + PROPOSED | Run create/get/list/snapshot/cancellations and configuration APIs are implemented; events/results/artifacts remain proposed. The worker heartbeat is an internal service operation and is deliberately outside the public contract |
@@ -37,7 +37,7 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | Modular control-plane boundaries | IMPLEMENTED | Capability packages with inward ports and ArchUnit enforcement |
 | PostgreSQL persistence | IMPLEMENTED | Flyway schema, JPA validation, tenant composite FKs, immutable-revision trigger, query indexes |
 | RabbitMQ, SSE, object storage integration | PLANNED | No publisher, consumer, stream, or storage adapter exists |
-| Docker execution sandbox | DESIGNED, NOT APPROVED | ADR-006 is proposed; no launcher or runner image exists |
+| Hostile-execution sandbox | EVIDENCED FOR A TRUSTED PROBE, NOT APPROVED FOR USER CONTENT | ADR-022 supersedes ADR-006. A container launcher and a probe image now exist and hold daemon access; the launcher runs one repository-controlled probe under a fixed profile, and no source, secret, or caller-supplied command can enter it |
 | Authentication and product APIs | IMPLEMENTED FOR CURRENT SLICES | External OIDC-compatible bearer JWT; trusted tenant claims only; full-parent scoping and cross-tenant concealment |
 | Run lifecycle/results/messaging/SSE semantics | DESIGNED + VALIDATED | Proposed ADRs, canonical docs, strict schemas, fixtures, and OpenAPI; no runtime adapters |
 | Karate execution | PLANNED + DISABLED | No dependency, launcher, consumer, or arbitrary execution path |
@@ -63,7 +63,7 @@ The diagram is a target, not a deployment claim. The control plane must never ex
 
 - `apps/api` — JWT-secured Project/FeatureRevision, versioned-configuration, TestRun/snapshot, scheduling/outbox control plane, and the RabbitMQ outbox relay
 - `apps/web` — Next.js frontend scaffold and render test
-- `services/runner` — non-executing runner bootstrap
+- `services/runner` — runner bootstrap plus the trusted sandbox launcher and security gate; executes the synthetic probe only, never user content
 - `packages/api-contracts` — JSON Schemas, fixtures, and OpenAPI validation tooling
 - `infrastructure/local` — loopback-only local dependency definitions
 - `docs` — product intent, proposed architecture, security requirements, and ADRs

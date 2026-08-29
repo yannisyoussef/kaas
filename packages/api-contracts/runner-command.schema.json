@@ -178,7 +178,7 @@
           "additionalProperties": false,
           "description": "Test-level scenario retry inside this execution attempt; it never creates a new infrastructure attempt."
         },
-        "executionTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "executionTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 600},
         "artifactPolicy": {
           "type": "object",
           "required": ["types", "maxArtifactBytes", "maxTotalBytes"],

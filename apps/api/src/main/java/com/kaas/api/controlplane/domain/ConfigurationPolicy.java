@@ -21,6 +21,18 @@ public final class ConfigurationPolicy {
     public static final int MAX_VARIABLES = 100;
     public static final int MAX_SECRET_BINDINGS = 50;
     public static final int MAX_OVERRIDES = 100;
+
+    /**
+     * The longest execution a run profile may ask for.
+     *
+     * <p>Matched deliberately to the sandbox's own wall-clock ceiling. The configuration model previously
+     * accepted an hour while the sandbox refused anything over ten minutes, which meant a tenant could seal a
+     * timeout into an immutable {@code RunSnapshot} that no runtime would ever honour — and a sealed snapshot
+     * cannot be revised. Tightened here while no run has ever executed, which is the only moment this costs
+     * nothing. Raising the sandbox's ceiling instead would have multiplied every per-unit-time cost a hostile
+     * workload imposes on the host by six.
+     */
+    public static final int MAX_EXECUTION_TIMEOUT_SECONDS = 600;
     public static final int MAX_TAGS = 100;
     public static final int MAX_STRING_BYTES = 4096;
     public static final long MIN_INTEGER = -9_007_199_254_740_991L;
@@ -110,8 +122,10 @@ public final class ConfigurationPolicy {
             throw invalid(
                     "scenarioRetry/delayMilliseconds", "delayMilliseconds must be between 0 and 30000");
         }
-        if (timeoutSeconds < 1 || timeoutSeconds > 3600) {
-            throw invalid("executionTimeoutSeconds", "executionTimeoutSeconds must be between 1 and 3600");
+        if (timeoutSeconds < 1 || timeoutSeconds > MAX_EXECUTION_TIMEOUT_SECONDS) {
+            throw invalid(
+                    "executionTimeoutSeconds",
+                    "executionTimeoutSeconds must be between 1 and " + MAX_EXECUTION_TIMEOUT_SECONDS);
         }
         ArtifactPolicy normalizedPolicy = normalizeArtifactPolicy(artifactPolicy);
 

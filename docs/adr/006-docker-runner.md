@@ -2,11 +2,18 @@
 
 ## Status
 
-PROPOSED — NOT APPROVED FOR UNTRUSTED EXECUTION
+SUPERSEDED by [ADR-022](022-hostile-execution-boundary-and-synthetic-probe.md) — the boundary it proposed is now
+implemented and evidenced for a trusted synthetic probe. Its central judgement is preserved rather than
+overturned: Docker is still not a sufficient boundary for untrusted execution, and user content still cannot
+enter the sandbox.
 
 ## Context
 
-Karate feature files can execute JavaScript and make network requests. They must be treated as hostile executable content. Process separation alone does not contain filesystem, network, resource, credential, or kernel risk. The repository currently has no executor or container launcher.
+Karate feature files can execute JavaScript and make network requests. They must be treated as hostile executable content. Process separation alone does not contain filesystem, network, resource, credential, or kernel risk.
+
+The paragraph below is preserved as written at the time and is no longer true: the repository now contains a container launcher, under ADR-022. It runs one trusted synthetic probe and no user content.
+
+> The repository currently has no executor or container launcher.
 
 ## Decision
 

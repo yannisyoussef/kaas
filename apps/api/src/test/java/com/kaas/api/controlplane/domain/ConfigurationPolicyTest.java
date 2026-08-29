@@ -347,12 +347,17 @@ class ConfigurationPolicyTest {
                 maximumTags,
                 32,
                 new ScenarioRetry(5, 30_000),
-                3600,
+                ConfigurationPolicy.MAX_EXECUTION_TIMEOUT_SECONDS,
                 new ArtifactPolicy(List.of(ArtifactType.values()), 104_857_600, 524_288_000),
                 maximumOverrides);
         assertThat(maximumProfile.selection().tags()).hasSize(100);
         assertThat(maximumProfile.configurationOverrides()).hasSize(100);
 
+        // One past the ceiling. The bound is matched to the sandbox's own wall-clock limit, so a value the
+        // runtime could never honour cannot be sealed into an immutable snapshot.
+        assertInvalidProfile(
+                emptyEnvironment, List.of(), 1, new ScenarioRetry(1, 0),
+                ConfigurationPolicy.MAX_EXECUTION_TIMEOUT_SECONDS + 1);
         assertInvalidProfile(emptyEnvironment, List.of(), 0, new ScenarioRetry(1, 0), 60);
         assertInvalidProfile(emptyEnvironment, maximumTags, 33, new ScenarioRetry(1, 0), 60);
         assertInvalidProfile(emptyEnvironment, List.of(), 1, new ScenarioRetry(0, 0), 60);

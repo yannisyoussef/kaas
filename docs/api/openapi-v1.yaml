@@ -1352,7 +1352,7 @@ components:
         selection: {$ref: '#/components/schemas/ProfileSelection'}
         parallelism: {type: integer, minimum: 1, maximum: 32}
         scenarioRetry: {$ref: '#/components/schemas/ScenarioRetry'}
-        executionTimeoutSeconds: {type: integer, minimum: 1, maximum: 3600}
+        executionTimeoutSeconds: {type: integer, minimum: 1, maximum: 600}
         artifactPolicy: {$ref: '#/components/schemas/ArtifactPolicy'}
         configurationOverrides:
           type: array
@@ -1367,7 +1367,7 @@ components:
         selection: {$ref: '#/components/schemas/ProfileSelection'}
         parallelism: {type: integer, minimum: 1, maximum: 32}
         scenarioRetry: {$ref: '#/components/schemas/ScenarioRetry'}
-        executionTimeoutSeconds: {type: integer, minimum: 1, maximum: 3600}
+        executionTimeoutSeconds: {type: integer, minimum: 1, maximum: 600}
         artifactPolicy: {$ref: '#/components/schemas/ArtifactPolicy'}
         configurationOverrides:
           type: array
@@ -1416,7 +1416,7 @@ components:
         selection: {$ref: '#/components/schemas/ProfileSelection'}
         parallelism: {type: integer, minimum: 1, maximum: 32}
         scenarioRetry: {$ref: '#/components/schemas/ScenarioRetry'}
-        executionTimeoutSeconds: {type: integer, minimum: 1, maximum: 3600}
+        executionTimeoutSeconds: {type: integer, minimum: 1, maximum: 600}
         artifactPolicy: {$ref: '#/components/schemas/ArtifactPolicy'}
         configurationOverrides:
           type: array
@@ -1661,7 +1661,7 @@ components:
         selection: {$ref: '#/components/schemas/ProfileSelection'}
         parallelism: {type: integer, minimum: 1, maximum: 32}
         scenarioRetry: {$ref: '#/components/schemas/ScenarioRetry'}
-        executionTimeoutSeconds: {type: integer, minimum: 1, maximum: 3600}
+        executionTimeoutSeconds: {type: integer, minimum: 1, maximum: 600}
         artifactPolicy: {$ref: '#/components/schemas/ArtifactPolicy'}
         engine: {$ref: '#/components/schemas/EngineDescriptor'}
         snapshotDigest: {$ref: '#/components/schemas/Sha256Digest'}

@@ -1,6 +1,6 @@
 # System Context
 
-**Status: PROPOSED PRODUCT CONTEXT.** Only the API, web, and non-executing runner scaffolds exist today.
+**Status: PROPOSED PRODUCT CONTEXT.** Only the API, web, and runner scaffolds exist today. The runner now holds a container launcher that runs one trusted synthetic probe under a fixed security profile; it executes no user content.
 
 ```mermaid
 flowchart TB
