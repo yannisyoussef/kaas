@@ -1,10 +1,10 @@
 # Execution Protocol
 
-**Status: PROPOSED CONTRACT ARCHITECTURE.** The schemas are machine-validated design artifacts; no publisher, consumer, secret provider, storage adapter, launcher, or test engine exists.
+**Status: PARTIALLY IMPLEMENTED.** The schemas are machine-validated. A publisher, a consumer, a launcher, and a worker that executes commands all exist; no secret provider, storage adapter, or test engine does. The engine a command declares is `SYNTHETIC` — a platform-owned workload — and the runner refuses any engine it does not have.
 
 ## Protocol boundaries
 
-The control plane creates an immutable execution command for one attempt. A future worker may claim it, obtain separately authorized capabilities, execute through an approved launcher, and return a structured result plus artifact manifest. The control plane validates and canonicalizes evidence. The API never executes test content.
+The control plane creates an immutable execution command for one attempt. A worker acquires the assignment, obtains separately authorized capabilities, validates the command independently, executes through the approved launcher, and returns a structured result. The control plane accepts that result only after checking its provenance against authoritative state. Artifact manifests remain proposed. The API never executes test content, and no tenant content enters a sandbox.
 
 ```mermaid
 sequenceDiagram

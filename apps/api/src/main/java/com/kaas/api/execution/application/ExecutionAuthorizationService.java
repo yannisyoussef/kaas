@@ -52,6 +52,9 @@ import tools.jackson.databind.json.JsonMapper;
  */
 @Service
 public class ExecutionAuthorizationService {
+
+    /** Only a principal in this namespace may hold an assignment. */
+    private static final String WORKER_NAMESPACE = "kaas.worker.";
     private static final Logger LOGGER = LoggerFactory.getLogger(ExecutionAuthorizationService.class);
 
     private static final ObjectMapper MAPPER = JsonMapper.builder().build();
@@ -127,6 +130,20 @@ public class ExecutionAuthorizationService {
         ExecutionAttempt attempt = locked.orElseThrow().attempt();
 
         if (run.lifecycleState() != RunLifecycle.CLAIMED) {
+            // ONLY A GENUINELY ENDED RUN HAS ITS AUTHORITY WITHDRAWN.
+            //
+            // This branch used to revoke for every state that is not CLAIMED, and lockOwnedByRun now returns the
+            // four execution phases — so an authorize call arriving mid-execution revoked the authorization and
+            // every capability of a run that was executing normally, and stamped it RUN_TERMINATED. That is the
+            // inverse of the property the revocation exists to preserve: a durable record that disagrees with
+            // the decision it records. A worker re-authorizing after a lost response did it to itself.
+            boolean genuinelyOver = run.lifecycleState() == RunLifecycle.STOPPING
+                    || run.lifecycleState() == RunLifecycle.COMPLETED;
+            if (!genuinelyOver) {
+                // Executing, not finished. Refuse without touching anything: this call is out of order, and an
+                // out-of-order call is not evidence that the run has ended.
+                return denied(ExecutionDenial.EXECUTION_NOT_AUTHORIZED);
+            }
             // Covers QUEUED, STOPPING, and COMPLETED with one answer. A worker learns that this run is not
             // executable, not which of several states it happens to be in.
             //
@@ -141,14 +158,37 @@ public class ExecutionAuthorizationService {
         }
         if (!attempt.attemptId().equals(attemptId)
                 || attempt.state() != ExecutionAttemptState.CLAIMED
-                || !attempt.assignment().isHeldBy(workerId, assignmentEpoch)) {
+                || attempt.assignment().epoch() != assignmentEpoch
+                || attempt.assignment().fenced()) {
             // Identity and epoch together, exactly as the heartbeat checks them. Either alone leaves a hole:
             // an epoch alone lets any worker act as the owner, an identity alone lets a replaced worker act
             // under an assignment it has lost.
             return denied(ExecutionDenial.ASSIGNMENT_STALE);
         }
+        // Only a worker may hold an assignment. Checked here because this is where holding begins.
+        if (workerId == null || !workerId.startsWith(WORKER_NAMESPACE)) {
+            return denied(ExecutionDenial.EXECUTION_NOT_AUTHORIZED);
+        }
+        if (attempt.assignment().acquired() && !attempt.assignment().workerId().equals(workerId)) {
+            // Somebody else holds it. This is the check that the claim-time worker id could never perform,
+            // because that value is one constant for the whole deployment.
+            return denied(ExecutionDenial.ASSIGNMENT_STALE);
+        }
 
         Instant now = repository.currentDatabaseTime();
+        if (!attempt.assignment().acquired() && !attempt.assignment().expiredAt(now)) {
+            // FIRST AUTHORIZATION BINDS THE ASSIGNMENT. Under the same lock every ownership writer takes, and
+            // write-once in the database, so two workers racing here produce one holder and one refusal rather
+            // than two holders that both satisfy every later check.
+            attempt = attempt.acquiredBy(workerId, now);
+            repository.persistAcquisition(organizationId, run.projectId(), runId, attempt);
+            LOGGER.atInfo()
+                    .addKeyValue("event", "ASSIGNMENT_ACQUIRED")
+                    .addKeyValue("runId", runId)
+                    .addKeyValue("attemptId", attemptId)
+                    .addKeyValue("assignmentEpoch", assignmentEpoch)
+                    .log("A worker bound this assignment to itself");
+        }
         if (attempt.assignment().expiredAt(now)) {
             // The reconciler has not fenced it yet, but it will. Authorizing here would hand out authority whose
             // basis has already lapsed, and would race the fencing that is about to happen.

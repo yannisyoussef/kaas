@@ -30,6 +30,16 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  */
 @Service
 public class RunTerminationService {
+    /**
+     * The phases where a worker holds the run and a cancellation therefore has to be negotiated rather than
+     * applied. Each fences the assignment and moves to STOPPING; the runner notices and cleans up its sandbox.
+     */
+    private static final java.util.Set<RunLifecycle> OWNED_CANCELLABLE = java.util.EnumSet.of(
+            RunLifecycle.CLAIMED,
+            RunLifecycle.PROVISIONING,
+            RunLifecycle.RUNNING,
+            RunLifecycle.COLLECTING_RESULTS);
+
     private static final Logger LOGGER = LoggerFactory.getLogger(RunTerminationService.class);
 
     /** The reaper acts on its own authority, not a tenant's, so it is named rather than borrowing a principal. */
@@ -41,17 +51,28 @@ public class RunTerminationService {
     private final Clock clock;
     private final MeterRegistry meters;
 
+    /**
+     * This bean, through the proxy.
+     *
+     * <p>Lazy to break the self-reference cycle at construction. It exists so an intra-class call to a
+     * transactional method goes through the proxy instead of bypassing it — the failure mode that made every
+     * deadline stop fail silently until it was found by running the pipeline.
+     */
+    private final RunTerminationService self;
+
     public RunTerminationService(
             RunIntentRepository runs,
             RunTerminationRepository terminations,
             WorkerLeaseRepository leases,
             Clock clock,
-            MeterRegistry meters) {
+            MeterRegistry meters,
+            @org.springframework.context.annotation.Lazy RunTerminationService self) {
         this.runs = runs;
         this.terminations = terminations;
         this.leases = leases;
         this.clock = clock;
         this.meters = meters;
+        this.self = self;
     }
 
     /**
@@ -71,7 +92,11 @@ public class RunTerminationService {
         if (locked.isEmpty()) {
             // Nothing unowned to cancel. A run a worker holds takes the longer road: its assignment has to be
             // fenced before it can end, so cancelling it is a request rather than a completion.
-            var owned = requestStop(principal, runId);
+            // Self-invocation, so the @Transactional on requestStop is INERT on this path. Harmless only
+            // because cancel() is itself entered through the proxy and pins the same isolation level — which is
+            // luck, not design, and is exactly the shape that silently broke the deadline reconciler. Called
+            // through the injected self-reference so the annotation means what it says.
+            var owned = self.requestStop(principal, runId);
             if (owned.isPresent()) {
                 return owned.orElseThrow();
             }
@@ -112,7 +137,12 @@ public class RunTerminationService {
             throw ApiException.notFound();
         }
         TestRun run = owned.run();
-        if (run.lifecycleState() != RunLifecycle.CLAIMED) {
+        // Every phase a worker owns can be cancelled, not only CLAIMED.
+        //
+        // Execution added four of them. A phase that could not be cancelled would be a phase where a tenant's
+        // stop request silently did nothing until a deadline expired — and the longest of those windows is the
+        // execution deadline, which is exactly when someone is most likely to want to stop.
+        if (!OWNED_CANCELLABLE.contains(run.lifecycleState())) {
             // Already stopping. If it is stopping *because somebody cancelled it*, this request is a duplicate of
             // that one and returning the run is honest. If it is stopping for any other reason, it is not: the
             // run will settle FAILED with no cancellation recorded anywhere, and answering "accepted, pending"

@@ -100,10 +100,23 @@ class ExecutionAuthorizationGateRefusalTests {
     @Nested
     @Import(JwtTestConfiguration.class)
     @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = BASE)
-    @TestPropertySource(
-            properties = "kaas.execution.sandbox-attestation="
-                    + ExecutionSecurityGateDependencyTests.FAILING)
     class WhenTheAssessmentReportsAFailingControl extends Fixture {
+
+        /**
+         * Generated fresh rather than pasted.
+         *
+         * <p>A hardcoded assessedAt would make this class start refusing on FRESHNESS once it aged past the
+         * maximum — while its name and its assertion both say the refusal is about a failing control. The two
+         * are indistinguishable at the denial enum, so the test would keep passing and stop testing.
+         */
+        @org.springframework.test.context.DynamicPropertySource
+        static void freshFailingAttestation(
+                org.springframework.test.context.DynamicPropertyRegistry registry) {
+            registry.add(
+                    "kaas.execution.sandbox-attestation",
+                    () -> ExecutionSecurityGateDependencyTests.failingAttestation(java.time.Instant.now()));
+        }
+
         @Test
         @Timeout(120)
         void aReadableAssessmentThatSaysTheSandboxIsBrokenIsNotEvidenceThatItWorks() throws Exception {

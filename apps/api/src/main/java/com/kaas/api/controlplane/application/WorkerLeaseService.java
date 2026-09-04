@@ -66,19 +66,42 @@ public class WorkerLeaseService {
         }
         TestRun run = locked.orElseThrow().run();
         ExecutionAttempt attempt = locked.orElseThrow().attempt();
-        if (run.lifecycleState() != RunLifecycle.CLAIMED) {
+        if (!OWNED.contains(run.lifecycleState())) {
             // A stopping or completed run has already had its assignment taken away. A late heartbeat cannot
-            // bring it back — that is the entire point of fencing.
-            return new HeartbeatOutcome(false, "RUN_NOT_CLAIMED", run);
+            // bring it back — that is the entire point of fencing. An EXECUTING run, by contrast, is precisely
+            // the case a heartbeat exists for.
+            return new HeartbeatOutcome(false, "RUN_NOT_OWNED", run);
         }
         if (!attempt.attemptId().equals(attemptId)
                 || attempt.state() != ExecutionAttemptState.CLAIMED
-                || !attempt.assignment().isHeldBy(workerId, epoch)) {
+                || attempt.assignment().epoch() != epoch
+                || attempt.assignment().fenced()) {
+            count("kaas.worker.heartbeat.rejected", "STALE_ASSIGNMENT");
+            return new HeartbeatOutcome(false, "STALE_ASSIGNMENT", run);
+        }
+        if (workerId == null || !workerId.startsWith(WORKER_NAMESPACE)) {
+            count("kaas.worker.heartbeat.rejected", "STALE_ASSIGNMENT");
+            return new HeartbeatOutcome(false, "STALE_ASSIGNMENT", run);
+        }
+        if (attempt.assignment().acquired() && !attempt.assignment().workerId().equals(workerId)) {
+            // Another worker holds it. Before acquisition existed, this comparison could not be made at all:
+            // the stored worker id was one constant for the whole deployment, so every worker matched.
             count("kaas.worker.heartbeat.rejected", "STALE_ASSIGNMENT");
             return new HeartbeatOutcome(false, "STALE_ASSIGNMENT", run);
         }
 
         Instant at = leases.currentDatabaseTime();
+        if (!attempt.assignment().acquired()) {
+            // The first authenticated worker action binds the assignment — a heartbeat as readily as an
+            // authorization. Losing the race means somebody else got there first, which is a stale assignment
+            // from this caller's point of view and not an error.
+            ExecutionAttempt acquiring = attempt.acquiredBy(workerId, at);
+            if (!leases.acquire(locked.orElseThrow().organizationId(), acquiring)) {
+                count("kaas.worker.heartbeat.rejected", "STALE_ASSIGNMENT");
+                return new HeartbeatOutcome(false, "STALE_ASSIGNMENT", run);
+            }
+            attempt = acquiring;
+        }
         if (attempt.assignment().expiredAt(at)) {
             // The lease is already gone. Renewing it here would let a worker take ownership back by being late
             // rather than by being correct, and would undo the reconciler's basis for fencing it.
@@ -112,6 +135,26 @@ public class WorkerLeaseService {
      *
      * @return whether this call is the one that fenced it
      */
+    /**
+     * Every state in which a worker holds the run and must therefore be able to renew its lease.
+     *
+     * <p>This was {@code CLAIMED} alone, which was complete until execution phases existed. The consequence was
+     * severe and invisible: a heartbeat was REFUSED the moment a worker entered PROVISIONING, so the lease could
+     * never be extended, and with a 30-second lease against a 30-minute execution budget every run longer than
+     * half a minute was refused mid-flight and then recorded as having timed out during execution — a diagnosis
+     * that was false in both halves. The database always permitted this; the attempt stays CLAIMED throughout,
+     * so the heartbeat guard arm already applied. Only this check stood in the way.
+     */
+    /** Only a principal in this namespace may hold an assignment. */
+    private static final String WORKER_NAMESPACE = "kaas.worker.";
+
+    private static final java.util.Set<RunLifecycle> OWNED = java.util.EnumSet.of(
+            RunLifecycle.CLAIMED,
+            RunLifecycle.PROVISIONING,
+            RunLifecycle.RUNNING,
+            RunLifecycle.COLLECTING_RESULTS,
+            RunLifecycle.PROCESSING_RESULTS);
+
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public boolean fenceExpired(UUID runId) {
         var locked = leases.lockOwnedByRun(runId);
@@ -121,7 +164,10 @@ public class WorkerLeaseService {
         UUID organizationId = locked.orElseThrow().organizationId();
         TestRun run = locked.orElseThrow().run();
         ExecutionAttempt attempt = locked.orElseThrow().attempt();
-        if (run.lifecycleState() != RunLifecycle.CLAIMED || attempt.state() != ExecutionAttemptState.CLAIMED) {
+        // Fencing follows the lease into the execution phases too. Widening the heartbeat without widening this
+        // would mean a worker that died mid-execution kept its assignment until the phase deadline — up to
+        // thirty minutes of held admission capacity for a worker known dead within one.
+        if (!OWNED.contains(run.lifecycleState()) || attempt.state() != ExecutionAttemptState.CLAIMED) {
             return false;
         }
         Instant at = leases.currentDatabaseTime();

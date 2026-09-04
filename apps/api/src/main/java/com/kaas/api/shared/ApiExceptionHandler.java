@@ -100,7 +100,27 @@ public class ApiExceptionHandler {
     }
 
     @ExceptionHandler(DataIntegrityViolationException.class)
-    ResponseEntity<ProblemDetail> databaseConflict(HttpServletRequest request) {
+    ResponseEntity<ProblemDetail> databaseConflict(
+            HttpServletRequest request, DataIntegrityViolationException exception) {
+        // Logged, because a 409 whose server side records nothing is unoperable: every database invariant in
+        // this system surfaces here as the same opaque response, and "the request conflicts with existing
+        // data" is true of a duplicate key, a lifecycle guard, and a tenant-ownership constraint alike.
+        //
+        // The CONSTRAINT NAME and SQLSTATE only — never the driver's message. PostgreSQL includes the failing
+        // row's values in constraint-violation detail, so logging that text would put tenant data in the logs
+        // as a side effect of a diagnostic.
+        // SQLSTATE and the exception type, and nothing else. The JDBC driver is a runtime-only dependency, so
+        // the PostgreSQL-specific accessor that would name the constraint is deliberately not on the compile
+        // classpath — and the driver's message text, which does name it, also embeds the failing row's values.
+        // SQLSTATE still separates a check violation (23514) from a duplicate key (23505) from a foreign-key
+        // failure (23503), which is the distinction an operator needs first.
+        Throwable cause = exception.getMostSpecificCause();
+        String sqlState = cause instanceof SQLException sql ? sql.getSQLState() : null;
+        LOGGER.atWarn()
+                .addKeyValue("event", "DATABASE_CONSTRAINT_VIOLATED")
+                .addKeyValue("sqlState", sqlState == null ? "UNKNOWN" : sqlState)
+                .addKeyValue("exceptionType", cause.getClass().getName())
+                .log("A database constraint refused the request");
         return response(
                 request,
                 HttpStatus.CONFLICT,

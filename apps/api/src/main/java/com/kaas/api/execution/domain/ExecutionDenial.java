@@ -37,5 +37,39 @@ public enum ExecutionDenial {
     /** The capability was valid once, and the state it depended on has since moved. */
     CAPABILITY_FENCED,
     /** The capability does not exist, is of the wrong type, or is not this caller's. */
-    CAPABILITY_INVALID
+    CAPABILITY_INVALID,
+
+    // The execution lifecycle's own refusals. They live in this enumeration rather than a parallel one because
+    // they answer the same question the values above answer — may this assignment proceed — and a worker that
+    // has to handle two vocabularies for that will eventually handle one of them wrongly. All of them are 409,
+    // like every value here, so adding them cannot change any existing status.
+
+    /**
+     * The run is not in the state this phase starts from.
+     *
+     * <p>Usually a duplicate request rather than an attack: a worker that advanced the run and lost the
+     * response will retry, and the run is already where it was asking to go. Distinguished from staleness so a
+     * worker can tell "you already did this" from "you no longer own this".
+     */
+    PHASE_NOT_ENTERABLE,
+    /** A stop was requested or already recorded. The worker must abandon rather than continue. */
+    RUN_STOPPING,
+    /** This assignment has already submitted its result, and a result is written once. */
+    RESULT_ALREADY_SUBMITTED,
+    /**
+     * The submitted document disagrees with the assignment the control plane authorized.
+     *
+     * <p>The document's own identity fields are checked against authoritative state and never used as the
+     * source of it. A mismatch means the worker is describing an execution other than the one it was asked to
+     * perform, which is the one case where a well-formed result must still be refused.
+     */
+    RESULT_PROVENANCE_MISMATCH,
+    /**
+     * The submitted document is larger than the platform will store.
+     *
+     * <p>Its own code rather than a provenance mismatch: nothing about the document's origin is in question,
+     * and telling a worker its evidence describes another execution when the real problem is its size sends it
+     * looking for a bug it does not have.
+     */
+    RESULT_TOO_LARGE
 }

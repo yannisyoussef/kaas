@@ -63,7 +63,8 @@ import tools.jackson.databind.ObjectMapper;
             // No broker in this suite and nothing claimed: both background components would only add writes
             // that assertions about state would then have to tolerate.
             "kaas.consumer.enabled=false",
-            "kaas.claim.reconcile.enabled=false"
+            "kaas.claim.reconcile.enabled=false",
+            "kaas.execution.reconcile.enabled=false",
         })
 class ConfigurationHttpIntegrationTests {
     private static final String ISSUER = "https://issuer.kaas.test";
@@ -1429,8 +1430,11 @@ class ConfigurationHttpIntegrationTests {
                 .isEqualTo("[\"EXECUTION_LOG\",\"RAW_RESULT\"]");
         assertThat(snapshot.at("/artifactPolicy/maxArtifactBytes").asLong()).isEqualTo(1_000);
         assertThat(snapshot.at("/artifactPolicy/maxTotalBytes").asLong()).isEqualTo(2_000);
-        assertThat(snapshot.at("/engine/engine").stringValue()).isEqualTo("KARATE");
-        assertThat(snapshot.at("/engine/version").stringValue()).isEqualTo("2.0.0");
+        // SYNTHETIC, not KARATE. A snapshot must name the engine that will actually execute it, and no Karate
+        // exists in this repository — declaring it here would make every downstream result, report, and
+        // dashboard attribute synthetic shell assertions to a real test engine.
+        assertThat(snapshot.at("/engine/engine").stringValue()).isEqualTo("SYNTHETIC");
+        assertThat(snapshot.at("/engine/version").stringValue()).isEqualTo("1.0.0");
         assertThat(snapshot.toString()).doesNotContain("Feature: A", "secretValue", "provider", "capability");
 
         String reorderedRequest = json(Map.of(
@@ -1818,13 +1822,13 @@ class ConfigurationHttpIntegrationTests {
                         UUID.fromString(runId)))
                 .isInstanceOf(DataIntegrityViolationException.class)
                 .satisfies(exception -> assertThat(rootCause(exception).getMessage())
-                        .contains("only scheduling, claim, stop, and terminal transitions"));
+                        .contains("only scheduling, claim, execution, stop, and terminal transitions"));
         assertThatThrownBy(() -> jdbc.update(
                         "update test_runs set run_version = 2, lifecycle_state = 'RUNNING' where run_id = ?",
                         UUID.fromString(runId)))
                 .isInstanceOf(DataIntegrityViolationException.class)
                 .satisfies(exception -> assertThat(rootCause(exception).getMessage())
-                        .contains("only scheduling, claim, stop, and terminal transitions"));
+                        .contains("only scheduling, claim, execution, stop, and terminal transitions"));
         assertThatThrownBy(() -> jdbc.update(
                         """
                         insert into test_runs

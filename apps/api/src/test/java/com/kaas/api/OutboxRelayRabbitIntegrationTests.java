@@ -76,6 +76,7 @@ import tools.jackson.databind.ObjectMapper;
             "kaas.outbox.relay.enabled=false",
             "kaas.consumer.enabled=false",
             "kaas.claim.reconcile.enabled=false",
+            "kaas.execution.reconcile.enabled=false",
             "kaas.outbox.relay.max-attempts=3",
             // Small batches keep the concurrency test honest: with the default batch one relay would take
             // everything. It also satisfies the startup invariant claim-ttl > batch-size x confirm-timeout.

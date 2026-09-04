@@ -15,6 +15,7 @@ import com.kaas.api.execution.domain.ExecutionAuthorization;
 import com.kaas.api.execution.domain.ExecutionCapability;
 import com.kaas.api.execution.domain.NetworkPolicyRevision;
 import com.kaas.api.execution.domain.NetworkPolicyType;
+import com.kaas.api.controlplane.domain.ExecutionAttempt;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
@@ -170,6 +171,33 @@ class JdbcExecutionAuthorizationRepository implements ExecutionAuthorizationRepo
                 (Integer) row[4],
                 new ArtifactPolicy(artifactTypes, (Long) row[5], (Long) row[6]),
                 new EngineDescriptor((String) row[7], (String) row[8])));
+    }
+
+    @Override
+    public void persistAcquisition(
+            UUID organizationId, UUID projectId, UUID runId, ExecutionAttempt attempt) {
+        var assignment = attempt.assignment();
+        // Compare-and-set on acquired_at being null, so two workers racing produce one holder. The guard
+        // enforces the same thing independently; this makes losing the race a clean refusal rather than a
+        // constraint violation.
+        int acquired = jdbc.update(
+                """
+                update execution_attempts
+                   set assigned_worker_id = ?, acquired_at = ?
+                 where organization_id = ? and project_id = ? and run_id = ? and attempt_id = ?
+                   and attempt_state = 'CLAIMED' and acquired_at is null and fenced_at is null
+                   and assignment_epoch = ?
+                """,
+                assignment.workerId(),
+                Timestamp.from(assignment.acquiredAt()),
+                organizationId,
+                projectId,
+                runId,
+                attempt.attemptId(),
+                assignment.epoch());
+        if (acquired != 1) {
+            throw new IllegalStateException("The assignment was acquired by another worker.");
+        }
     }
 
     @Override

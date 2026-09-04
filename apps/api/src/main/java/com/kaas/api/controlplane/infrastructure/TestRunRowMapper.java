@@ -23,15 +23,19 @@ import org.springframework.jdbc.core.RowMapper;
  * duplicated across two adapters while the run had no terminal state, and adding terminal columns to one
  * projection but not the other would have produced runs that silently claimed to be unfinished.
  */
-final class TestRunRowMapper implements RowMapper<TestRun> {
-    static final TestRunRowMapper INSTANCE = new TestRunRowMapper();
+// Public so the execution package can read these rows through the same mapper the control plane uses.
+// The alternative is a second copy of the column list, and two column lists that must agree are two
+// column lists that eventually do not.
+public final class TestRunRowMapper implements RowMapper<TestRun> {
+    public static final TestRunRowMapper INSTANCE = new TestRunRowMapper();
 
-    static final String SELECT_COLUMNS =
+    public static final String SELECT_COLUMNS =
             """
             select run_id, project_id, run_version, lifecycle_state, cancellation_status, test_outcome,
                    infrastructure_outcome, quality_gate_status, termination_reason, termination_phase,
                    stop_reason, snapshot_sha256, queued_at, queue_deadline_at, cancellation_requested_at,
-                   cancellation_acknowledged_at, completed_at, created_by, created_at, updated_at
+                   cancellation_acknowledged_at, completed_at, created_by, created_at, updated_at,
+                   phase_deadline_at, execution_started_at
             """;
 
     private static final String SHA256 = "sha256:";
@@ -65,7 +69,9 @@ final class TestRunRowMapper implements RowMapper<TestRun> {
                 instant(resultSet, "completed_at"),
                 resultSet.getString("created_by"),
                 resultSet.getTimestamp("created_at").toInstant(),
-                resultSet.getTimestamp("updated_at").toInstant());
+                resultSet.getTimestamp("updated_at").toInstant(),
+                instant(resultSet, "phase_deadline_at"),
+                instant(resultSet, "execution_started_at"));
     }
 
     private static Instant instant(ResultSet resultSet, String column) throws SQLException {

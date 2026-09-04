@@ -209,6 +209,86 @@ output)
         i=$((i + 1))
     done
     ;;
+workload)
+    # THE SYNTHETIC WORKLOAD. This is what "executing a run" means in this slice.
+    #
+    # It is not Karate and does not pretend to be. It runs no feature source, reads no secret, and
+    # reaches no network — the point of it is that the LIFECYCLE around an execution can be proven
+    # correct with a workload the platform wrote, before anything user-controlled is admitted.
+    #
+    # Its identity is fixed and reported, so a result carrying KAAS_SYNTHETIC_V1 can never be mistaken
+    # for a real engine's output by anything downstream. Reporting an engine this did not run would be
+    # the single most misleading thing this slice could do.
+    emit_tooling awk tr sort
+    expected="${2:-pass}"
+    if [ "$expected" != "imposter" ]; then
+        emit workload_identity KAAS_SYNTHETIC_V1
+    else
+        emit workload_identity SOMETHING_ELSE
+    fi
+
+    # A fixed, deterministic set of assertions. Deterministic on purpose: the lifecycle is what is
+    # under test, so a workload whose outcome varied would make every lifecycle failure ambiguous.
+    #
+    # The expected outcome is chosen by the caller so BOTH terminal outcomes are reachable in a test.
+    # A workload that could only pass would leave the FAILED path — a real, distinct lifecycle
+    # transition — never once exercised, and the first genuine test failure would be the first time
+    # that code ever ran.
+    emit workload_expectation "$expected"
+
+    passed=0
+    failed=0
+    for scenario in arithmetic string ordering; do
+        case "$scenario" in
+        arithmetic) actual=$(awk 'BEGIN { print 2 + 2 }'); wanted=4 ;;
+        string)     actual=$(printf 'kaas' | tr 'a-z' 'A-Z'); wanted=KAAS ;;
+        ordering)   actual=$(printf 'b\na\nc\n' | sort | tr -d '\n'); wanted=abc ;;
+        esac
+        if [ "$actual" = "$wanted" ]; then
+            emit "scenario_${scenario}" PASSED
+            passed=$((passed + 1))
+        else
+            emit "scenario_${scenario}" FAILED
+            failed=$((failed + 1))
+        fi
+    done
+
+    # Two diagnostic shapes, so the runner's own evidence checks can be covered INDEPENDENTLY.
+    #
+    # Without them the identity check and the outcome check are a jointly-covered pair: delete either and the
+    # other still refuses, so neither is actually proven. These produce exactly one defect each.
+    if [ "$expected" = "silent" ]; then
+        # Correct identity, no verdict. The shape of a workload killed after announcing itself.
+        emit workload_note "no outcome will be reported"
+        exit 0
+    fi
+    if [ "$expected" = "imposter" ]; then
+        # A confident verdict under the wrong identity. The shape of something that is not our workload at all.
+        emit workload_outcome PASSED
+        exit 0
+    fi
+
+    # The deliberate failure, when one is asked for. A separate scenario rather than an inverted
+    # assertion above, so a FAILED run still shows the genuine scenarios passing — which is what a
+    # real partial failure looks like, and what the result document has to be able to represent.
+    if [ "$expected" = "fail" ]; then
+        emit scenario_expected_failure FAILED
+        failed=$((failed + 1))
+    fi
+
+    emit workload_passed "$passed"
+    emit workload_failed "$failed"
+    if [ "$failed" -gt 0 ]; then
+        emit workload_outcome FAILED
+    else
+        emit workload_outcome PASSED
+    fi
+    # Exit zero either way. A failing TEST is not a failing EXECUTION, and collapsing the two here
+    # would make the sandbox's exit code report the test outcome — which is exactly the conflation
+    # the orthogonal-outcome rule exists to prevent. The infrastructure succeeded: it ran the
+    # workload and collected its result.
+    exit 0
+    ;;
 *)
     emit error unsupported_mode
     exit 64

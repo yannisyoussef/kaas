@@ -6,6 +6,15 @@ dependencies {
     implementation("com.github.docker-java:docker-java-core:3.4.1")
     implementation("com.github.docker-java:docker-java-transport-httpclient5:3.4.1")
 
+    // JSON, for validating the command the control plane sends and building the result that goes back.
+    //
+    // The runner parses and digests the command with its OWN code rather than sharing the control plane's,
+    // and that is the point: two implementations that agree are evidence the document means the same thing on
+    // both sides, while one shared implementation agreeing with itself is evidence of nothing. This module
+    // cannot depend on :apps:api anyway — the build forbids it — so the independence is structural rather
+    // than a convention somebody has to keep.
+    implementation("tools.jackson.core:jackson-databind:3.1.5")
+
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testImplementation("org.assertj:assertj-core:3.27.3")

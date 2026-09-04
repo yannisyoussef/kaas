@@ -11,13 +11,17 @@ import java.util.UUID;
 import org.springframework.jdbc.core.RowMapper;
 
 /** One mapper for the attempt aggregate and its assignment, shared by every adapter that reads it. */
-final class ExecutionAttemptRowMapper implements RowMapper<ExecutionAttempt> {
-    static final ExecutionAttemptRowMapper INSTANCE = new ExecutionAttemptRowMapper();
+// Public so the execution package can read these rows through the same mapper the control plane uses.
+// The alternative is a second copy of the column list, and two column lists that must agree are two
+// column lists that eventually do not.
+public final class ExecutionAttemptRowMapper implements RowMapper<ExecutionAttempt> {
+    public static final ExecutionAttemptRowMapper INSTANCE = new ExecutionAttemptRowMapper();
 
-    static final String SELECT_COLUMNS =
+    public static final String SELECT_COLUMNS =
             """
             select attempt_id, run_id, attempt_number, attempt_state, created_at, assignment_epoch,
-                   assigned_worker_id, lease_started_at, lease_expires_at, last_heartbeat_at, fenced_at
+                   assigned_worker_id, lease_started_at, lease_expires_at, last_heartbeat_at, fenced_at,
+                   acquired_at
             """;
 
     private ExecutionAttemptRowMapper() {}
@@ -33,7 +37,8 @@ final class ExecutionAttemptRowMapper implements RowMapper<ExecutionAttempt> {
                         instant(resultSet, "lease_started_at"),
                         instant(resultSet, "lease_expires_at"),
                         instant(resultSet, "last_heartbeat_at"),
-                        instant(resultSet, "fenced_at"));
+                        instant(resultSet, "fenced_at"),
+                        instant(resultSet, "acquired_at"));
         return new ExecutionAttempt(
                 resultSet.getObject("attempt_id", UUID.class),
                 resultSet.getObject("run_id", UUID.class),

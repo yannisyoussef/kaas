@@ -23,7 +23,18 @@ public record TestRun(
         Instant completedAt,
         String createdBy,
         Instant createdAt,
-        Instant updatedAt) {
+        Instant updatedAt,
+        /**
+         * When the phase the run is currently in must be over.
+         *
+         * <p>One column rather than one per phase: the lifecycle state already says which phase it bounds, and
+         * a deadline per phase would be three NULLs and a value at every instant. Non-null exactly in the four
+         * execution phases, which is what makes "no state without a bounded exit" checkable rather than
+         * remembered.
+         */
+        Instant phaseDeadlineAt,
+        /** When the workload actually started, which a submitted result's own start instant must agree with. */
+        Instant executionStartedAt) {
 
     public static TestRun created(
             UUID runId, UUID projectId, String snapshotDigest, String createdBy, Instant now) {
@@ -47,7 +58,9 @@ public record TestRun(
                 null,
                 createdBy,
                 now,
-                now);
+                now,
+                null,
+                null);
     }
 
     public TestRun queued(Instant startedAt, Instant deadlineAt) {
@@ -61,7 +74,7 @@ public record TestRun(
                 runId, projectId, Math.addExact(runVersion, 1), RunLifecycle.QUEUED, cancellationStatus,
                 testOutcome, infrastructureOutcome, qualityGateStatus, terminationReason, terminationPhase,
                 stopReason, snapshotDigest, startedAt, deadlineAt, cancellationRequestedAt,
-                cancellationAcknowledgedAt, completedAt, createdBy, createdAt, startedAt);
+                cancellationAcknowledgedAt, completedAt, createdBy, createdAt, startedAt, null, null);
     }
 
     /**
@@ -116,7 +129,107 @@ public record TestRun(
                 runId, projectId, Math.addExact(runVersion, 1), RunLifecycle.CLAIMED, cancellationStatus,
                 testOutcome, infrastructureOutcome, qualityGateStatus, terminationReason, terminationPhase,
                 stopReason, snapshotDigest, queueStartedAt, queueDeadlineAt, cancellationRequestedAt,
-                cancellationAcknowledgedAt, completedAt, createdBy, createdAt, at);
+                cancellationAcknowledgedAt, completedAt, createdBy, createdAt, at, null, executionStartedAt);
+    }
+
+    /**
+     * The authorized runner has begun preparing a sandbox.
+     *
+     * <p>PROVISIONING means preparation, not execution. Nothing user-controlled is running, and in this slice
+     * nothing user-controlled ever will be — the sandbox holds a platform-owned synthetic workload.
+     *
+     * <p>The deadline is server-owned and passed in rather than computed here, because the aggregate does not
+     * know what the deployment considers a reasonable provisioning window. What it does enforce is that one
+     * exists: a phase whose exit depends only on a worker choosing to act is a phase a crashed worker turns
+     * into a permanent capacity sink.
+     */
+    public TestRun provisioning(Instant at, Instant deadlineAt) {
+        requireOwnedTransition(RunLifecycle.CLAIMED, RunLifecycle.PROVISIONING, at);
+        if (deadlineAt == null || !deadlineAt.isAfter(at)) {
+            throw new IllegalArgumentException("Provisioning must be given a deadline that is still ahead.");
+        }
+        return withPhase(RunLifecycle.PROVISIONING, at, deadlineAt, executionStartedAt);
+    }
+
+    /**
+     * The sandbox exists and the workload has started.
+     *
+     * <p>This is the first instant at which anything is executing, so it is where {@code executionStartedAt} is
+     * stamped — and a submitted result's own start instant has to agree with it, which is one of the things
+     * that makes a result evidence rather than a claim.
+     */
+    public TestRun running(Instant at, Instant deadlineAt) {
+        requireOwnedTransition(RunLifecycle.PROVISIONING, RunLifecycle.RUNNING, at);
+        if (deadlineAt == null || !deadlineAt.isAfter(at)) {
+            throw new IllegalArgumentException("Execution must be given a deadline that is still ahead.");
+        }
+        return withPhase(RunLifecycle.RUNNING, at, deadlineAt, at);
+    }
+
+    /** The workload has stopped and its evidence is being gathered. */
+    public TestRun collectingResults(Instant at, Instant deadlineAt) {
+        requireOwnedTransition(RunLifecycle.RUNNING, RunLifecycle.COLLECTING_RESULTS, at);
+        if (deadlineAt == null || !deadlineAt.isAfter(at)) {
+            throw new IllegalArgumentException("Result collection must be given a deadline that is still ahead.");
+        }
+        return withPhase(RunLifecycle.COLLECTING_RESULTS, at, deadlineAt, executionStartedAt);
+    }
+
+    /** Evidence has arrived and the control plane is deciding what it means. */
+    public TestRun processingResults(Instant at, Instant deadlineAt) {
+        requireOwnedTransition(RunLifecycle.COLLECTING_RESULTS, RunLifecycle.PROCESSING_RESULTS, at);
+        if (deadlineAt == null || !deadlineAt.isAfter(at)) {
+            throw new IllegalArgumentException("Result processing must be given a deadline that is still ahead.");
+        }
+        return withPhase(RunLifecycle.PROCESSING_RESULTS, at, deadlineAt, executionStartedAt);
+    }
+
+    /**
+     * Ends a run that executed and produced evidence.
+     *
+     * <p>The only path to COMPLETED that carries a test outcome. Everything else that ends a run — cancellation,
+     * a lost lease, any deadline — ends it without one, because nothing ran to completion and inventing PASSED
+     * or FAILED there would be fabricating evidence.
+     *
+     * <p>The two outcomes are orthogonal and both are recorded: the infrastructure succeeded, and separately the
+     * tests either passed or failed. A synthetic assertion failing is a successful execution of a failing test,
+     * not a failure of the platform.
+     */
+    public TestRun completedWithResult(TestOutcome outcome, Instant at) {
+        if (lifecycleState != RunLifecycle.PROCESSING_RESULTS) {
+            throw new IllegalStateException("Only a run whose results were processed can complete with a result.");
+        }
+        if (outcome != TestOutcome.PASSED && outcome != TestOutcome.FAILED) {
+            // NOT_AVAILABLE means nothing ran to completion, which contradicts having reached this transition.
+            throw new IllegalArgumentException("A completed execution reports whether its tests passed.");
+        }
+        if (at == null || at.isBefore(updatedAt)) {
+            throw new IllegalArgumentException("A run cannot end before its own last update.");
+        }
+        TerminationReason reason = TerminationReason.EXECUTION_COMPLETED;
+        return new TestRun(
+                runId, projectId, Math.addExact(runVersion, 1), RunLifecycle.COMPLETED, cancellationStatus,
+                outcome, reason.infrastructureOutcome(), QualityGateStatus.NOT_EVALUATED, reason, reason.phase(),
+                stopReason, snapshotDigest, queueStartedAt, queueDeadlineAt, cancellationRequestedAt,
+                cancellationAcknowledgedAt, at, createdBy, createdAt, at, null, executionStartedAt);
+    }
+
+    /** Shared precondition for every execution-phase transition a runner drives. */
+    private void requireOwnedTransition(RunLifecycle from, RunLifecycle to, Instant at) {
+        if (lifecycleState != from || !lifecycleState.canTransitionTo(to)) {
+            throw new IllegalStateException("A run in " + lifecycleState + " cannot move to " + to + ".");
+        }
+        if (at == null || at.isBefore(updatedAt)) {
+            throw new IllegalArgumentException("A transition cannot precede the run's own last update.");
+        }
+    }
+
+    private TestRun withPhase(RunLifecycle to, Instant at, Instant deadlineAt, Instant startedAt) {
+        return new TestRun(
+                runId, projectId, Math.addExact(runVersion, 1), to, cancellationStatus, testOutcome,
+                infrastructureOutcome, qualityGateStatus, terminationReason, terminationPhase, stopReason,
+                snapshotDigest, queueStartedAt, queueDeadlineAt, cancellationRequestedAt,
+                cancellationAcknowledgedAt, completedAt, createdBy, createdAt, at, deadlineAt, startedAt);
     }
 
     /**
@@ -127,8 +240,10 @@ public record TestRun(
      * @param requestedAt when a tenant asked, for a cancellation; null when the lease was simply lost
      */
     public TestRun stopping(StopReason reason, Instant requestedAt, Instant at) {
-        if (lifecycleState != RunLifecycle.CLAIMED || !lifecycleState.canTransitionTo(RunLifecycle.STOPPING)) {
-            throw new IllegalStateException("Only a run somebody owns can begin stopping.");
+        // Every state that owns an assignment can stop, not only CLAIMED. Execution added four of them, and a
+        // phase that could not be stopped would be a phase a cancellation could not reach.
+        if (!lifecycleState.canTransitionTo(RunLifecycle.STOPPING)) {
+            throw new IllegalStateException("A run in " + lifecycleState + " cannot begin stopping.");
         }
         if (reason == null || at == null || at.isBefore(updatedAt)) {
             throw new IllegalArgumentException("A stop needs a reason and cannot precede the run's last update.");
@@ -146,7 +261,10 @@ public record TestRun(
                 testOutcome, infrastructureOutcome, qualityGateStatus, terminationReason, terminationPhase,
                 reason, snapshotDigest, queueStartedAt, queueDeadlineAt,
                 cancelling ? requestedAt : cancellationRequestedAt, cancellationAcknowledgedAt, completedAt,
-                createdBy, createdAt, at);
+                createdBy, createdAt, at,
+                // A stopping run has no phase deadline: the deadline that mattered was the one for the phase it
+                // just left, and STOPPING is settled by the reconciler rather than waited on by a worker.
+                null, executionStartedAt);
     }
 
     /**
@@ -182,7 +300,9 @@ public record TestRun(
                 at,
                 createdBy,
                 createdAt,
-                at);
+                at,
+                null,
+                executionStartedAt);
     }
 
     private TestRun terminated(TerminationReason reason, Instant requestedAt, Instant at) {
@@ -224,6 +344,8 @@ public record TestRun(
                 at,
                 createdBy,
                 createdAt,
-                at);
+                at,
+                null,
+                null);
     }
 }

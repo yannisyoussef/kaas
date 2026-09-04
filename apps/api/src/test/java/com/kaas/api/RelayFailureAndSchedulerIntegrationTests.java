@@ -81,6 +81,7 @@ import tools.jackson.databind.ObjectMapper;
             // have nothing to reconcile, but both would add background writes to assertions about state.
             "kaas.consumer.enabled=false",
             "kaas.claim.reconcile.enabled=false",
+            "kaas.execution.reconcile.enabled=false",
             "kaas.outbox.relay.max-attempts=3",
             "kaas.outbox.relay.base-backoff=PT10S",
             "kaas.outbox.relay.max-backoff=PT40S",

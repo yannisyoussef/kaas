@@ -36,10 +36,18 @@ public class SandboxSecurityAttestationSource {
     private static final Logger LOGGER = LoggerFactory.getLogger(SandboxSecurityAttestationSource.class);
 
     /**
-     * Strict by construction rather than by convention.
+     * A private mapper, so a change to a shared one cannot reach the parser whose input decides whether
+     * execution is permitted.
      *
-     * <p>{@code FAIL_ON_UNKNOWN_PROPERTIES} is Jackson's default, but stating it here means a future change to a
-     * shared mapper cannot quietly relax the one parser whose input decides whether execution is permitted.
+     * <p><strong>The strictness that matters is NOT these flags.</strong> This class reads the document into a
+     * {@link tools.jackson.databind.JsonNode} rather than binding it to a type, and
+     * {@code FAIL_ON_UNKNOWN_PROPERTIES} applies only to bean binding — it does nothing here. An earlier
+     * comment claimed otherwise, which was worse than saying nothing: it described a protection that was not
+     * operating, in the one place where an undefined field must never be silently discarded.
+     *
+     * <p>The real enforcement is the explicit property allowlist below, and it is the only enforcement. It is
+     * covered by {@code WhenAnOtherwiseCompleteDocumentCarriesAnUnknownProperty}, which exists because mutation
+     * testing showed nothing else covers it — and which was once deleted without any test going red.
      */
     private static final ObjectMapper STRICT = JsonMapper.builder()
             .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)

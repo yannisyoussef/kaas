@@ -30,21 +30,63 @@ class RunLifecycleTest {
     }
 
     @Test
-    void provisioningRemainsDefinedButIsNotReachableFromAnyImplementedCode() {
-        // Claiming is implemented now, so the frontier has moved: the next transition is the one that would hand
-        // a worker authority to fetch source and secrets, and nothing performs it.
-        assertThat(RunLifecycle.CLAIMED.canTransitionTo(RunLifecycle.PROVISIONING)).isTrue();
-        // Every mutator the aggregate exposes is named here, so adding one that starts execution — or that
-        // reaches COMPLETED from an owned state without fencing through STOPPING — cannot happen quietly.
+    void everyMutatorIsNamedAndOwnedWorkHasExactlyTwoWaysOut() {
+        // This guard caught the slice that implemented execution, which is what it was for. The list is not
+        // merely widened here: what it protects is that adding a mutator — especially one that reaches a
+        // terminal state — cannot happen without someone editing this line and thinking about it.
         assertThat(TestRun.class.getDeclaredMethods())
                 .filteredOn(method -> method.getReturnType() == TestRun.class && !method.isSynthetic())
                 .extracting(java.lang.reflect.Method::getName)
                 .containsExactlyInAnyOrder(
-                        "created", "queued", "claimed", "stopping", "settled", "cancelled", "expired",
-                        "terminated");
-        // Owned work has exactly one way out, and it goes through STOPPING.
-        assertThat(RunLifecycle.CLAIMED.canTransitionTo(RunLifecycle.COMPLETED)).isFalse();
+                        "created", "queued", "claimed", "provisioning", "running", "collectingResults",
+                        "processingResults", "completedWithResult", "stopping", "settled", "cancelled",
+                        "expired", "terminated", "withPhase");
+
+        // Owned work now has exactly two ways out, and both are deliberate.
+        //
+        // Through PROCESSING_RESULTS, carrying the evidence that justifies its outcome — the only path that can
+        // report a test outcome at all. Or through STOPPING, which is how every interruption ends: cancellation,
+        // a lost lease, and each of the four deadlines. What no owned state may do is reach COMPLETED directly,
+        // because that would be a run declaring itself finished without either evidence or fencing.
+        assertThat(RunLifecycle.PROCESSING_RESULTS.canTransitionTo(RunLifecycle.COMPLETED)).isTrue();
         assertThat(RunLifecycle.STOPPING.canTransitionTo(RunLifecycle.COMPLETED)).isTrue();
+
+        // EVERY owned state needs a way to be stopped, PROCESSING_RESULTS included.
+        //
+        // An earlier version of this loop listed only the first four, and that omission hid a real trap state:
+        // PROCESSING_RESULTS could reach COMPLETED and nothing else, so a worker that died mid-submission left
+        // the run holding admission capacity with no reconciler able to reclaim it. The list below is therefore
+        // derived rather than written out — every non-terminal state a worker can own is included by
+        // construction, so adding a phase cannot quietly skip this check the way adding one skipped it before.
+        var owned = java.util.EnumSet.of(
+                RunLifecycle.CLAIMED, RunLifecycle.PROVISIONING, RunLifecycle.RUNNING,
+                RunLifecycle.COLLECTING_RESULTS, RunLifecycle.PROCESSING_RESULTS);
+        assertThat(owned)
+                .as("every non-terminal state after CLAIMED is owned work and must be listed here")
+                .containsExactlyInAnyOrderElementsOf(java.util.EnumSet.allOf(RunLifecycle.class).stream()
+                        .filter(state -> !state.terminal())
+                        .filter(state -> state != RunLifecycle.CREATED && state != RunLifecycle.QUEUED
+                                && state != RunLifecycle.STOPPING)
+                        .toList());
+        for (RunLifecycle state : owned) {
+            assertThat(state.canTransitionTo(RunLifecycle.STOPPING))
+                    .as("%s must be stoppable, or it is a state nothing can reclaim", state)
+                    .isTrue();
+        }
+
+        // Reaching COMPLETED directly is a run declaring itself finished without either evidence or fencing.
+        // PROCESSING_RESULTS is the one exception, because submitting the evidence is what that transition is.
+        for (RunLifecycle state : java.util.EnumSet.of(
+                RunLifecycle.CLAIMED, RunLifecycle.PROVISIONING, RunLifecycle.RUNNING,
+                RunLifecycle.COLLECTING_RESULTS)) {
+            assertThat(state.canTransitionTo(RunLifecycle.COMPLETED))
+                    .as("%s must not reach COMPLETED without evidence or fencing", state)
+                    .isFalse();
+        }
+
+        // RUNNING reaches PROCESSING_RESULTS only through COLLECTING_RESULTS. No code drives a shortcut, and
+        // an edge no code drives is an edge no test covers.
+        assertThat(RunLifecycle.RUNNING.canTransitionTo(RunLifecycle.PROCESSING_RESULTS)).isFalse();
     }
 
     @Test
@@ -80,7 +122,7 @@ class RunLifecycleTest {
         TestRun stopping = new TestRun(
                 RUN, PROJECT, 5, RunLifecycle.STOPPING, CancellationStatus.NOT_REQUESTED, null, null,
                 QualityGateStatus.NOT_EVALUATED, null, null, StopReason.LEASE_LOST, DIGEST, NOW.plusSeconds(1),
-                NOW.plusSeconds(301), null, null, null, "creator", NOW, NOW.plusSeconds(2));
+                NOW.plusSeconds(301), null, null, null, "creator", NOW, NOW.plusSeconds(2), null, null);
         assertThat(stopping.lifecycleState().canTransitionTo(RunLifecycle.COMPLETED)).isTrue();
         assertThatThrownBy(() -> stopping.cancelled(NOW.plusSeconds(3), NOW.plusSeconds(4)))
                 .isInstanceOf(IllegalStateException.class)
@@ -184,10 +226,23 @@ class RunLifecycleTest {
                 ExecutionAttempt.waitingForClaim(UUID.randomUUID(), RUN, NOW).claimedBy("worker-1", NOW, LEASE);
 
         assertThat(claimed.assignment().epoch()).isEqualTo(WorkerAssignment.FIRST_EPOCH);
-        assertThat(claimed.assignment().isHeldBy("worker-1", 1)).isTrue();
+
+        // A CLAIMED-but-unacquired assignment is held by NOBODY. The worker id written at claim time comes from
+        // the dispatch consumer's configuration and is one constant for the whole deployment, so treating it as
+        // an owner meant every worker in the fleet matched every run — and the epoch, which exists to fence one
+        // holder from another, fenced nothing.
+        assertThat(claimed.assignment().acquired()).isFalse();
+        assertThat(claimed.assignment().isHeldBy("worker-1", 1)).isFalse();
+
+        ExecutionAttempt acquired = claimed.acquiredBy("worker-1", NOW);
+        assertThat(acquired.assignment().isHeldBy("worker-1", 1)).isTrue();
         // Identity plus epoch, never one or the other. An epoch alone would let any worker act as the owner, and
         // an identity alone would let a restarted worker act under an assignment it has already lost.
-        assertThat(claimed.assignment().isHeldBy("worker-2", 1)).isFalse();
+        assertThat(acquired.assignment().isHeldBy("worker-2", 1)).isFalse();
+        // Acquisition is write-once: a second worker cannot take an assignment somebody already holds.
+        assertThatThrownBy(() -> acquired.acquiredBy("worker-2", NOW))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("already held");
         assertThat(claimed.assignment().isHeldBy("worker-1", 2)).isFalse();
 
         // A renewal is the same assignment continuing, so it may move only the lease window.

@@ -1,6 +1,6 @@
 # Domain Model
 
-**Status: PARTIALLY IMPLEMENTED.** Organization ownership anchors, Projects, immutable FeatureRevisions, versioned execution configuration, TestRun intent, and immutable RunSnapshot are implemented and persisted. ExecutionAttempt and execution/result types remain design only.
+**Status: PARTIALLY IMPLEMENTED.** Organization ownership anchors, Projects, immutable FeatureRevisions, versioned execution configuration, TestRun intent, and immutable RunSnapshot are implemented and persisted. ExecutionAttempt now carries a real assignment, an acquisition, and an execution history, and ExecutionResult is persisted as immutable evidence — see [ADR-024](../adr/024-synthetic-execution-lifecycle.md). Artifact and quality-gate types remain design only.
 
 ```mermaid
 classDiagram

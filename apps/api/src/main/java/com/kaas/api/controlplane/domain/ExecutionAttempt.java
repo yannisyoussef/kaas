@@ -47,6 +47,19 @@ public record ExecutionAttempt(
                 WorkerAssignment.claim(workerId, at, leaseDuration));
     }
 
+    /**
+     * Binds this attempt's assignment to the worker that is actually going to run it.
+     *
+     * <p>The attempt state does not change: it was CLAIMED and it stays CLAIMED. Acquisition answers who holds
+     * the assignment, not whether one exists.
+     */
+    public ExecutionAttempt acquiredBy(String workerId, Instant at) {
+        requireAssigned();
+        return new ExecutionAttempt(
+                attemptId, runId, attemptNumber, ExecutionAttemptState.CLAIMED, createdAt,
+                assignment.acquiredBy(workerId, at));
+    }
+
     public ExecutionAttempt heartbeat(Instant at, Duration leaseDuration) {
         requireAssigned();
         return new ExecutionAttempt(

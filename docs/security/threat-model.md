@@ -1,6 +1,6 @@
 # Threat Model
 
-**Status: REQUIREMENTS CATALOG.** Execution is disabled; controls in this document are not implemented unless `IMPLEMENTATION_STATUS.md` says otherwise.
+**Status: REQUIREMENTS CATALOG.** A platform-owned synthetic workload executes; no tenant content does, and egress is deny-all. Controls in this document are not implemented unless `IMPLEMENTATION_STATUS.md` says otherwise.
 
 ## Assets
 

@@ -24,6 +24,14 @@ public interface WorkerLeaseRepository {
     boolean renewLease(UUID organizationId, ExecutionAttempt attempt);
 
     /**
+     * Binds an assignment to the worker acquiring it, if nobody holds it yet.
+     *
+     * @return whether this caller acquired it. False means another worker won the race, which is an ordinary
+     *     outcome rather than an error.
+     */
+    boolean acquire(UUID organizationId, ExecutionAttempt attempt);
+
+    /**
      * Fences the assignment and moves the run to STOPPING in one transaction. Splitting them would leave a
      * window where the run is stopping while a worker still believes it owns the attempt.
      */

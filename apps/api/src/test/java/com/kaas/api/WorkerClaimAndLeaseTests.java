@@ -81,6 +81,7 @@ import tools.jackson.databind.ObjectMapper;
             "kaas.outbox.relay.enabled=false",
             "kaas.consumer.enabled=false",
             "kaas.claim.reconcile.enabled=false",
+            "kaas.execution.reconcile.enabled=false",
             // Short enough that a lease can really expire inside a test, and a recovery window that is genuinely
             // observable rather than instantaneous.
             "kaas.claim.lease-duration=PT2S",
@@ -552,8 +553,8 @@ class WorkerClaimAndLeaseTests {
         Tenant tenant = tenant();
         UUID runId = createRun(tenant);
         scheduler.scheduleDue();
-        String lifecycleGuard = "only scheduling, claim, stop, and terminal transitions are supported";
-        String attemptGuard = "only claim, heartbeat, and fence assignment transitions are supported";
+        String lifecycleGuard = "only scheduling, claim, execution, stop, and terminal transitions are supported";
+        String attemptGuard = "only claim, acquire, heartbeat, fence, and execution-history transitions are supported";
 
         // Skipping straight past claim is still refused, as is claiming without taking the assignment.
         assertRejected(
@@ -561,7 +562,7 @@ class WorkerClaimAndLeaseTests {
         // Claiming the run without taking the assignment is the shape the row guard cannot see, because the
         // assignment lives on another table. The deferred check is what catches it, at commit.
         assertRejected(
-                "CLAIMED run requires exactly one attempt holding the active assignment",
+                "an owned run requires exactly one attempt holding the active assignment",
                 "update test_runs set lifecycle_state = 'CLAIMED', run_version = 3, updated_at = now(),"
                         + " updated_by = 'kaas.dispatch-consumer' where run_id = ?",
                 runId);

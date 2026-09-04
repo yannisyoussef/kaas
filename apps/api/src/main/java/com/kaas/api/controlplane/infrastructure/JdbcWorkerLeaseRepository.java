@@ -26,12 +26,25 @@ class JdbcWorkerLeaseRepository implements WorkerLeaseRepository {
 
     @Override
     public Optional<OwnedRun> lockOwnedByRun(UUID runId) {
+        // Every state in which a worker owns the run, not just CLAIMED.
+        //
+        // This filter is what decides whether a cancellation finds anything. It listed only CLAIMED and
+        // STOPPING, which was complete until this slice added four more owned states — and the effect was that
+        // cancelling a run that had started executing returned "this run is in a phase that early cancellation
+        // cannot end", while the service layer above believed those phases were cancellable. The longest of
+        // those phases is the 30-minute execution budget, which is exactly when somebody most wants to stop.
+        //
+        // PROCESSING_RESULTS is deliberately absent: the execution is over by then, the sandbox is gone, and
+        // cancelling would discard evidence the platform already paid to produce. The deadline reconciler can
+        // still reclaim it, which is what keeps it from being a state nothing can move.
         var run = jdbc.query(
                         TestRunRowMapper.SELECT_COLUMNS
                                 + """
                                   , organization_id
                                   from test_runs
-                                 where run_id = ? and lifecycle_state in ('CLAIMED', 'STOPPING')
+                                 where run_id = ?
+                                   and lifecycle_state in ('CLAIMED', 'PROVISIONING', 'RUNNING',
+                                                           'COLLECTING_RESULTS', 'STOPPING')
                                  for update
                                 """,
                         (resultSet, rowNumber) -> new Object[] {
@@ -96,6 +109,27 @@ class JdbcWorkerLeaseRepository implements WorkerLeaseRepository {
     }
 
     @Override
+    public boolean acquire(UUID organizationId, ExecutionAttempt attempt) {
+        var assignment = attempt.assignment();
+        // Compare-and-set on acquired_at being null. Two workers racing produce one holder and one false.
+        return jdbc.update(
+                        """
+                        update execution_attempts
+                           set assigned_worker_id = ?, acquired_at = ?
+                         where organization_id = ? and run_id = ? and attempt_id = ?
+                           and attempt_state = 'CLAIMED' and acquired_at is null and fenced_at is null
+                           and assignment_epoch = ?
+                        """,
+                        assignment.workerId(),
+                        Timestamp.from(assignment.acquiredAt()),
+                        organizationId,
+                        attempt.runId(),
+                        attempt.attemptId(),
+                        assignment.epoch())
+                == 1;
+    }
+
+    @Override
     public void persistStop(
             UUID organizationId,
             TestRun previous,
@@ -107,9 +141,10 @@ class JdbcWorkerLeaseRepository implements WorkerLeaseRepository {
                 """
                 update test_runs
                    set run_version = ?, lifecycle_state = 'STOPPING', stop_reason = ?,
-                       cancellation_status = ?, cancellation_requested_at = ?, updated_by = ?, updated_at = ?
+                       cancellation_status = ?, cancellation_requested_at = ?, phase_deadline_at = null,
+                       updated_by = ?, updated_at = ?
                  where organization_id = ? and project_id = ? and run_id = ?
-                   and lifecycle_state = 'CLAIMED' and run_version = ?
+                   and lifecycle_state = ? and run_version = ?
                 """,
                 stopping.runVersion(),
                 stopping.stopReason().name(),
@@ -120,9 +155,14 @@ class JdbcWorkerLeaseRepository implements WorkerLeaseRepository {
                 organizationId,
                 stopping.projectId(),
                 stopping.runId(),
+                // The state the run was ACTUALLY in, not a hardcoded CLAIMED. Four more states can own a run
+                // now, and pinning the predicate to one of them made cancelling an executing run fail the
+                // compare-and-set — after the service had already decided it was cancellable. The deadline is
+                // cleared here too: the phase that deadline bounded is over.
+                previous.lifecycleState().name(),
                 previous.runVersion());
         if (changed != 1) {
-            throw new IllegalStateException("The locked CLAIMED run did not satisfy the stop compare-and-set.");
+            throw new IllegalStateException("The locked owned run did not satisfy the stop compare-and-set.");
         }
         int fencedRows = jdbc.update(
                 """
@@ -145,7 +185,7 @@ class JdbcWorkerLeaseRepository implements WorkerLeaseRepository {
                 insert into run_lifecycle_events
                     (event_id, organization_id, project_id, run_id, run_version, sequence,
                      event_type, previous_state, lifecycle_state, attempt_id, actor, occurred_at)
-                values (?, ?, ?, ?, ?, ?, 'RUN_STATE_CHANGED', 'CLAIMED', 'STOPPING', ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, 'RUN_STATE_CHANGED', ?, 'STOPPING', ?, ?, ?)
                 """,
                 lifecycleEventId,
                 organizationId,
@@ -153,6 +193,9 @@ class JdbcWorkerLeaseRepository implements WorkerLeaseRepository {
                 stopping.runId(),
                 stopping.runVersion(),
                 stopping.runVersion() - 1,
+                // The event records where the run actually came from. A hardcoded CLAIMED here would have
+                // written a false history for every run stopped from an execution phase.
+                previous.lifecycleState().name(),
                 fenced.attemptId(),
                 actor,
                 Timestamp.from(stopping.updatedAt()));
@@ -229,7 +272,11 @@ class JdbcWorkerLeaseRepository implements WorkerLeaseRepository {
                    -- will not rewrite the second into the first, so the partial index degrades into a filter
                    -- over every live claim and the ordered scan cannot stop at the first non-match.
                    and a.lease_expires_at <= now() - (? * interval '1 second')
-                   and r.lifecycle_state = 'CLAIMED'
+                   -- Every owned state, not CLAIMED alone. A lease that no selector can see is a lease that
+                   -- cannot be lost, which turns the whole fencing mechanism off for exactly the phases where a
+                   -- worker is most likely to die.
+                   and r.lifecycle_state in ('CLAIMED', 'PROVISIONING', 'RUNNING', 'COLLECTING_RESULTS',
+                                             'PROCESSING_RESULTS')
                  order by a.lease_expires_at, a.attempt_id
                  limit ?
                 """,

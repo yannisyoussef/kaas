@@ -1,6 +1,6 @@
 # Structured Result and Artifact Model
 
-**Status: PROPOSED CONTRACT ARCHITECTURE.** The schemas and fixtures are executable design artifacts. No engine mapping, result processor, persistence, object storage, or quality evaluator is implemented.
+**Status: PROPOSED CONTRACT ARCHITECTURE.** The schemas and fixtures are executable design artifacts. No engine mapping, object storage, or quality evaluator is implemented. A result processor and result persistence now exist under [ADR-024](../adr/024-synthetic-execution-lifecycle.md), accepting one result per assignment as immutable evidence; the results they accept come from a synthetic workload rather than a test engine, and report zero tenant features.
 
 ## Model
 

@@ -1,6 +1,6 @@
 # Execution Lifecycle
 
-**Status: SUPERSEDED DESIGN NOTE.** No runtime behavior is implemented.
+**Status: SUPERSEDED DESIGN NOTE.** Runtime behaviour is implemented for the synthetic execution lifecycle — see [ADR-024](../adr/024-synthetic-execution-lifecycle.md). What executes is a platform-owned workload; no tenant content enters a sandbox.
 
 The canonical lifecycle and outcome semantics are now defined in:
 

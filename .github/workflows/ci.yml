@@ -24,7 +24,11 @@ jobs:
       # doubled a Docker-heavy suite inside this job's budget and, on any shared runner, put two launchers on
       # one daemon at once -- the condition under which the orphan reconciler's reclamation window and the
       # gate's container lifecycle interfere with each other.
-      - run: ./gradlew clean check --no-daemon -x :services:runner:test
+      #
+      # The synthetic-execution pipeline suite is excluded for the same reason and runs in its own mandatory
+      # job below. It starts BOTH a PostgreSQL container and sandbox containers, so leaving it here would put
+      # exactly the two-launchers-on-one-daemon condition back that excluding the sandbox suite removed.
+      - run: ./gradlew clean check --no-daemon -x :services:runner:test -x :tests:pipeline:test
 
   # The hostile-execution gate is a separate, mandatory job rather than a suite that skips when no daemon is
   # present. A security gate that quietly does not run is worse than one that fails: it produces a green build
@@ -79,7 +83,74 @@ jobs:
             echo "Expected at least 40 executed tests and no skips." >&2
             exit 1
           fi
-          for required in HostileExecutionBoundaryTests SecurityGateRedPathTests OrphanReconciliationTests; do
+          # SyntheticWorkloadTests and SourceNonUseTests are named here because both assert security-relevant
+          # properties that nothing else covers: that the workload never reports itself as an engine it is not,
+          # and that the executor has no path to tenant feature source. A suite that silently stopped running
+          # would take those guarantees with it.
+          for required in HostileExecutionBoundaryTests SecurityGateRedPathTests OrphanReconciliationTests \
+                          SyntheticWorkloadTests SourceNonUseTests UnenforceableCommandTests; do
+            if ! ls "$results" | grep -q "$required"; then
+              echo "$required did not run." >&2
+              exit 1
+            fi
+          done
+      - name: Remove any sandbox left behind by a failed run
+        if: always()
+        run: docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f
+
+  # The synthetic execution lifecycle, end to end, on a real database and a real container runtime.
+  #
+  # A separate mandatory job for the same reasons as the gate above, and the same three properties hold and
+  # must not be weakened:
+  #
+  #   1. No job-level `if:`, no `continue-on-error`, no filters. A required check is satisfied by success,
+  #      skipped, OR neutral, so a job that skips itself when Docker is absent would be indistinguishable from
+  #      one that verified the whole lifecycle.
+  #   2. Missing prerequisites FAIL. No daemon, no results, no evidence: all of them fail this job.
+  #   3. Its name is `synthetic-execution-pipeline` and must stay globally unique across every workflow here,
+  #      because required-check resolution matches on job name alone.
+  #
+  # This suite is what proves the two independent command-digest implementations agree, that the phase
+  # transitions the database permits are the ones the runner drives, and that a result produced inside a
+  # sandbox is accepted as evidence by a control plane that never saw it produced. None of that is provable
+  # from either module alone.
+  synthetic-execution-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+      - name: Confirm a container runtime is present
+        run: docker version
+      # cleanTest for the same reason the gate uses it: an UP-TO-DATE result would report this green without
+      # starting a database, a sandbox, or a control plane. The module also declares the probe build context
+      # and the migration directory as task inputs, because both live in other modules and Gradle would
+      # otherwise not consider them -- a schema or probe change would leave this suite cached and passing.
+      - run: ./gradlew :tests:pipeline:cleanTest :tests:pipeline:test --no-daemon
+      - name: Confirm the pipeline actually produced evidence
+        run: |
+          set -euo pipefail
+          results=tests/pipeline/build/test-results/test
+          if [ ! -d "$results" ]; then
+            echo "No test results were produced; the pipeline suite did not run." >&2
+            exit 1
+          fi
+          executed=$(cat "$results"/*.xml | grep -o 'tests="[0-9]*"' | grep -o '[0-9]*' | awk '{n+=$1} END {print n+0}')
+          skipped=$(cat "$results"/*.xml | grep -o 'skipped="[0-9]*"' | grep -o '[0-9]*' | awk '{n+=$1} END {print n+0}')
+          echo "executed=$executed skipped=$skipped"
+          # A floor, so adding tests does not break the gate while removing the suite does.
+          if [ "$executed" -lt 20 ] || [ "$skipped" -ne 0 ]; then
+            echo "Expected at least 20 executed tests and no skips." >&2
+            exit 1
+          fi
+          for required in SyntheticExecutionPipelineTests CommandValidationPipelineTests \
+                          LeaseRenewalPipelineTests; do
             if ! ls "$results" | grep -q "$required"; then
               echo "$required did not run." >&2
               exit 1

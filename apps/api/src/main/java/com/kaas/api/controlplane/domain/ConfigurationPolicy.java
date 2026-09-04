@@ -43,6 +43,17 @@ public final class ConfigurationPolicy {
     private static final Pattern KEY = Pattern.compile("[A-Za-z_][A-Za-z0-9_.-]{0,127}");
     private static final Pattern TAG = Pattern.compile("@[A-Za-z0-9_.:-]{1,127}");
 
+    /**
+     * Reserved for the platform's own out-of-band signals.
+     *
+     * <p>Tags are tenant-supplied and are also how the platform passes a small number of control signals to a
+     * runner — which means the two share a namespace unless something separates them. It already mattered: a
+     * tenant could put {@code @kaas.synthetic-fail} in a run profile and have the platform report their run as
+     * FAILED when nothing had failed. The instance was minor; the pattern is that every future control tag
+     * becomes an injection surface until this reservation exists.
+     */
+    private static final String RESERVED_TAG_PREFIX = "@kaas.";
+
     private ConfigurationPolicy() {}
 
     public static EnvironmentContent environment(
@@ -107,6 +118,11 @@ public final class ConfigurationPolicy {
             String tag = tags.get(index);
             if (tag == null || !TAG.matcher(tag).matches() || !uniqueTags.add(tag)) {
                 throw invalid("selection/tags/" + index, "tags must be valid and unique");
+            }
+            if (tag.regionMatches(true, 0, RESERVED_TAG_PREFIX, 0, RESERVED_TAG_PREFIX.length())) {
+                // Case-insensitive, because a reservation a caller can step around by changing case reserves
+                // nothing.
+                throw invalid("selection/tags/" + index, "tags must not use the reserved kaas namespace");
             }
             normalizedTags.add(tag);
         }

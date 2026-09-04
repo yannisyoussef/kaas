@@ -18,4 +18,4 @@ flowchart TB
   Worker --> Telemetry
 ```
 
-The intended control plane is the trust boundary for configuration and orchestration. A future sandbox would be a lower-trust boundary for user-provided executable content. Worker contracts, credential isolation, and sandbox enforcement are not implemented.
+The control plane is the trust boundary for configuration and orchestration. The sandbox is a lower-trust boundary, and is exercised today by a platform-owned workload rather than user-provided content. Worker contracts and sandbox enforcement are implemented — see [ADR-022](../adr/022-hostile-execution-boundary-and-synthetic-probe.md) and [ADR-024](../adr/024-synthetic-execution-lifecycle.md); credential isolation for tenant secrets is not, because no secret provider exists.

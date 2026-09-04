@@ -7,6 +7,7 @@ import com.kaas.api.controlplane.domain.RunSelection;
 import com.kaas.api.controlplane.domain.ScenarioRetry;
 import com.kaas.api.controlplane.domain.SecretBinding;
 import com.kaas.api.controlplane.domain.SnapshotFeature;
+import com.kaas.api.controlplane.domain.ExecutionAttempt;
 import com.kaas.api.execution.domain.CapabilityType;
 import com.kaas.api.execution.domain.ExecutionAuthorization;
 import com.kaas.api.execution.domain.ExecutionCapability;
@@ -41,6 +42,11 @@ public interface ExecutionAuthorizationRepository {
     Optional<SnapshotContext> loadSnapshot(UUID organizationId, UUID projectId, UUID runId);
 
     /** The platform-owned egress policy an execution would run under. */
+    /**
+     * Binds an assignment to the worker acquiring it. Write-once; the guard refuses a second acquisition.
+     */
+    void persistAcquisition(UUID organizationId, UUID projectId, UUID runId, ExecutionAttempt attempt);
+
     Optional<NetworkPolicyRevision> findNetworkPolicy(UUID policyRevisionId);
 
     /** An authorization already issued for this exact assignment, if there is one. */

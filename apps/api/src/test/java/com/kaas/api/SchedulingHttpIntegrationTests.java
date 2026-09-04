@@ -76,7 +76,8 @@ import tools.jackson.databind.ObjectMapper;
             "kaas.scheduling.auto.enabled=false",
             "kaas.outbox.relay.enabled=false",
             "kaas.consumer.enabled=false",
-            "kaas.claim.reconcile.enabled=false"
+            "kaas.claim.reconcile.enabled=false",
+            "kaas.execution.reconcile.enabled=false",
         })
 class SchedulingHttpIntegrationTests {
     private static final String ISSUER = "https://issuer.kaas.test";
@@ -404,7 +405,7 @@ class SchedulingHttpIntegrationTests {
     void theDatabaseRejectsEveryMutationExceptTheImplementedScheduleTransition() throws Exception {
         CreatedRun created = createRun();
         UUID runId = created.runId();
-        String scheduleGuard = "only scheduling, claim, stop, and terminal transitions are supported";
+        String scheduleGuard = "only scheduling, claim, execution, stop, and terminal transitions are supported";
 
         // A CREATED run cannot be pushed straight into a future state, nor given queue timing by hand.
         assertRejectedBecause(scheduleGuard, "update test_runs set lifecycle_state = 'RUNNING' where run_id = ?", runId);
@@ -429,7 +430,7 @@ class SchedulingHttpIntegrationTests {
 
         // The queue-time bundle is immutable, and the outbox delivery metadata cannot be forged yet.
         assertRejectedBecause(
-                "only claim, heartbeat, and fence assignment transitions are supported",
+                "only claim, acquire, heartbeat, fence, and execution-history transitions are supported",
                 "update execution_attempts set attempt_state = 'CLAIMED' where run_id = ?", runId);
         assertRejectedBecause(
                 "execution attempts are retained as assignment evidence",

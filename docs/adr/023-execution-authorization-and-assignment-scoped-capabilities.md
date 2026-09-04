@@ -2,7 +2,9 @@
 
 ## Status
 
-IMPLEMENTED for authorization, capability issuance, and command production. **No command is executed.**
+IMPLEMENTED for authorization, capability issuance, and command production. Commands were not executed when this
+was written; [ADR-024](024-synthetic-execution-lifecycle.md) now executes them, against a platform-owned
+synthetic workload. Nothing in this decision changed — what changed is that something acts on it.
 
 ## Context
 

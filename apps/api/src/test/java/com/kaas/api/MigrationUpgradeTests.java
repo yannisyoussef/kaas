@@ -131,6 +131,38 @@ class MigrationUpgradeTests {
         assertThat(count(database, "run_lifecycle_events where previous_state = 'QUEUED'"
                         + " and lifecycle_state = 'COMPLETED' and attempt_id is not null")).isPositive();
 
+        // V10 DOES revalidate against existing rows, and this is what the fixture has to satisfy for it.
+        //
+        // It drops and re-adds four constraints that are then checked against every row already present: the
+        // lifecycle-event transition CHECK, both termination CHECKs, and the stop-reason CHECK. A fixture
+        // without a terminated run validates all of them vacuously — every disjunct short-circuits on
+        // `termination_reason IS NULL` — so a dropped arm would ship green here and fail on the first real
+        // database. Each reason and each event shape the previous version could produce has to be present
+        // BEFORE the upgrade runs.
+        assertThat(count(database, "test_runs where termination_reason = 'USER_REQUESTED'"
+                        + " and termination_phase = 'CANCELLATION' and infrastructure_outcome = 'CANCELLED'"))
+                .isPositive();
+        assertThat(count(database, "test_runs where termination_reason = 'QUEUE_DEADLINE'"
+                        + " and termination_phase = 'QUEUE' and infrastructure_outcome = 'TIMED_OUT'"))
+                .isPositive();
+        assertThat(count(database, "test_runs where stop_reason is not null")).isPositive();
+        // V10 also adds ck_test_runs_outcomes_orthogonal, which is validated against every pre-existing
+        // terminal run. Those runs have a non-null infrastructure outcome and NOT_AVAILABLE as their test
+        // outcome, which is exactly the shape the new constraint has to accept.
+        assertThat(count(database, "test_runs where infrastructure_outcome is not null"
+                        + " and test_outcome = 'NOT_AVAILABLE'"))
+                .isPositive();
+        // And the rewritten transition CHECK is validated against every event. All four edge shapes the
+        // previous version could produce must be present, because the rewrite decoupled the sequence from the
+        // edge and a mistake there would only show on a row that exercises it.
+        assertThat(count(database, "run_lifecycle_events where previous_state = 'CREATED'"
+                        + " and lifecycle_state = 'QUEUED'")).isPositive();
+        assertThat(count(database, "run_lifecycle_events where previous_state = 'CREATED'"
+                        + " and lifecycle_state = 'COMPLETED'")).isPositive();
+        assertThat(count(database, "run_lifecycle_events where previous_state = 'QUEUED'"
+                        + " and lifecycle_state = 'COMPLETED'")).isPositive();
+        assertThat(count(database, "run_lifecycle_events where run_version <> sequence + 1")).isZero();
+
         // V9 is where this method has nothing to demand, and saying so is the honest form of the check rather
         // than an omission. It creates five new tables, seeds one platform-owned policy revision, and adds
         // triggers only to tables it created in the same file. No statement in it transforms an existing row,
@@ -150,16 +182,42 @@ class MigrationUpgradeTests {
         assertThat(count(database, "feature_revisions")).isEqualTo(1);
         assertThat(count(database, "environment_revisions")).isEqualTo(1);
         assertThat(count(database, "run_profile_revisions")).isEqualTo(1);
-        assertThat(count(database, "run_snapshots")).isEqualTo(8);
+        assertThat(count(database, "run_snapshots")).isEqualTo(10);
         // One CREATED run and one QUEUED run, with the QUEUED run's full scheduling bundle intact.
         assertThat(count(database, "test_runs where lifecycle_state = 'CREATED'")).isEqualTo(1);
         assertThat(count(database, "test_runs where lifecycle_state = 'QUEUED'")).isEqualTo(4);
-        assertThat(count(database, "test_runs where lifecycle_state = 'COMPLETED'")).isEqualTo(3);
-        // Four queued bundles plus the two attempts belonging to runs terminated out of QUEUED.
-        assertThat(count(database, "execution_attempts")).isEqualTo(6);
+        assertThat(count(database, "test_runs where lifecycle_state = 'COMPLETED'")).isEqualTo(4);
+        // Four queued bundles, the two attempts belonging to runs terminated out of QUEUED, and the fenced
+        // attempts under the stopping run and the settled lease-lost run.
+        assertThat(count(database, "execution_attempts")).isEqualTo(8);
+        assertThat(count(database, "test_runs where lifecycle_state = 'STOPPING'")).isEqualTo(1);
+        assertThat(count(database, "execution_attempts where attempt_state = 'FENCED'")).isEqualTo(2);
         assertThat(count(database, "execution_dispatches")).isEqualTo(4);
-        // Four scheduling events, two more for the runs terminated out of QUEUED, and three terminal events.
-        assertThat(count(database, "run_lifecycle_events")).isEqualTo(9);
+        // Four scheduling events, two more for the runs terminated out of QUEUED, three terminal events, and
+        // the seven that give the stopping and settled runs the histories a real run of their version has.
+        assertThat(count(database, "run_lifecycle_events")).isEqualTo(16);
+
+        // EVERY EDGE SHAPE THE PREVIOUS VERSION COULD PRODUCE IS PRESENT BEFORE THE UPGRADE.
+        //
+        // V10 rewrites ck_run_lifecycle_events_transition and decouples sequence from edge — exactly the change
+        // where a dropped arm hides. Three of the six edges were seeded by nothing, so a rewrite that silently
+        // dropped QUEUED->CLAIMED, CLAIMED->STOPPING, or STOPPING->COMPLETED would have passed this gate and
+        // then refused real production rows on first deployment.
+        for (String edge : java.util.List.of(
+                "'CREATED','QUEUED'", "'CREATED','COMPLETED'", "'QUEUED','COMPLETED'",
+                "'QUEUED','CLAIMED'", "'CLAIMED','STOPPING'", "'STOPPING','COMPLETED'")) {
+            assertThat(count(database,
+                            "run_lifecycle_events where (previous_state, lifecycle_state) = (" + edge + ")"))
+                    .as("edge %s must be present before the upgrade, or its guard arm is validated against nothing", edge)
+                    .isGreaterThan(0);
+        }
+        // And both stop reasons the previous version could produce, including the one that makes
+        // ck_test_runs_stop_reason_agrees actually evaluate rather than short-circuit.
+        assertThat(count(database, "test_runs where stop_reason = 'LEASE_LOST'")).isEqualTo(2);
+        assertThat(count(database,
+                        "test_runs where stop_reason is not null and termination_reason = stop_reason"))
+                .as("ck_test_runs_stop_reason_agrees is only exercised by a row where both are set")
+                .isEqualTo(1);
 
         // Every delivery state the outbox can hold survives, still carrying its payload and digest.
         assertThat(count(database, "outbox_messages")).isEqualTo(5);
@@ -195,7 +253,7 @@ class MigrationUpgradeTests {
                         + " or termination_phase is not null or cancellation_requested_at is not null"
                         + " or cancellation_acknowledged_at is not null)"))
                 .isZero();
-        assertThat(count(database, "test_runs where lifecycle_state <> 'COMPLETED'")).isEqualTo(5);
+        assertThat(count(database, "test_runs where lifecycle_state <> 'COMPLETED'")).isEqualTo(6);
         // And the terminated ones kept the reasons they were terminated for.
         assertThat(count(database, "test_runs where termination_reason = 'QUEUE_DEADLINE'"
                         + " and infrastructure_outcome = 'TIMED_OUT'")).isEqualTo(1);
@@ -215,13 +273,26 @@ class MigrationUpgradeTests {
         // V8 likewise transforms nothing. No pre-existing run acquires a stop reason, and no pre-existing
         // attempt acquires an assignment — an upgrade that invented either would be handing out ownership of
         // work to a worker that never claimed it.
-        assertThat(count(database, "test_runs where stop_reason is not null")).isZero();
+        // Two runs carry a stop reason — one still STOPPING, one already settled — seeded so V10's rewrite of
+        // that constraint is validated against real values in both of the shapes V8 could produce. What must
+        // not happen is a PRE-EXISTING run acquiring one it never had.
+        assertThat(count(database, "test_runs where stop_reason is not null")).isEqualTo(2);
+        assertThat(count(database, "test_runs where stop_reason is not null"
+                        + " and lifecycle_state not in ('STOPPING', 'COMPLETED')")).isZero();
+        // Exactly one attempt carries an assignment: the fenced one seeded under the stopping run. What must
+        // not happen is an upgrade INVENTING one, which would hand ownership of work to a worker that never
+        // claimed it — so the assertion is on the count rather than on absence.
         assertThat(count(database, "execution_attempts where assignment_epoch is not null"
                         + " or assigned_worker_id is not null or lease_started_at is not null"
                         + " or lease_expires_at is not null or last_heartbeat_at is not null"
                         + " or fenced_at is not null"))
-                .isZero();
-        assertThat(count(database, "execution_attempts where attempt_state <> 'WAITING_FOR_CLAIM'")).isZero();
+                .isEqualTo(2);
+        assertThat(count(database, "execution_attempts where attempt_state <> 'WAITING_FOR_CLAIM'"))
+                .isEqualTo(2);
+        assertThat(count(database, "execution_attempts where attempt_state = 'CLAIMED'")).isZero();
+        // And no pre-existing attempt acquires a HOLDER. acquired_at is new in V10, and materialising one would
+        // assert that some worker had bound itself to work it never touched.
+        assertThat(count(database, "execution_attempts where acquired_at is not null")).isZero();
         // The consumer inbox starts empty: it records decisions this deployment makes, and inventing one would
         // claim a message had been consumed that never arrived.
         assertThat(count(database, "dispatch_inbox")).isZero();
@@ -244,6 +315,44 @@ class MigrationUpgradeTests {
                         + " and policy_version = 1 and created_by = 'kaas.platform'"
                         + " and canonical_digest = "
                         + "'sha256:90bc5fe597d868eb21bc933950f31f10f4ea1f528e9e96a8eabdc7bd73a02450'"))
+                .isEqualTo(1);
+
+        // V10 invents no execution either. An upgrade that materialised a phase deadline, a sandbox reference,
+        // or a result would be claiming that work ran which never did — and for a terminal run it would be
+        // claiming an outcome nobody produced.
+        assertThat(count(database, "execution_results")).isZero();
+        assertThat(count(database, "test_runs where phase_deadline_at is not null")).isZero();
+        assertThat(count(database, "test_runs where execution_started_at is not null")).isZero();
+        assertThat(count(database, "execution_attempts where provisioned_at is not null"
+                        + " or execution_started_at is not null or execution_finished_at is not null"
+                        + " or sandbox_reference is not null or infrastructure_disposition is not null"))
+                .isZero();
+        // No pre-existing run acquires an execution termination reason: those are reachable only by running.
+        assertThat(count(database, "test_runs where termination_reason in"
+                        + " ('EXECUTION_COMPLETED', 'EXECUTION_DEADLINE', 'PROVISIONING_DEADLINE',"
+                        + " 'RESULT_DEADLINE', 'INFRASTRUCTURE_FAILURE')"))
+                .isZero();
+        assertThat(count(database, "pg_indexes where indexname = 'ix_test_runs_phase_deadline'")).isEqualTo(1);
+
+        // The engine CHECK is the fourth arm V10 drops and re-adds, so it is revalidated against every row
+        // already present. All ten fixture snapshots say KARATE — which is the point: the widening has to be
+        // evaluated against rows carrying the OLD value, or it proves only that an empty table satisfies it.
+        assertThat(count(database, "run_snapshots where engine = 'KARATE'")).isEqualTo(10);
+        // And the upgrade rewrote none of them. Migrating existing snapshots to SYNTHETIC would be retroactively
+        // changing what somebody's completed run claims to have executed.
+        assertThat(count(database, "run_snapshots where engine <> 'KARATE'")).isZero();
+
+        // The constraint was WIDENED, not removed. Asserted against its definition in the catalogue rather
+        // than by offering it a bad value: snapshots are immutable, so an UPDATE is refused by the immutability
+        // trigger long before the CHECK is consulted — a test written that way would pass while saying nothing
+        // whatsoever about the CHECK. Both admitted values and the enumeration itself are asserted, so a
+        // constraint that had quietly become `engine IS NOT NULL` would fail here.
+        assertThat(count(database, "pg_constraint where conname = 'ck_run_snapshots_engine'"
+                        + " and pg_get_constraintdef(oid) like '%SYNTHETIC%'"
+                        + " and pg_get_constraintdef(oid) like '%KARATE%'"))
+                .isEqualTo(1);
+        assertThat(count(database, "pg_constraint where conname = 'ck_run_snapshots_engine'"
+                        + " and pg_get_constraintdef(oid) like '%engine_version%'"))
                 .isEqualTo(1);
     }
 
@@ -316,6 +425,15 @@ class MigrationUpgradeTests {
         statements.add(terminalRunFixture("31", "CREATED", 2, "USER_REQUESTED", "CANCELLATION", "CANCELLED"));
         statements.add(terminalRunFixture("32", "QUEUED", 3, "QUEUE_DEADLINE", "QUEUE", "TIMED_OUT"));
         statements.add(terminalRunFixture("33", "QUEUED", 3, "USER_REQUESTED", "CANCELLATION", "CANCELLED"));
+
+        // A run stopping under a fenced assignment, which is the only shape that carries a stop reason.
+        //
+        // Added for V10, which drops and re-adds ck_test_runs_stop_reason. Without a row whose stop_reason is
+        // non-null that rewrite is validated against nothing — every arm short-circuits on the NULL — so a
+        // dropped value would ship green here and reject a real stopping run on the first deployment. This is
+        // the same populated-but-unexercised gap the terminated runs above were added to close, one state later.
+        statements.add(stoppingRunFixture("34"));
+        statements.add(settledLeaseLostRunFixture("35"));
 
         // One RUN_STATE_CHANGED row as well, so the generalized schema is exercised beside the real type.
         statements.add("""
@@ -433,6 +551,121 @@ class MigrationUpgradeTests {
      * would be skipped entirely by any backfill that joins or filters on the dispatch, which is precisely the
      * shape of the migration defect this gate exists to catch — it would pass green and prove nothing.
      */
+    /**
+     * A run in STOPPING under a fenced assignment: the one state that carries a stop reason.
+     *
+     * <p>Seeded at the previous version's shape, so the upgrade under test is what has to accept it.
+     */
+    /**
+     * A run that was owned, lost its lease, and settled.
+     *
+     * <p>Present because V10 revalidates the termination vocabulary and the lifecycle-event transition CHECK
+     * against every existing row, and without this the {@code LEASE_LOST/CLAIM/FAILED} arm and the
+     * {@code STOPPING -> COMPLETED} edge were validated against nothing. A rewrite that dropped either would
+     * have shipped green and then refused real production rows on first deployment — which is the exact failure
+     * this class exists to prevent, one level deeper than it was looking.
+     *
+     * <p>It also carries the only row whose {@code termination_reason} equals its {@code stop_reason}, which is
+     * what {@code ck_test_runs_stop_reason_agrees} actually constrains; every other fixture leaves that
+     * disjunct short-circuited and the constraint unexercised.
+     */
+    private static String settledLeaseLostRunFixture(String suffix) {
+        String runId = "00000000-0000-4000-8000-0000000000" + suffix;
+        String attemptId = "00000000-0000-4000-8000-0000000001" + suffix;
+        return """
+            INSERT INTO test_runs (run_id, organization_id, project_id, run_version, lifecycle_state,
+                    cancellation_status, test_outcome, infrastructure_outcome, quality_gate_status,
+                    termination_reason, termination_phase, stop_reason, snapshot_sha256, queued_at,
+                    queue_deadline_at, completed_at, current_attempt_id, created_by, created_at, updated_by,
+                    updated_at)
+            VALUES ('%s', '00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001',
+                    5, 'COMPLETED', 'NOT_REQUESTED', 'NOT_AVAILABLE', 'FAILED', 'NOT_EVALUATED',
+                    'LEASE_LOST', 'CLAIM', 'LEASE_LOST', repeat('9', 64), now(),
+                    now() + interval '5 min', now(), '%s', 'fixture', now(), 'kaas.lease-reconciler', now());
+            INSERT INTO run_snapshots (run_id, organization_id, project_id, snapshot_version, run_profile_id,
+                    run_profile_revision_id, run_profile_revision_number, run_profile_sha256, environment_id,
+                    environment_revision_id, environment_revision_number, environment_sha256, parallelism,
+                    retry_max_attempts, retry_delay_milliseconds, execution_timeout_seconds,
+                    max_artifact_bytes, max_total_bytes, engine, engine_version, content_sha256, sealed)
+            VALUES ('%s', '00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001', 1,
+                    '00000000-0000-4000-8000-000000000006', '00000000-0000-4000-8000-000000000007', 1,
+                    repeat('c', 64), '00000000-0000-4000-8000-000000000004',
+                    '00000000-0000-4000-8000-000000000005', 1, repeat('b', 64), 1, 1, 0, 60, 1000, 2000,
+                    'KARATE', '2.0.0', repeat('9', 64), true);
+            INSERT INTO execution_attempts (attempt_id, organization_id, project_id, run_id, attempt_number,
+                    attempt_state, assignment_epoch, assigned_worker_id, lease_started_at, lease_expires_at,
+                    last_heartbeat_at, fenced_at, created_by, created_at)
+            VALUES ('%s', '00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001',
+                    '%s', 1, 'FENCED', 1, 'kaas.worker.fixture', now() - interval '2 min',
+                    now() - interval '1 min', now() - interval '2 min', now(), 'kaas.scheduler', now());
+            INSERT INTO run_lifecycle_events (event_id, organization_id, project_id, run_id, run_version,
+                    sequence, event_type, previous_state, lifecycle_state, attempt_id, actor, occurred_at)
+            VALUES ('00000000-0000-4000-8000-0000000005%s', '00000000-0000-4000-8000-0000000000a0',
+                    '00000000-0000-4000-8000-000000000001', '%s', 2, 1, 'RUN_STATE_CHANGED', 'CREATED',
+                    'QUEUED', '%s', 'kaas.scheduler', now()),
+                   ('00000000-0000-4000-8000-0000000006%s', '00000000-0000-4000-8000-0000000000a0',
+                    '00000000-0000-4000-8000-000000000001', '%s', 3, 2, 'RUN_STATE_CHANGED', 'QUEUED',
+                    'CLAIMED', '%s', 'kaas.dispatch-consumer', now()),
+                   ('00000000-0000-4000-8000-0000000007%s', '00000000-0000-4000-8000-0000000000a0',
+                    '00000000-0000-4000-8000-000000000001', '%s', 4, 3, 'RUN_STATE_CHANGED', 'CLAIMED',
+                    'STOPPING', '%s', 'kaas.lease-reconciler', now()),
+                   ('00000000-0000-4000-8000-0000000008%s', '00000000-0000-4000-8000-0000000000a0',
+                    '00000000-0000-4000-8000-000000000001', '%s', 5, 4, 'RUN_STATE_CHANGED', 'STOPPING',
+                    'COMPLETED', '%s', 'kaas.lease-reconciler', now());
+            """
+                .formatted(
+                        runId, attemptId, runId, attemptId, runId,
+                        suffix, runId, attemptId,
+                        suffix, runId, attemptId,
+                        suffix, runId, attemptId,
+                        suffix, runId, attemptId);
+    }
+
+    private static String stoppingRunFixture(String suffix) {
+        String runId = "00000000-0000-4000-8000-0000000000" + suffix;
+        String attemptId = "00000000-0000-4000-8000-0000000001" + suffix;
+        return """
+            INSERT INTO test_runs (run_id, organization_id, project_id, run_version, lifecycle_state,
+                    cancellation_status, quality_gate_status, stop_reason, snapshot_sha256, queued_at,
+                    queue_deadline_at, current_attempt_id, created_by, created_at, updated_by, updated_at)
+            VALUES ('%s', '00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001',
+                    4, 'STOPPING', 'NOT_REQUESTED', 'NOT_EVALUATED', 'LEASE_LOST', repeat('8', 64), now(),
+                    now() + interval '5 min', '%s', 'fixture', now(), 'kaas.lease-reconciler', now());
+            INSERT INTO run_snapshots (run_id, organization_id, project_id, snapshot_version, run_profile_id,
+                    run_profile_revision_id, run_profile_revision_number, run_profile_sha256, environment_id,
+                    environment_revision_id, environment_revision_number, environment_sha256, parallelism,
+                    retry_max_attempts, retry_delay_milliseconds, execution_timeout_seconds,
+                    max_artifact_bytes, max_total_bytes, engine, engine_version, content_sha256, sealed)
+            VALUES ('%s', '00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001', 1,
+                    '00000000-0000-4000-8000-000000000006', '00000000-0000-4000-8000-000000000007', 1,
+                    repeat('c', 64), '00000000-0000-4000-8000-000000000004',
+                    '00000000-0000-4000-8000-000000000005', 1, repeat('b', 64), 1, 1, 0, 60, 1000, 2000,
+                    'KARATE', '2.0.0', repeat('8', 64), true);
+            INSERT INTO execution_attempts (attempt_id, organization_id, project_id, run_id, attempt_number,
+                    attempt_state, assignment_epoch, assigned_worker_id, lease_started_at, lease_expires_at,
+                    last_heartbeat_at, fenced_at, created_by, created_at)
+            VALUES ('%s', '00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001',
+                    '%s', 1, 'FENCED', 1, 'kaas.worker.fixture', now() - interval '1 min',
+                    now() + interval '1 min', now() - interval '1 min', now(), 'kaas.scheduler', now());
+            INSERT INTO run_lifecycle_events (event_id, organization_id, project_id, run_id, run_version,
+                    sequence, event_type, previous_state, lifecycle_state, attempt_id, actor, occurred_at)
+            VALUES ('00000000-0000-4000-8000-0000000002%s', '00000000-0000-4000-8000-0000000000a0',
+                    '00000000-0000-4000-8000-000000000001', '%s', 2, 1, 'RUN_STATE_CHANGED', 'CREATED',
+                    'QUEUED', '%s', 'kaas.scheduler', now()),
+                   ('00000000-0000-4000-8000-0000000003%s', '00000000-0000-4000-8000-0000000000a0',
+                    '00000000-0000-4000-8000-000000000001', '%s', 3, 2, 'RUN_STATE_CHANGED', 'QUEUED',
+                    'CLAIMED', '%s', 'kaas.dispatch-consumer', now()),
+                   ('00000000-0000-4000-8000-0000000004%s', '00000000-0000-4000-8000-0000000000a0',
+                    '00000000-0000-4000-8000-000000000001', '%s', 4, 3, 'RUN_STATE_CHANGED', 'CLAIMED',
+                    'STOPPING', '%s', 'kaas.lease-reconciler', now());
+            """
+                .formatted(
+                        runId, attemptId, runId, attemptId, runId,
+                        suffix, runId, attemptId,
+                        suffix, runId, attemptId,
+                        suffix, runId, attemptId);
+    }
+
     private static String runFixture(String suffix, String lifecycle, int version, String digest, String[] delivery) {
         String runId = "00000000-0000-4000-8000-0000000000" + suffix;
         String attemptId = "00000000-0000-4000-8000-0000000001" + suffix;

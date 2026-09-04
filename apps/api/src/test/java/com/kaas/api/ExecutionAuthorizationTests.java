@@ -90,6 +90,7 @@ import tools.jackson.databind.ObjectMapper;
             "kaas.outbox.relay.enabled=false",
             "kaas.consumer.enabled=false",
             "kaas.claim.reconcile.enabled=false",
+            "kaas.execution.reconcile.enabled=false",
             "kaas.claim.lease-duration=PT4S",
             "kaas.claim.recovery-window=PT2S",
             "kaas.execution.authorization-ttl=PT5M",
@@ -248,7 +249,40 @@ class ExecutionAuthorizationTests {
     void aDifferentWorkerIsNotAuthorized() throws Exception {
         UUID runId = claimedRun();
 
+        // The first worker to authorize ACQUIRES the assignment. Until that happens the stored worker id is the
+        // dispatch consumer's own configured constant, which names no particular process — so "a different
+        // worker" is not yet a meaningful idea, and any worker may take an unheld assignment. This test has to
+        // establish a holder before it can assert somebody else is refused.
+        assertThat(authorizations.authorize(runId, attemptId(runId), 1, WORKER).denial()).isEmpty();
+
         assertThat(authorizations.authorize(runId, attemptId(runId), 1, OTHER_WORKER).denial())
+                .contains(ExecutionDenial.ASSIGNMENT_STALE);
+    }
+
+    @Test
+    @Timeout(120)
+    void anUnacquiredAssignmentIsHeldByNobodyAndTheFirstWorkerTakesIt() throws Exception {
+        // The anti-vacuity twin of the test above, and the property acquisition exists for. Before this slice
+        // the stored worker id was one constant for the entire deployment, so every worker in the fleet
+        // satisfied every ownership check on every run and the assignment epoch fenced nothing.
+        UUID runId = claimedRun();
+        UUID attemptId = attemptId(runId);
+
+        assertThat(jdbc.queryForObject(
+                        "select acquired_at from execution_attempts where attempt_id = ?",
+                        java.sql.Timestamp.class, attemptId))
+                .as("a freshly claimed attempt is held by nobody")
+                .isNull();
+
+        assertThat(authorizations.authorize(runId, attemptId, 1, OTHER_WORKER).denial()).isEmpty();
+
+        assertThat(jdbc.queryForObject(
+                        "select assigned_worker_id from execution_attempts where attempt_id = ?",
+                        String.class, attemptId))
+                .as("the acquiring worker is recorded, not the consumer's configured constant")
+                .isEqualTo(OTHER_WORKER);
+        // And the worker the consumer nominally claimed for is now the one refused.
+        assertThat(authorizations.authorize(runId, attemptId, 1, WORKER).denial())
                 .contains(ExecutionDenial.ASSIGNMENT_STALE);
     }
 
@@ -714,7 +748,11 @@ class ExecutionAuthorizationTests {
         assertThat(document.at("/sandboxSecurityProfile/profileVersion").stringValue())
                 .isEqualTo("kaas.sandbox.v1");
         assertThat(document.at("/sandboxSecurityProfile/assessmentDigest").stringValue()).startsWith("sha256:");
-        assertThat(document.at("/engine/type").stringValue()).isEqualTo("KARATE");
+        // The command names the engine that will run it. Reporting KARATE while the platform executes its own
+        // synthetic workload is the single most misleading thing this slice could do, so it is asserted here
+        // rather than left to the runner to refuse.
+        assertThat(document.at("/engine/type").stringValue()).isEqualTo("SYNTHETIC");
+        assertThat(document.toString()).doesNotContain("KARATE");
         assertThat(document.get("secretCapabilities")).isEmpty();
         assertThat(document.get("assignmentEpoch").intValue()).isEqualTo(1);
         String snapshot = jdbc.queryForObject(
@@ -873,8 +911,18 @@ class ExecutionAuthorizationTests {
                 .hasMessageContaining("never deleted");
         // TRUNCATE fires no row-level trigger, so every guard above is silent about it unless a statement-level
         // trigger exists. Immutability that one statement bypasses is not immutability.
-        assertThatThrownBy(() -> jdbc.update("truncate execution_commands"))
+        // CASCADE, so the statement reaches the immutability trigger rather than stopping at the foreign key.
+        //
+        // execution_results now references execution_commands, and PostgreSQL refuses a bare TRUNCATE on a
+        // referenced table before any trigger runs. That is a second, independent protection — but asserting on
+        // it would leave the trigger itself covered by nothing, which is precisely the "passes for a different
+        // reason" trap. CASCADE gets past the foreign key and the trigger is then what refuses.
+        assertThatThrownBy(() -> jdbc.update("truncate execution_commands cascade"))
                 .hasMessageContaining("immutable");
+        // And the foreign key refuses the bare form, so both protections are asserted rather than one hiding
+        // the other.
+        assertThatThrownBy(() -> jdbc.update("truncate execution_commands"))
+                .hasMessageContaining("referenced in a foreign key constraint");
         assertThatThrownBy(() -> jdbc.update("truncate execution_capabilities cascade"))
                 .hasMessageContaining("never deleted");
     }

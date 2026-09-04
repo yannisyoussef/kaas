@@ -47,7 +47,8 @@ public class RunIntentService {
             AdmissionRepository admission,
             MeterRegistry meters,
             Clock clock,
-            @Value("${kaas.engine.karate-version}") String karateVersion,
+            @Value("${kaas.engine.type}") String engineType,
+            @Value("${kaas.engine.version}") String engineVersion,
             @Value("${kaas.admission.max-active-runs-per-organization}") int maxActiveRuns,
             @Value("${kaas.admission.max-queued-runs-per-organization}") int maxQueuedRuns) {
         this.runs = runs;
@@ -56,7 +57,9 @@ public class RunIntentService {
         this.admission = admission;
         this.admissionPolicy = new AdmissionPolicy(maxActiveRuns, maxQueuedRuns);
         this.clock = clock;
-        this.engine = new EngineDescriptor("KARATE", karateVersion);
+        // Configured, not hardcoded. A command must declare the engine that will actually run it, and
+        // until an engine is integrated that is the platform's own synthetic workload.
+        this.engine = new EngineDescriptor(engineType, engineVersion);
         // Dimensioned by reason only. Tenant, project, and run identity would be unbounded label cardinality.
         this.rejectedRuns = Counter.builder("kaas.run.admission.rejected")
                 .tag("reason", "ACTIVE_RUN_CAPACITY")

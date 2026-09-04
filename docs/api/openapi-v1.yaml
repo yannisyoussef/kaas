@@ -1543,8 +1543,13 @@ components:
         run somebody owns goes through STOPPING first — its assignment has to be fenced before it can be called
         over — and settles as CANCELLED when a tenant asked, or FAILED when the worker's lease was lost. In every
         one of these cases testOutcome is NOT_AVAILABLE and qualityGateStatus stays NOT_EVALUATED, because
-        nothing ran. PROVISIONING and everything past it are not implemented.
-      required: [runId, projectId, runVersion, lifecycleState, cancellationStatus, testOutcome, infrastructureOutcome, qualityGateStatus, terminationReason, terminationPhase, stopReason, snapshotDigest, queueStartedAt, queueDeadlineAt, cancellationRequestedAt, cancellationAcknowledgedAt, completedAt, createdBy, createdAt, updatedAt]
+        nothing ran. A run that a worker takes further now moves through PROVISIONING, RUNNING,
+        COLLECTING_RESULTS, and PROCESSING_RESULTS, and reaching COMPLETED from PROCESSING_RESULTS is the only
+        transition that carries a real testOutcome. Each of those phases carries a deadline; a run that
+        outlives one is stopped by the platform and settles with no test outcome. What executes today is a
+        platform-owned synthetic workload rather than a test engine, so qualityGateStatus stays NOT_EVALUATED
+        even for a run that completed successfully.
+      required: [runId, projectId, runVersion, lifecycleState, cancellationStatus, testOutcome, infrastructureOutcome, qualityGateStatus, terminationReason, terminationPhase, stopReason, snapshotDigest, queueStartedAt, queueDeadlineAt, cancellationRequestedAt, cancellationAcknowledgedAt, completedAt, phaseDeadlineAt, executionStartedAt, createdBy, createdAt, updatedAt]
       properties:
         runId:
           type: string
@@ -1569,19 +1574,41 @@ components:
           enum: [NOT_EVALUATED, PASSED, FAILED]
         terminationReason:
           type: [string, 'null']
-          enum: [USER_REQUESTED, QUEUE_DEADLINE, LEASE_LOST, null]
+          enum: [USER_REQUESTED, QUEUE_DEADLINE, LEASE_LOST, PROVISIONING_DEADLINE, EXECUTION_DEADLINE,
+                 RESULT_DEADLINE, INFRASTRUCTURE_FAILURE, EXECUTION_COMPLETED, null]
           description: >-
-            Why the run ended, and null until it has. USER_REQUESTED always pairs with infrastructureOutcome
-            CANCELLED, QUEUE_DEADLINE with TIMED_OUT, and LEASE_LOST with FAILED. A queue timeout is never
-            reported as a cancellation, and a lost lease is never reported as a timeout: a queue deadline means
-            the platform never got to the run, while a lost lease means it did and then lost the worker holding
-            it. The vocabulary is extended deliberately as later terminal transitions are implemented.
+            Why the run ended, and null until it has. Each reason pairs with exactly one infrastructureOutcome:
+            USER_REQUESTED with CANCELLED; QUEUE_DEADLINE, PROVISIONING_DEADLINE, EXECUTION_DEADLINE, and
+            RESULT_DEADLINE with TIMED_OUT; LEASE_LOST and INFRASTRUCTURE_FAILURE with FAILED; and
+            EXECUTION_COMPLETED with SUCCEEDED. A queue timeout is never reported as a cancellation, and a lost
+            lease is never reported as a timeout: a queue deadline means the platform never got to the run,
+            while a lost lease means it did and then lost the worker holding it. The three execution deadlines
+            are distinguished from one another because each names a different phase that failed to finish, and
+            an operator reading an audit trail needs to know which. EXECUTION_COMPLETED is the only reason that
+            means the run finished normally, and the only one under which a real testOutcome exists.
         terminationPhase:
           type: [string, 'null']
-          enum: [QUEUE, CLAIM, PROVISIONING, EXECUTION, RESULT_COLLECTION, RESULT_PROCESSING, ARTIFACT_UPLOAD, CANCELLATION, null]
+          enum: [QUEUE, CLAIM, PROVISIONING, EXECUTION, RESULTS, CANCELLATION, null]
           description: >-
-            Where in the run's life it ended, using the same phase vocabulary as a runner structured error. Only
-            QUEUE and CANCELLATION are reachable today.
+            Where in the run's life it ended. This vocabulary is the control plane's own and is deliberately
+            coarser than a runner structured error's phase: it distinguishes the phases a run can END in, and
+            result collection and processing are one such phase because a run that outlives either settles
+            identically. An earlier version of this contract listed RESULT_COLLECTION, RESULT_PROCESSING, and
+            ARTIFACT_UPLOAD, none of which the control plane has ever been able to emit.
+        phaseDeadlineAt:
+          type: [string, 'null']
+          format: date-time
+          description: >-
+            When the phase the run is currently in must be over. Non-null exactly while lifecycleState is
+            PROVISIONING, RUNNING, COLLECTING_RESULTS, or PROCESSING_RESULTS. One field rather than one per
+            phase, because the lifecycle state already says which phase it bounds. A run that passes this
+            instant is stopped by the platform rather than waiting on a worker that may never return.
+        executionStartedAt:
+          type: [string, 'null']
+          format: date-time
+          description: >-
+            Server-owned instant the workload actually began, stamped when the run entered RUNNING. Null for a
+            run that never started executing. A submitted result's own start instant must equal this exactly.
         snapshotDigest:
           $ref: '#/components/schemas/Sha256Digest'
         queueStartedAt:
@@ -1611,11 +1638,13 @@ components:
           description: Server-owned instant the run became terminal. Non-null exactly when lifecycleState is COMPLETED.
         stopReason:
           type: [string, 'null']
-          enum: [USER_REQUESTED, LEASE_LOST, null]
+          enum: [USER_REQUESTED, LEASE_LOST, PROVISIONING_DEADLINE, EXECUTION_DEADLINE, RESULT_DEADLINE,
+                 INFRASTRUCTURE_FAILURE, null]
           description: >-
             Why a run somebody owned began stopping, set when it enters STOPPING and retained through
             terminalization. Null for a run that never reached an owned state. It fixes the outcome the run will
-            settle with, so a reconciler cannot turn a lost lease into a cancellation or the reverse.
+            settle with, so a reconciler cannot turn a lost lease into a cancellation or the reverse. There is
+            no EXECUTION_COMPLETED here: a run that finishes normally never passes through STOPPING.
         createdBy:
           type: string
           minLength: 1
@@ -1689,7 +1718,14 @@ components:
       type: object
       required: [engine, version]
       properties:
-        engine: {type: string, const: KARATE}
+        engine:
+          type: string
+          enum: [SYNTHETIC, KARATE]
+          description: >-
+            The engine that will execute this run. SYNTHETIC is the platform's own deterministic workload and
+            is what runs today; KARATE is modelled and not integrated, and a runner refuses to execute an
+            engine it does not have. This was pinned to KARATE while nothing executed, which made every
+            snapshot this endpoint returns misdescribe itself the moment execution became real.
         version:
           type: string
           pattern: '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$'

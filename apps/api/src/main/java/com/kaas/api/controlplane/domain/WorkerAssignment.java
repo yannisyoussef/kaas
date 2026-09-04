@@ -21,7 +21,16 @@ public record WorkerAssignment(
         Instant leaseStartedAt,
         Instant leaseExpiresAt,
         Instant lastHeartbeatAt,
-        Instant fencedAt) {
+        Instant fencedAt,
+        /**
+         * When an authenticated worker bound this assignment to itself, or null if none has yet.
+         *
+         * <p>{@code workerId} is written at claim time by the dispatch consumer from its own configuration —
+         * one constant for the whole deployment — so before acquisition it identifies no particular worker.
+         * Comparing a caller against it proves only that the caller is a worker. This field is what makes the
+         * assignment epoch mean something: once acquired, exactly one process holds it.
+         */
+        Instant acquiredAt) {
 
     /** The first assignment an attempt can have. A later one would need a strictly higher epoch. */
     public static final int FIRST_EPOCH = 1;
@@ -42,7 +51,7 @@ public record WorkerAssignment(
     }
 
     public static WorkerAssignment claim(String workerId, Instant at, Duration leaseDuration) {
-        return new WorkerAssignment(FIRST_EPOCH, workerId, at, at.plus(leaseDuration), at, null);
+        return new WorkerAssignment(FIRST_EPOCH, workerId, at, at.plus(leaseDuration), at, null, null);
     }
 
     public boolean fenced() {
@@ -66,7 +75,37 @@ public record WorkerAssignment(
             // that had already lost ownership take it back by being late rather than by being correct.
             throw new IllegalStateException("An expired lease cannot be renewed, only fenced.");
         }
-        return new WorkerAssignment(epoch, workerId, leaseStartedAt, at.plus(leaseDuration), at, null);
+        return new WorkerAssignment(epoch, workerId, leaseStartedAt, at.plus(leaseDuration), at, null, acquiredAt);
+    }
+
+    /** Whether an authenticated worker has bound this assignment to itself. */
+    public boolean acquired() {
+        return acquiredAt != null;
+    }
+
+    /**
+     * Binds this assignment to the worker that is actually going to run it.
+     *
+     * <p>Write-once. The claim-time {@code workerId} is a deployment constant that identifies no particular
+     * process; this replaces it with the authenticated caller and records when. A second worker asking to
+     * acquire an assignment that is already held is refused, which is what makes the epoch a real fencing token
+     * rather than a number every worker in the fleet satisfies equally.
+     */
+    public WorkerAssignment acquiredBy(String acquiringWorkerId, Instant at) {
+        if (acquired()) {
+            throw new IllegalStateException("This assignment is already held by a worker.");
+        }
+        if (fenced()) {
+            throw new IllegalStateException("A fenced assignment cannot be acquired.");
+        }
+        if (acquiringWorkerId == null || acquiringWorkerId.isBlank()) {
+            throw new IllegalArgumentException("An assignment is acquired by a named worker.");
+        }
+        if (at == null || at.isBefore(leaseStartedAt)) {
+            throw new IllegalArgumentException("An assignment cannot be acquired before it was claimed.");
+        }
+        return new WorkerAssignment(
+                epoch, acquiringWorkerId, leaseStartedAt, leaseExpiresAt, lastHeartbeatAt, fencedAt, at);
     }
 
     /** Ends the assignment. The epoch is kept, because a later one has to be strictly greater than it. */
@@ -77,7 +116,7 @@ public record WorkerAssignment(
         if (at == null || at.isBefore(lastHeartbeatAt)) {
             throw new IllegalArgumentException("An assignment cannot be fenced before its last heartbeat.");
         }
-        return new WorkerAssignment(epoch, workerId, leaseStartedAt, leaseExpiresAt, lastHeartbeatAt, at);
+        return new WorkerAssignment(epoch, workerId, leaseStartedAt, leaseExpiresAt, lastHeartbeatAt, at, acquiredAt);
     }
 
     /**
@@ -86,7 +125,10 @@ public record WorkerAssignment(
      * let a restarted worker act under an assignment it has already lost.
      */
     public boolean isHeldBy(String candidateWorkerId, int candidateEpoch) {
-        return !fenced() && epoch == candidateEpoch && workerId.equals(candidateWorkerId);
+        // ACQUISITION IS REQUIRED. Before it, workerId is the dispatch consumer's own configured constant —
+        // identical for every run in the deployment — so this comparison would succeed for any worker in the
+        // fleet and the epoch would be fencing nothing. An unacquired assignment is held by nobody.
+        return acquired() && !fenced() && epoch == candidateEpoch && workerId.equals(candidateWorkerId);
     }
 
     public boolean expiredAt(Instant now) {

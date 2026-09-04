@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.kaas.dev/execution-command.schema.json",
   "title": "ExecutionCommand",
-  "description": "The immutable semantic description of what one authorized assignment would execute. This is the document the control plane persists and returns to a worker; it is deliberately NOT the broker message. runner-command.schema.json describes a broker envelope and is a SEPARATE, still-proposed contract: the two differ in shape today (that one has no networkPolicy type, requires an environmentSnapshot this document does not carry, and forbids properties this one requires), and an earlier version of this description wrongly claimed one carried the other as its payload. Reconciling them belongs to the slice that actually delivers a command. Nothing in the current slice executes this document.",
+  "description": "The immutable semantic description of what one authorized assignment would execute. This is the document the control plane persists and returns to a worker; it is deliberately NOT the broker message. runner-command.schema.json describes a broker envelope and is a SEPARATE, still-proposed contract: the two differ in shape today (that one has no networkPolicy type, requires an environmentSnapshot this document does not carry, and forbids properties this one requires), and an earlier version of this description wrongly claimed one carried the other as its payload. Reconciling them belongs to the slice that actually delivers a command. A worker validates this document independently, recomputes its digest, and executes it.",
   "type": "object",
   "required": [
     "schemaVersion",
@@ -91,7 +91,11 @@
       ],
       "properties": {
         "type": {
-          "const": "KARATE"
+          "enum": [
+            "SYNTHETIC",
+            "KARATE"
+          ],
+          "description": "The engine that will execute this command. SYNTHETIC is the platform's own deterministic workload and is what runs today; KARATE is modelled and no runner in this repository can execute it, so a command naming it is refused by the runner rather than run under another engine's name. This was `const: KARATE` while nothing executed, which meant every command the platform could issue violated its own contract the moment execution became real."
         },
         "version": {
           "type": "string",

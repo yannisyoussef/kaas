@@ -89,6 +89,7 @@ import tools.jackson.databind.ObjectMapper;
             // have nothing to reconcile, but both would add background writes to assertions about state.
             "kaas.consumer.enabled=false",
             "kaas.claim.reconcile.enabled=false",
+            "kaas.execution.reconcile.enabled=false",
             // Short enough that a real deadline can actually pass inside a test.
             "kaas.scheduling.queue-timeout=PT2S",
             "kaas.admission.max-active-runs-per-organization=4",
@@ -515,7 +516,7 @@ class EarlyTerminalLifecycleTests {
         Tenant tenant = tenant();
         UUID runId = createRun(tenant);
         scheduler.scheduleDue();
-        String guard = "only scheduling, claim, stop, and terminal transitions are supported";
+        String guard = "only scheduling, claim, execution, stop, and terminal transitions are supported";
 
         // A terminal state with no completion time is not a state. The guard rejects it first; the CHECK behind
         // it is proved separately below, because a defence that is never reached is not a defence.
@@ -768,7 +769,7 @@ class EarlyTerminalLifecycleTests {
         Tenant tenant = tenant();
         UUID runId = createRun(tenant);
         scheduler.scheduleDue();
-        String guard = "only scheduling, claim, stop, and terminal transitions are supported";
+        String guard = "only scheduling, claim, execution, stop, and terminal transitions are supported";
 
         // A system expiry pinned to a named tenant, and a tenant cancellation wearing the platform's identity,
         // are the same forgery in opposite directions. The scheduling branch has always pinned its actor; the
@@ -808,8 +809,14 @@ class EarlyTerminalLifecycleTests {
         // by application code, so a second writer or a repair script could commit a run whose history has a gap
         // exactly where its ending belongs.
         assertThatThrownBy(() -> jdbc.update(
+                        // statement_timestamp(), not clock_timestamp(). The row guard requires
+                        // updated_at = completed_at, and clock_timestamp() is volatile: two calls in one
+                        // statement return two different instants, so this held only when both landed in the
+                        // same microsecond. It did, until an unrelated trigger made the statement fractionally
+                        // slower — a latent flake that would eventually have failed in CI for a reason having
+                        // nothing to do with what the test is about.
                         "update test_runs set lifecycle_state = 'COMPLETED', run_version = 3,"
-                                + " completed_at = clock_timestamp(), updated_at = clock_timestamp(),"
+                                + " completed_at = statement_timestamp(), updated_at = statement_timestamp(),"
                                 + " test_outcome = 'NOT_AVAILABLE', infrastructure_outcome = 'TIMED_OUT',"
                                 + " termination_reason = 'QUEUE_DEADLINE', termination_phase = 'QUEUE',"
                                 + " updated_by = 'kaas.queue-reaper' where run_id = ?",
@@ -938,17 +945,26 @@ class EarlyTerminalLifecycleTests {
     }
 
     @Test
-    void terminationRefusesEveryPhaseAWorkerWouldOwn() throws Exception {
+    void terminationRefusesAPhaseThatCannotBeCancelled() throws Exception {
         Tenant tenant = tenant();
         UUID runId = createRun(tenant);
-        // PROVISIONING is unreachable through any implemented path, so it has to be forged to test the refusal at
-        // all. The point is that the use case does not rely on the database alone. It is forged after scheduling
-        // so the run has the attempt every owned state requires.
+        // PROCESSING_RESULTS is the frontier now. Execution made PROVISIONING, RUNNING and COLLECTING_RESULTS
+        // cancellable — a phase a tenant could not stop would be a phase where a stop request silently did
+        // nothing until a deadline expired. PROCESSING_RESULTS is different in kind: the workload has finished
+        // and its evidence has been accepted, so there is nothing left to interrupt, and cancelling would mean
+        // discarding a result the platform already holds.
+        //
+        // Forged, because the implemented path into it requires a full execution. The point is that the use case
+        // refuses it rather than relying on the database alone.
         scheduler.scheduleDue();
         jdbc.update("alter table test_runs disable trigger test_runs_supported_update");
         jdbc.update("alter table test_runs disable trigger test_run_scheduling_bundle_complete");
         try {
-            jdbc.update("update test_runs set lifecycle_state = 'PROVISIONING' where run_id = ?", runId);
+            jdbc.update(
+                    "update test_runs set lifecycle_state = 'PROCESSING_RESULTS',"
+                            + " phase_deadline_at = clock_timestamp() + interval '5 minutes',"
+                            + " execution_started_at = clock_timestamp() where run_id = ?",
+                    runId);
         } finally {
             jdbc.update("alter table test_runs enable trigger test_run_scheduling_bundle_complete");
             jdbc.update("alter table test_runs enable trigger test_runs_supported_update");
@@ -958,7 +974,7 @@ class EarlyTerminalLifecycleTests {
 
         assertThat(response.statusCode()).isEqualTo(409);
         assertThat(response.body()).contains("RUN_NOT_CANCELLABLE");
-        assertThat(lifecycleOf(runId)).isEqualTo("PROVISIONING");
+        assertThat(lifecycleOf(runId)).isEqualTo("PROCESSING_RESULTS");
         // The scheduling event is the only one it has; no termination was recorded.
         assertThat(count("run_lifecycle_events", runId)).isEqualTo(1);
     }

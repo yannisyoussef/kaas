@@ -20,17 +20,25 @@
 | [020](020-early-terminal-lifecycle-and-queue-deadline-reaping.md) | Early run cancellation, queue-deadline reaping, dispatch suppression, and the scheduling-only guard rewrite | IMPLEMENTED |
 | [021](021-durable-dispatch-consumption-fencing-and-worker-lease.md) | Durable dispatch consumption, consumer inbox, worker claim, assignment-epoch fencing, and lease recovery | IMPLEMENTED |
 | [022](022-hostile-execution-boundary-and-synthetic-probe.md) | Hostile-execution trust boundary, hardened sandbox, trusted synthetic probe, and executable release gate | IMPLEMENTED |
-| [023](023-execution-authorization-and-assignment-scoped-capabilities.md) | Execution authorization, assignment-scoped short-lived capabilities, platform-owned network policy, and an immutable command that nothing executes | IMPLEMENTED for authorization and command production; no command is executed |
+| [023](023-execution-authorization-and-assignment-scoped-capabilities.md) | Execution authorization, assignment-scoped short-lived capabilities, platform-owned network policy, and an immutable command that nothing executes | IMPLEMENTED for authorization and command production; commands are executed as of ADR-024 |
+| [024](024-synthetic-execution-lifecycle.md) | The four execution phases, bounded phase deadlines, orthogonal outcomes, result provenance, and a truthfully named synthetic engine | IMPLEMENTED; what executes is a platform-owned synthetic workload, not a test engine |
+| [025](025-execution-egress-remains-deny-all.md) | Egress stays deny-all until it can be enforced, with the eight requirements an allowlist must satisfy | ACCEPTED; no egress proxy exists |
 
 Deferred topics without active decisions remain: concrete object-storage/upload adapter, secret **delivery**
-mechanism and a real secret provider, egress allowlist **enforcement**, outbox and CREATED-run retention policy,
-self-service quarantine recovery, and OpenTelemetry implementation.
+mechanism and a real secret provider, outbox and CREATED-run retention policy, self-service quarantine
+recovery, OpenTelemetry implementation, worker heartbeating during execution, and test-engine integration.
 
 Source capability issuance and the egress policy **model** are decided by ADR-023 and are no longer deferred —
 what remains deferred for each is the part this platform cannot yet do: delivering a source bundle into a
 sandbox, and enforcing any policy other than deny-all. Consumer inbox and worker claim/lease fencing are decided
 by ADR-021, and the hostile-execution runtime by ADR-022, which names a stronger runtime (gVisor or a microVM)
 as a prerequisite for admitting user content with its gate re-run against it as the acceptance criterion.
-ADR-023 does not revisit and does not satisfy that prerequisite.
+ADR-023 does not revisit and does not satisfy that prerequisite, and neither does ADR-024: the synthetic
+workload it executes is repository-controlled content, so admitting *user* content still waits on the stronger
+runtime ADR-022 names.
+
+Egress allowlist **enforcement** is no longer an undecided deferral — ADR-025 decides that it stays refused
+until eight named requirements are met, and records them. Worker heartbeating during execution is a new
+deferral created by ADR-024 and a prerequisite for any run longer than a lease.
 
 `IMPLEMENTED` means verified by repository code or tooling. `PROPOSED` means design intent only. `DEFERRED` means no decision is active and implementation must not assume one.

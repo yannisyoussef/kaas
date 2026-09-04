@@ -30,7 +30,36 @@ public enum SyntheticProbe {
     /** Sleeps far past any deadline, so termination cannot depend on the workload cooperating. */
     SLEEP(List.of("sleep", "3600")),
     /** Emits far more output than the collector is allowed to keep. */
-    OUTPUT(List.of("output", "200000"));
+    OUTPUT(List.of("output", "200000")),
+
+    // The two below are not security probes. Every value above exists to attack the sandbox's own
+    // confinement and prove it holds; these two are the platform's synthetic WORKLOAD, and they are what a
+    // run actually executes in this slice. They live in the same enumeration because they run through the
+    // same trusted image and the same hardened launcher — the sandbox does not get a second, softer entry
+    // point just because what it is running is benign.
+
+    /** The synthetic workload, passing. Fixed identity KAAS_SYNTHETIC_V1; not Karate and never reported as it. */
+    WORKLOAD_PASS(List.of("workload", "pass")),
+    /**
+     * The synthetic workload, failing one scenario.
+     *
+     * <p>Exists so the FAILED terminal outcome is reachable in a test. Without it that transition would ship
+     * having never once executed, and the first genuine test failure in production would be the first time
+     * that path ran.
+     */
+    WORKLOAD_FAIL(List.of("workload", "fail")),
+
+    /**
+     * Announces the trusted identity and then reports no verdict.
+     *
+     * <p>Exists so the runner's "the workload reported no outcome" check can be proven on its own. Without it
+     * that check and the identity check are a jointly-covered pair — delete either and the other refuses, so
+     * neither is actually tested.
+     */
+    WORKLOAD_SILENT(List.of("workload", "silent")),
+
+    /** Reports a confident verdict under the wrong identity: something that is not our workload at all. */
+    WORKLOAD_IMPOSTER(List.of("workload", "imposter"));
 
     private final List<String> arguments;
 

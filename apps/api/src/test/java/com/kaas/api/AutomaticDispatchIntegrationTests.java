@@ -69,7 +69,8 @@ import tools.jackson.databind.ObjectMapper;
             // driving it, which it does by reading the message off the queue — and a live consumer would take
             // it first. That the consumer then claims it is proved end to end in DispatchConsumerInboxTests.
             "kaas.consumer.enabled=false",
-            "kaas.claim.reconcile.enabled=false"
+            "kaas.claim.reconcile.enabled=false",
+            "kaas.execution.reconcile.enabled=false",
         })
 class AutomaticDispatchIntegrationTests {
     private static final String ISSUER = "https://issuer.kaas.test";

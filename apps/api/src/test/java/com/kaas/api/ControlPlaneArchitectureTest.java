@@ -8,6 +8,25 @@ import com.tngtech.archunit.core.importer.ImportOption;
 import org.junit.jupiter.api.Test;
 
 class ControlPlaneArchitectureTest {
+
+    // ONE definition of each package selector, shared by the rules below and by the anti-vacuity guard.
+    //
+    // The sharing is the whole mechanism. Previously the guard held its own copy of each package name, so
+    // misspelling a selector in a RULE left the guard's string untouched and the guard went on finding classes
+    // — it could only ever catch a mistake somebody made in two places at once. Mutation testing showed this
+    // directly: renaming `..execution.domain..` in the rules killed nothing. With one constant, a misspelling
+    // is a misspelling everywhere, and the floor below fails.
+    private static final String CONTROL_PLANE = "..controlplane..";
+    private static final String CONTROL_PLANE_DOMAIN = "..controlplane.domain..";
+    private static final String CONTROL_PLANE_API = "..controlplane.api..";
+    private static final String OUTBOX = "..outbox..";
+    private static final String OUTBOX_DOMAIN = "..outbox.domain..";
+    private static final String CONSUMER = "..consumer..";
+    private static final String CONSUMER_DOMAIN = "..consumer.domain..";
+    private static final String EXECUTION = "..execution..";
+    private static final String EXECUTION_DOMAIN = "..execution.domain..";
+    private static final String INFRASTRUCTURE = "..infrastructure..";
+
     private final com.tngtech.archunit.core.domain.JavaClasses classes =
             new ClassFileImporter()
                     .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
@@ -43,22 +62,51 @@ class ControlPlaneArchitectureTest {
                         .count())
                 .as("the internal package selectors must match real classes")
                 .isGreaterThan(0L);
-    }
 
+        // EVERY selector a rule uses, checked through the SAME constant the rule uses.
+        //
+        // ArchUnit's `..x..` form means "package x and its subpackages"; the equivalent substring test is the
+        // dotted name without the wrapping dots. Deriving it from the constant rather than writing it out again
+        // is what makes a misspelling visible here.
+        for (String selector : java.util.List.of(
+                CONTROL_PLANE, CONTROL_PLANE_DOMAIN, CONTROL_PLANE_API, OUTBOX, OUTBOX_DOMAIN,
+                CONSUMER, CONSUMER_DOMAIN, EXECUTION, EXECUTION_DOMAIN, INFRASTRUCTURE)) {
+            // ArchUnit's `..x..` means package x AND its subpackages, so the equivalent test is "contains .x."
+            // or "ends with .x" — a leaf package has no trailing dot, which a naive substring test misses.
+            String core = selector.replace("..", "");
+            assertThat(classes.stream()
+                            .filter(imported -> imported.getPackageName().contains("." + core + ".")
+                                    || imported.getPackageName().endsWith("." + core))
+                            .count())
+                    .as("the selector %s must match real classes, or every rule using it passes vacuously",
+                            selector)
+                    .isGreaterThan(0L);
+        }
+
+        // And the rules that select by TYPE NAME rather than by package. A typo there matches nothing and the
+        // rule — described in its own comment as the load-bearing claim of the security-gate bridge — passes
+        // having checked no dependency at all. No package count can catch that.
+        for (String type : java.util.List.of(
+                "SandboxSecurityAttestation", "SandboxSecurityAttestationSource")) {
+            assertThat(classes.stream().filter(imported -> imported.getSimpleName().equals(type)).count())
+                    .as("the rule targeting %s must have a real type to target", type)
+                    .isEqualTo(1L);
+        }
+    }
     @Test
     void domainIsFrameworkIndependent() {
         // Each domain package may depend only on the JDK and itself. Allowing every "..domain.." package to see
         // every other would silently permit the control-plane domain to depend on the outbox domain.
         noClasses()
                 .that()
-                .resideInAPackage("..controlplane.domain..")
+                .resideInAPackage(CONTROL_PLANE_DOMAIN)
                 .should()
                 .dependOnClassesThat()
                 .resideOutsideOfPackages("java..", "com.kaas.api.controlplane.domain..")
                 .check(classes);
         noClasses()
                 .that()
-                .resideInAPackage("..outbox.domain..")
+                .resideInAPackage(OUTBOX_DOMAIN)
                 .should()
                 .dependOnClassesThat()
                 .resideOutsideOfPackages("java..", "com.kaas.api.outbox.domain..")
@@ -79,7 +127,7 @@ class ControlPlaneArchitectureTest {
                 .resideInAnyPackage("..controlplane.domain..", "..controlplane.application..", "..controlplane.api..")
                 .should()
                 .dependOnClassesThat()
-                .resideInAPackage("..outbox..")
+                .resideInAPackage(OUTBOX)
                 .check(classes);
     }
 
@@ -93,13 +141,13 @@ class ControlPlaneArchitectureTest {
                 .resideInAnyPackage("..controlplane..", "..outbox..")
                 .should()
                 .dependOnClassesThat()
-                .resideInAPackage("..consumer..")
+                .resideInAPackage(CONSUMER)
                 .allowEmptyShould(true)
                 .check(classes);
         // The consumer's own domain stays framework-free for the same reason every other domain does.
         noClasses()
                 .that()
-                .resideInAPackage("..consumer.domain..")
+                .resideInAPackage(CONSUMER_DOMAIN)
                 .should()
                 .dependOnClassesThat()
                 .resideOutsideOfPackages("java..", "com.kaas.api.consumer.domain..")
@@ -141,10 +189,10 @@ class ControlPlaneArchitectureTest {
     void apiDoesNotDependOnPersistenceAdapters() {
         noClasses()
                 .that()
-                .resideInAPackage("..controlplane.api..")
+                .resideInAPackage(CONTROL_PLANE_API)
                 .should()
                 .dependOnClassesThat()
-                .resideInAPackage("..infrastructure..")
+                .resideInAPackage(INFRASTRUCTURE)
                 .check(classes);
     }
 
@@ -152,7 +200,7 @@ class ControlPlaneArchitectureTest {
     void controlPlaneCannotDependOnExecutionBrokerStorageOrSecretProviders() {
         noClasses()
                 .that()
-                .resideInAPackage("..controlplane..")
+                .resideInAPackage(CONTROL_PLANE)
                 .should()
                 .dependOnClassesThat()
                 .resideInAnyPackage(
@@ -174,7 +222,7 @@ class ControlPlaneArchitectureTest {
     void controlPlaneCannotLaunchProcessesOrScheduleExecution() {
         noClasses()
                 .that()
-                .resideInAPackage("..controlplane..")
+                .resideInAPackage(CONTROL_PLANE)
                 .should()
                 .dependOnClassesThat()
                 .haveFullyQualifiedName("java.lang.ProcessBuilder")
@@ -244,10 +292,10 @@ class ControlPlaneArchitectureTest {
         // confused deputy this design exists to prevent.
         noClasses()
                 .that()
-                .resideInAPackage("..controlplane.api..")
+                .resideInAPackage(CONTROL_PLANE_API)
                 .should()
                 .dependOnClassesThat()
-                .resideInAPackage("..execution..")
+                .resideInAPackage(EXECUTION)
                 .allowEmptyShould(true)
                 .check(classes);
     }
@@ -258,7 +306,7 @@ class ControlPlaneArchitectureTest {
         // absent. If an SDK appears here, the envelope stops being the only thing that was built.
         noClasses()
                 .that()
-                .resideInAPackage("..execution.domain..")
+                .resideInAPackage(EXECUTION_DOMAIN)
                 .should()
                 .dependOnClassesThat()
                 .resideInAnyPackage(
