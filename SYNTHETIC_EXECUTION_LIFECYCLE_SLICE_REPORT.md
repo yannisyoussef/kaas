@@ -189,9 +189,81 @@ application code, then let the sandbox make the request normally.
 
 That cannot be made safe. The check and the connection are separated in time, so a zero-TTL record alternating
 between a public address and `169.254.169.254` passes validation and connects wherever it likes; and the
-sandbox retains a normal route, so nothing forces traffic through the check at all. Full treatment and the
-eight requirements in [ADR-025](docs/adr/025-execution-egress-remains-deny-all.md) and
-[the egress policy document](docs/security/execution-egress-policy.md).
+sandbox retains a normal route, so nothing forces traffic through the check at all.
+
+### The shape that can work
+
+The sandbox attaches to a Docker `--internal` network with no default route. A trusted proxy attaches to that
+network **and** to one that can reach targets. The sandbox cannot route around the proxy because there is no
+other route — a property of the topology, not of anything the workload agrees to.
+
+### What kaas-13 must satisfy before ALLOWLIST can be enforceable
+
+These are requirements, not suggestions. An implementation that does not meet **all** of them is not an
+allowlist, and each carries the test that decides whether it holds. Also recorded in
+[ADR-025](docs/adr/025-execution-egress-remains-deny-all.md) and
+[the egress policy document](docs/security/execution-egress-policy.md); they are stated here in full because
+this report is the artifact that has to be readable on its own.
+
+**1. Proxy bypass — the sandbox must have no second route.**
+No default route, no DNS resolver, no host networking, no secondary interface. The proxy is the only reachable
+peer. *Test:* with the proxy stopped, every outbound attempt from the sandbox fails. If anything succeeds there
+is a second route and the entire design is void — this test comes first because every other requirement assumes
+it.
+
+**2. DNS rebinding — the proxy resolves and connects in one step.**
+The sandbox must not resolve names. If the sandbox resolves and the proxy connects, or the proxy resolves
+twice, a name whose answer changes between lookups defeats the check. A zero-TTL record alternating between a
+public address and `169.254.169.254` passes any validation performed before connection. *Test:* a target whose
+DNS answer changes between check and connection is refused, driven by a real authoritative server serving the
+alternating answers — **not a mock**, because a mock proves only that the code handles the case somebody
+already thought of.
+
+**3. Private and reserved addresses — refused on the RESOLVED address, never the hostname.**
+Minimum denied set: RFC 1918, loopback, link-local `169.254.0.0/16` (and therefore every cloud metadata
+endpoint), unique-local IPv6, IPv4-mapped IPv6, `0.0.0.0/8`, carrier-grade NAT `100.64.0.0/10`, multicast, and
+broadcast. IPv6 must be handled explicitly or disabled outright — a v4-only check on a dual-stack host is not a
+check. *Test:* a hostname resolving to a private address is refused, including the **IPv4-mapped IPv6 form**,
+which is the case a naive implementation misses.
+
+**4. Redirects — every hop re-validated.**
+A redirect is a destination chosen by the target, not by the tenant. Each hop must be re-checked against the
+allowlist *and* against requirement 3, with a bounded hop count; the safest implementation does not follow
+redirects at all and returns them to the caller. *Test:* an allowed host redirecting to a denied host, and one
+redirecting to a private address, are both refused **at the redirect** rather than followed.
+
+**5. Assignment-scoped proxy authorization.**
+Proxy credentials bind to one run, one attempt, and one assignment epoch, and are revalidated against live
+state on every request — the same discipline the source capability already follows. A shared proxy credential
+means any sandbox can spend any other sandbox's allowlist, and a credential checked only at issuance means a
+fenced worker keeps its egress. *Test:* a fenced assignment's proxy credential is refused **mid-run**, not
+merely at issuance.
+
+**6. Network lifecycle tied to the sandbox's.**
+The proxy and its network start before the sandbox and are destroyed after it, on **every** path: normal
+completion, launch failure, deadline expiry, cancellation, infrastructure failure, and reconciler reclaim. A
+proxy outliving its sandbox is a standing egress gateway with nothing left to authorize it. The orphan
+reconciler must reclaim proxies and networks on the same age basis it reclaims sandboxes — by age, never by
+generation, for the reason ADR-022 records. *Test:* kill the runner mid-execution and assert the reconciler
+reclaims the container, the proxy, **and** the network.
+
+**7. Failure and reconciliation semantics defined before the happy path.**
+A proxy that will not start is an `INFRASTRUCTURE_FAILURE`, not a test failure — the run stops with no test
+outcome, through the endpoint this slice added. A proxy that dies mid-run must not restore connectivity, which
+the `--internal` network guarantees structurally rather than by detection. Egress denials must be attributable
+in the result document without leaking the resolved addresses of one tenant's internal infrastructure into logs
+another tenant's operator can read. *Test:* kill the proxy mid-run and assert the sandbox loses connectivity
+rather than gaining it.
+
+**8. The proxy image is repository-controlled and digest-pinned.**
+Same rules as the probe image: built from a repository-controlled context, pinned by digest, and declared as a
+Gradle task input so a change to it cannot leave the test task `UP-TO-DATE`. That last clause is not
+bookkeeping — it is the difference between a suite that re-runs when the proxy changes and one that reports
+green over a stale image.
+
+**Two mutations in this slice's battery are marked NOT APPLICABLE for exactly this reason** (§30, rows 07 and
+08): private-address rejection and redirect policy have nothing to mutate, because neither exists. They become
+applicable the day requirement 3 and requirement 4 land, and the battery should fail closed until they do.
 
 ## 17. Trusted synthetic workload
 
@@ -540,7 +612,11 @@ battery as above; no mutants left in the tree, verified by grep.
 
 ## 36. Exact blockers before Karate
 
-1. **Enforceable egress** — all eight requirements in ADR-025. Most suites are useless without it.
+1. **Enforceable egress** — all eight requirements enumerated in §16: no second route, DNS resolution and
+   connection in one step, private and reserved addresses refused on the resolved address, every redirect hop
+   re-validated, assignment-scoped proxy credentials revalidated per request, proxy and network lifecycle tied
+   to the sandbox on every failure path, failure semantics defined first, and a digest-pinned proxy image.
+   Most suites are useless without it.
 2. ~~Worker heartbeating~~ — **done in this slice.** A worker renews its lease for the whole of execution, and
    the lease reconciler can fence a lapsed one during any execution phase.
 3. **A stronger runtime** (gVisor or a microVM) with the hostile-execution gate re-run against it, per
