@@ -191,6 +191,11 @@ val produceSandboxSecurityAttestation = tasks.register<JavaExec>("produceSandbox
         systemProperty(
             "kaas.attestation.include-egress",
             providers.gradleProperty("kaasAttestationIncludeEgress").getOrElse("false"))
+        // Which sandbox runtime this host is being attested for. Defaults to the baseline, because that is
+        // what a deployment that has not been told otherwise is running.
+        systemProperty(
+            "kaas.attestation.sandbox-runtime",
+            providers.gradleProperty("kaasAttestationSandboxRuntime").getOrElse("docker"))
         systemProperty("kaas.attestation.probe-context", layout.projectDirectory.dir("src/main/docker/probe").asFile.absolutePath)
         systemProperty("kaas.attestation.proxy-image-context", proxyContext.get())
     }

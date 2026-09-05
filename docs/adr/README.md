@@ -25,6 +25,7 @@
 | [025](025-execution-egress-remains-deny-all.md) | Egress stays deny-all until it can be enforced, with the eight requirements an allowlist must satisfy | ACCEPTED; PARTIALLY SUPERSEDED by 026 |
 | [026](026-enforceable-assignment-scoped-execution-egress.md) | Enforceable assignment-scoped egress through a purpose-built trusted proxy the sandbox cannot route around | ACCEPTED; allowlist enforceable for synthetic execution |
 | [027](027-signed-runtime-security-attestations.md) | Sandbox security evidence is signed by the gate that observed it and verified against a pinned key, replacing a self-consistency digest an operator wrote | ACCEPTED; v3 required, v2 refused |
+| [028](028-mediated-sandbox-runtime.md) | The sandbox runs under a mediating runtime with no fallback to the baseline, and the mandatory control set is scoped to the runtime that produced the evidence | ACCEPTED; v4 required, v3 refused; ADR-022 stays open |
 
 Deferred topics without active decisions remain: concrete object-storage/upload adapter, secret **delivery**
 mechanism and a real secret provider, outbox and CREATED-run retention policy, self-service quarantine
@@ -56,5 +57,16 @@ it does **not** do is strengthen the sandbox boundary: a perfectly signed attest
 shared-kernel container is a trustworthy statement about a boundary ADR-022 still does not approve for
 hostile tenant code. Worker heartbeating during execution is a new
 deferral created by ADR-024 and a prerequisite for any run longer than a lease.
+
+ADR-028 changes the boundary ADR-027 signed evidence about. The sandbox runs under a mediating runtime —
+gVisor — with **no fallback to the baseline**, and requested-versus-enforced is separately observable: the
+daemon's reported runtime read back before the workload starts, and the guest kernel's own name observed from
+inside. `kaas.sandbox-security-attestation.v4` is required and v3 is refused as v2 was. The mandatory control
+set is now **scoped to the security profile version**, because the two runtimes do not make the same controls
+observable: the mediating one cannot demonstrate `NO_NEW_PRIVILEGES` at all and gains
+`HOST_KERNEL_SYSCALL_MEDIATION`, and `NO_SETUID_BINARIES` is required of both. It therefore carries one fewer
+demonstrable mandatory control than the baseline, which is recorded as a finding rather than a footnote.
+**ADR-022 stays open**: a stronger runtime starting is not the same as hostile tenant content being safe to
+run, and tenant execution remains unavailable.
 
 `IMPLEMENTED` means verified by repository code or tooling. `PROPOSED` means design intent only. `DEFERRED` means no decision is active and implementation must not assume one.

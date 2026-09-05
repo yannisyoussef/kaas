@@ -1,6 +1,7 @@
 # Signed runtime security attestation
 
-**Status: IMPLEMENTED and VALIDATED.** Schema `kaas.sandbox-security-attestation.v3` is required. The
+**Status: IMPLEMENTED and VALIDATED.** Schema `kaas.sandbox-security-attestation.v4` is required, and v3
+is refused exactly as v2 is. The
 unsigned v2 document is refused and its model is deleted from the source tree.
 
 ## What a signature here does and does not mean
@@ -22,7 +23,8 @@ Three sentences, because every failure of a design like this comes from blurring
 ```
   REAL RUNTIME (a runner host, or a CI runner)
         │
-        ├── HostileExecutionSecurityGate ──► 16 mandatory control observations
+        ├── HostileExecutionSecurityGate ──► 17 mandatory control observations
+        │                                    (the set is SCOPED TO THE RUNTIME: see ADR-028)
         └── EgressEnforcementGate ─────────► 5 egress control observations + the proxy image it used
                         │
                         ▼
@@ -41,7 +43,7 @@ Three sentences, because every failure of a design like this comes from blurring
                         ▼
         SandboxSecurityAttestationVerifier          apps/api
           1. strict parse                  ─┐
-          2. schema is v3                   │  a document that fails any of these
+          2. schema is v4                   │  a document that fails any of these
           3. exact property set             │  is refused with a CATEGORY and nothing
           4. algorithm is exactly ED25519   │  drawn from its contents — it is not yet
           5. resolve ONE key by keyId       │  authenticated, so quoting it would repeat
@@ -117,7 +119,8 @@ on configuration.
 | No verification key configured | execution authorization unavailable; **the application still starts** |
 | Malformed key configuration | same — a bad signing key must not take down read-only endpoints |
 | No attestation configured | `ABSENT` → no execution |
-| Not a v3 document | `UNSUPPORTED_SCHEMA` → no execution, no unsigned fallback |
+| Not a v4 document | `UNSUPPORTED_SCHEMA` → no execution, no unsigned fallback, and v3 is refused as v2 is |
+| Profile version and `sandboxRuntime` disagree | `RUNTIME_MISMATCH` → the document contradicts itself about which boundary produced it, and no reading of it is the truth |
 | Unknown `keyId` | `UNKNOWN_KEY` → no execution |
 | Edited payload | `DIGEST_MISMATCH` → no execution |
 | Wrong signature | `INVALID_SIGNATURE` → no execution |

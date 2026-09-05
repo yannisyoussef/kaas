@@ -1,6 +1,6 @@
 # Signed sandbox security attestation
 
-**Status: IMPLEMENTED and VALIDATED.** `kaas.sandbox-security-attestation.v3`, signed with Ed25519 and
+**Status: IMPLEMENTED and VALIDATED.** `kaas.sandbox-security-attestation.v4`, signed with Ed25519 and
 verified against a deployment-pinned public key. v2 is refused and its model is deleted.
 
 ## The shape of it
@@ -11,7 +11,8 @@ verified against a deployment-pinned public key. v2 is refused and its model is 
         ┌─────────────────┴─────────────────┐
         │                                   │
   Hostile gate                        Egress gate
-  16 mandatory observations           5 egress observations
+  17 mandatory observations           5 egress observations
+  (scoped to the runtime, ADR-028)
                                       + the proxy image it used
         └─────────────────┬─────────────────┘
                           │  structured results, never text
@@ -108,7 +109,7 @@ signature is outside because a payload cannot contain its own signature at all.
 ## The order the verifier works in
 
 ```
-strict parse ─► schema is v3 ─► exact properties ─► algorithm is ED25519
+strict parse ─► schema is v4 ─► exact properties ─► algorithm is ED25519
       │
       ▼
 resolve EXACTLY ONE key by keyId ──► unknown? refuse. never try the others.

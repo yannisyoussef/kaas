@@ -10,6 +10,7 @@ import com.kaas.runner.gate.HostileExecutionAssessment;
 import com.kaas.runner.gate.HostileExecutionSecurityGate;
 import com.kaas.runner.sandbox.DockerSandboxLauncher;
 import com.kaas.runner.sandbox.ProbeImage;
+import com.kaas.runner.sandbox.ExecutionRuntimeType;
 import com.kaas.runner.sandbox.SandboxSecurityProfile;
 import java.io.PrintStream;
 import java.nio.file.Files;
@@ -54,6 +55,7 @@ public final class SandboxSecurityAttestationCli {
             String keyId,
             Path privateKeyFile,
             String runtimeSubject,
+            ExecutionRuntimeType sandboxRuntime,
             Path output,
             boolean includeEgressEvidence,
             Path probeContext,
@@ -85,7 +87,14 @@ public final class SandboxSecurityAttestationCli {
         String generation = "attestation-" + UUID.randomUUID();
 
         String probeImage = ProbeImage.build(docker, options.probeContext());
-        SandboxSecurityProfile profile = SandboxSecurityProfile.version1(probeImage);
+        // The runtime the OPERATOR names, not a hardcoded one.
+        //
+        // This defaulted to the baseline, which meant a deployment running the mediating runtime had no way
+        // to produce evidence for it: the control plane could be configured to expect
+        // kaas.sandbox.gvisor.v1 and nothing in the product could sign such a document. The mediating path
+        // was reachable only from tests -- which is the same as not being reachable.
+        SandboxSecurityProfile profile =
+                SandboxSecurityProfile.version1(probeImage, options.sandboxRuntime());
         HostileExecutionAssessment mandatory =
                 new HostileExecutionSecurityGate(
                                 new DockerSandboxLauncher(docker, profile, generation), "docker")
@@ -170,11 +179,37 @@ public final class SandboxSecurityAttestationCli {
                 required(properties, "kaas.attestation.key-id"),
                 Path.of(required(properties, "kaas.attestation.private-key-file")),
                 required(properties, "kaas.attestation.runtime-subject"),
+                sandboxRuntimeFrom(properties),
                 Path.of(required(properties, "kaas.attestation.output")),
                 Boolean.parseBoolean(properties.getProperty("kaas.attestation.include-egress", "false")),
                 Path.of(properties.getProperty("kaas.attestation.probe-context",
                         "services/runner/src/main/docker/probe")),
                 Path.of(properties.getProperty("kaas.attestation.proxy-image-context", "")));
+    }
+
+    /**
+     * Which sandbox runtime this host will be attested for.
+     *
+     * <p>Chosen from a closed set by name, never by {@code valueOf} over whatever was supplied. The enum's
+     * constant names are an implementation detail; the accepted spellings are the two written here, and
+     * anything else is refused rather than resolved. A property that could name an arbitrary runtime would be
+     * a property that names a program the daemon executes.
+     *
+     * <p>Defaults to the baseline, because that is what a deployment that has not been told otherwise is
+     * running — and an attestation is a statement about a host rather than an aspiration for one. It does
+     * not default to the stronger value: an operator who has not installed the mediating runtime would then
+     * produce evidence naming a boundary this host does not have, and the gate would refuse it with a
+     * confusing message instead of the operator getting the truthful one.
+     */
+    static ExecutionRuntimeType sandboxRuntimeFrom(java.util.Properties properties) {
+        String named = properties.getProperty("kaas.attestation.sandbox-runtime", "docker").trim();
+        return switch (named.toLowerCase(java.util.Locale.ROOT)) {
+            case "docker" -> ExecutionRuntimeType.DOCKER;
+            case "gvisor" -> ExecutionRuntimeType.GVISOR;
+            default -> throw new AttestationProductionFailed(
+                    AttestationFailure.ASSESSMENT_INCOMPLETE,
+                    "kaas.attestation.sandbox-runtime must be 'docker' or 'gvisor'.");
+        };
     }
 
     private static String required(java.util.Properties properties, String name) {
