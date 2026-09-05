@@ -329,26 +329,70 @@ class ExecutionAuthorizationTests {
 
     @Test
     @Timeout(120)
-    void anUnenforceableNetworkPolicyIsRefusedRatherThanDowngraded() throws Exception {
+    void anAllowlistIsRefusedWhenTheDeploymentCannotEnforceIt() throws Exception {
         UUID runId = claimedRun();
-        // The seeded DENY_ALL revision is the only one the launcher can prove. Retyping it to something no
-        // launcher enforces must refuse rather than silently fall back to something weaker.
+        // A REALISTIC allowlist: tenant-owned, carrying a destination, with a digest that matches its own
+        // content, and pinned by the run's snapshot. Every one of those matters. An allowlist with no
+        // destination permits nothing and the domain model refuses to construct one; an unowned one violates
+        // the schema; a mismatched digest would be refused by the tamper check instead, and the test would
+        // pass for a reason that has nothing to do with enforceability.
+        UUID policyId = UUID.randomUUID();
         jdbc.update("alter table network_policy_revisions disable trigger all");
+        jdbc.update("alter table network_policy_destinations disable trigger all");
+        jdbc.update("alter table run_snapshots disable trigger all");
         try {
-            // The digest is moved with the type, so the row stays internally consistent. Mutation testing caught
-            // this: retyping alone also broke the digest, so the digest check refused it and the enforceability
-            // check was never the reason. A test that passes for the wrong reason proves the wrong thing.
+            Map<String, Object> scope = jdbc.queryForMap(
+                    "select organization_id, project_id from test_runs where run_id = ?", runId);
             jdbc.update(
-                    "update network_policy_revisions set policy_type = 'ALLOWLIST', canonical_digest = ?"
-                            + " where policy_type = 'DENY_ALL'",
-                    "sha256:d2f983dc36af6c4b119157ce8a0ce3e9e8f39c5820e24867d57f62b4d672378c");
+                    "insert into network_policy_revisions (policy_revision_id, policy_type, policy_version,"
+                            + " canonical_digest, created_by, created_at, organization_id, project_id)"
+                            + " values (?, 'ALLOWLIST', 1, ?, 'kaas.platform', now(), ?, ?)",
+                    policyId,
+                    "sha256:27f6c7bbe9d9e3b45c6b46d7f68f44322699effb9c6d1c5a21ca4132e5ab8472",
+                    scope.get("organization_id"),
+                    scope.get("project_id"));
+            jdbc.update(
+                    "insert into network_policy_destinations (policy_revision_id, host, port, scheme)"
+                            + " values (?, 'api.example.com', 443, 'HTTPS')",
+                    policyId);
+            jdbc.update(
+                    "update run_snapshots set network_policy_revision_id = ? where run_id = ?", policyId, runId);
+
+            // The mechanism exists in this build — ALLOWLIST is an enforceable type now — and this deployment
+            // still cannot run it, because its assessment carries no egress controls. That is the fail-closed
+            // reading of absent evidence, and it must be a REFUSAL rather than a downgrade: a run that
+            // appeared to have egress control nothing was applying would be worse than one that has none.
             assertThat(authorizations.authorize(runId, attemptId(runId), 1, WORKER).denial())
                     .contains(ExecutionDenial.NETWORK_POLICY_NOT_ENFORCEABLE);
         } finally {
-            jdbc.update(
-                    "update network_policy_revisions set policy_type = 'DENY_ALL', canonical_digest = ?"
-                            + " where policy_type = 'ALLOWLIST'",
-                    "sha256:90bc5fe597d868eb21bc933950f31f10f4ea1f528e9e96a8eabdc7bd73a02450");
+            jdbc.update("update run_snapshots set network_policy_revision_id = ? where run_id = ?",
+                    UUID.fromString("00000000-0000-4000-8000-00000000d001"), runId);
+            jdbc.update("delete from network_policy_destinations where policy_revision_id = ?", policyId);
+            jdbc.update("delete from network_policy_revisions where policy_revision_id = ?", policyId);
+            jdbc.update("alter table run_snapshots enable trigger all");
+            jdbc.update("alter table network_policy_destinations enable trigger all");
+            jdbc.update("alter table network_policy_revisions enable trigger all");
+        }
+    }
+
+    @Test
+    void aPolicyWhoseDigestDoesNotMatchItsContentIsRefused() throws Exception {
+        UUID runId = claimedRun();
+        // The other half of the policy check, isolated. Retyping the seeded row alone also breaks its digest,
+        // so a single test covering both would pass on whichever check ran first — mutation testing caught
+        // exactly that in the previous slice. Here the type is untouched and only the digest is wrong.
+        jdbc.update("alter table network_policy_revisions disable trigger all");
+        try {
+            jdbc.update("update network_policy_revisions set canonical_digest = ? where policy_revision_id = ?",
+                    "sha256:" + "e".repeat(64),
+                    UUID.fromString("00000000-0000-4000-8000-00000000d001"));
+
+            assertThat(authorizations.authorize(runId, attemptId(runId), 1, WORKER).denial())
+                    .contains(ExecutionDenial.NETWORK_POLICY_NOT_ENFORCEABLE);
+        } finally {
+            jdbc.update("update network_policy_revisions set canonical_digest = ? where policy_revision_id = ?",
+                    "sha256:3944c369d57700eb13ce96b492fbac7ea9443a61faa8985a01e2394ab40e0de6",
+                    UUID.fromString("00000000-0000-4000-8000-00000000d001"));
             jdbc.update("alter table network_policy_revisions enable trigger all");
         }
     }
@@ -367,7 +411,7 @@ class ExecutionAuthorizationTests {
         } finally {
             jdbc.update(
                     "update network_policy_revisions set canonical_digest = ?",
-                    "sha256:90bc5fe597d868eb21bc933950f31f10f4ea1f528e9e96a8eabdc7bd73a02450");
+                    "sha256:3944c369d57700eb13ce96b492fbac7ea9443a61faa8985a01e2394ab40e0de6");
             jdbc.update("alter table network_policy_revisions enable trigger all");
         }
     }
@@ -1110,13 +1154,24 @@ class ExecutionAuthorizationTests {
     }
 
     private static String validAttestation(Instant assessedAt) {
+        return validAttestation(assessedAt, Map.of());
+    }
+
+    /**
+     * An attestation document, optionally carrying egress controls.
+     *
+     * <p>Egress controls are absent by default, which is what an assessment produced by a deployment that
+     * cannot enforce an allowlist looks like — and what every test that is not about egress should be using,
+     * because it is the state that must keep refusing ALLOWLIST.
+     */
+    private static String validAttestation(Instant assessedAt, Map<String, String> egress) {
         Map<String, String> controls = new java.util.TreeMap<>();
         SandboxSecurityAttestation.REQUIRED_MANDATORY_CONTROLS.forEach(control -> controls.put(control, "PASS"));
         String probe = "sha256:" + "a".repeat(64);
         Instant truncated = assessedAt.truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
         var draft = new SandboxSecurityAttestation(
                 SandboxSecurityAttestation.SCHEMA_VERSION,
-                "kaas.sandbox.v1", probe, "docker", truncated, controls, "");
+                "kaas.sandbox.v1", probe, "docker", truncated, controls, egress, "");
         StringBuilder json = new StringBuilder("{\"schemaVersion\":\"")
                 .append(SandboxSecurityAttestation.SCHEMA_VERSION)
                 .append("\",\"securityProfileVersion\":\"kaas.sandbox.v1\",\"probeImageDigest\":\"")
@@ -1124,11 +1179,18 @@ class ExecutionAuthorizationTests {
                 .append("\",\"runtime\":\"docker\",\"assessedAt\":\"")
                 .append(truncated)
                 .append("\",\"mandatoryControls\":{");
-        String body = controls.entrySet().stream()
+        json.append(asJsonBody(controls)).append("}");
+        if (!egress.isEmpty()) {
+            json.append(",\"egressControls\":{").append(asJsonBody(new java.util.TreeMap<>(egress))).append("}");
+        }
+        return json.append(",\"digest\":\"").append(draft.expectedDigest()).append("\"}").toString();
+    }
+
+    private static String asJsonBody(Map<String, String> entries) {
+        return entries.entrySet().stream()
                 .map(entry -> "\"" + entry.getKey() + "\":\"" + entry.getValue() + "\"")
                 .reduce((left, right) -> left + "," + right)
                 .orElseThrow();
-        return json.append(body).append("},\"digest\":\"").append(draft.expectedDigest()).append("\"}").toString();
     }
 
     private HttpResponse<String> postInternal(String path, String bearer, String body) throws Exception {

@@ -49,6 +49,16 @@ public class SecurityConfiguration {
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(authorize -> authorize
+                        // The egress proxy gets its own authority and only its own.
+                        //
+                        // It is the one platform component deliberately reachable from an untrusted sandbox,
+                        // which makes it the one whose credential is most likely to be taken. The general
+                        // service authority can advance phases, submit results, and mint execution
+                        // authorizations for any run in any tenant — so handing the proxy that authority
+                        // would mean a proxy compromise could drive the control plane. It needs to ask one
+                        // question, so it can ask one question.
+                        .requestMatchers(EGRESS_PATH)
+                        .hasAuthority(EGRESS_AUTHORITY)
                         .anyRequest()
                         .hasAuthority(SERVICE_AUTHORITY))
                 .oauth2ResourceServer(oauth -> oauth
@@ -75,6 +85,14 @@ public class SecurityConfiguration {
 
     static final String SERVICE_AUTHORITY = "ROLE_KAAS_SERVICE";
 
+    /** What the egress proxy is allowed to do, which is exactly one thing. */
+    static final String EGRESS_AUTHORITY = "ROLE_KAAS_EGRESS";
+
+    /** The subject that receives {@link #EGRESS_AUTHORITY}, and the only one that does. */
+    static final String EGRESS_SUBJECT = "kaas.egress-proxy";
+
+    static final String EGRESS_PATH = "/internal/v1/egress/**";
+
     /**
      * Authenticates a platform service.
      *
@@ -94,7 +112,11 @@ public class SecurityConfiguration {
                 || jwt.getExpiresAt() == null) {
             throw invalidClaims();
         }
-        return new JwtAuthenticationToken(jwt, List.of(new SimpleGrantedAuthority(SERVICE_AUTHORITY)), subject);
+        // One authority or the other, never both. Granting the proxy the service authority as well "so it
+        // still works" would undo the whole point of separating them, and granting the general services the
+        // egress authority would let any of them answer for the proxy.
+        String authority = EGRESS_SUBJECT.equals(subject) ? EGRESS_AUTHORITY : SERVICE_AUTHORITY;
+        return new JwtAuthenticationToken(jwt, List.of(new SimpleGrantedAuthority(authority)), subject);
     }
 
     @Bean

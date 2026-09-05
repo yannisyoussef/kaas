@@ -20,12 +20,13 @@ public record NetworkPolicyRevision(
         UUID policyRevisionId,
         NetworkPolicyType policyType,
         int policyVersion,
+        java.util.List<EgressDestination> destinations,
         String canonicalDigest,
         String createdBy,
         Instant createdAt) {
 
     /** The canonicalization this digest is taken over. Versioned, so a later form is a different digest. */
-    private static final String FORMAT = "kaas.network-policy.v1";
+    private static final String FORMAT = "kaas.network-policy.v2";
 
     /**
      * The only policy revision that exists.
@@ -34,6 +35,26 @@ public record NetworkPolicyRevision(
      * identity varied by deployment could not be compared across an audit trail, and one the application
      * created lazily would be one the application could create differently.
      */
+    /**
+     * Whether this policy permits one destination.
+     *
+     * <p>Byte equality on the canonical form, over the whole list. Never a suffix test, never a prefix test,
+     * never a wildcard expansion: those are the operations that make an allowlist match something its author
+     * did not write down, and the grammar deliberately contains nothing they could usefully be applied to.
+     *
+     * <p>A DENY_ALL has no destinations, so this is false for every input without needing a special case —
+     * which is better than a special case, because a special case is a branch that can be got wrong.
+     */
+    public boolean permits(EgressDestination destination) {
+        String wanted = destination.canonical();
+        for (EgressDestination allowed : destinations) {
+            if (allowed.canonical().equals(wanted)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static final UUID DENY_ALL_ID = UUID.fromString("00000000-0000-4000-8000-00000000d001");
 
     public static final String PLATFORM_ACTOR = "kaas.platform";
@@ -48,6 +69,20 @@ public record NetworkPolicyRevision(
         if (createdBy == null || !createdBy.startsWith("kaas.")) {
             throw new IllegalArgumentException("Network policy revisions are platform-authored.");
         }
+        destinations = destinations == null ? java.util.List.of() : java.util.List.copyOf(destinations);
+        if (policyType == NetworkPolicyType.DENY_ALL && !destinations.isEmpty()) {
+            // DENY_ALL means no network at all. A DENY_ALL carrying destinations would be a policy whose name
+            // and content disagree, and the disagreement would be invisible to anything reading only the type.
+            throw new IllegalArgumentException("A DENY_ALL policy names no destinations.");
+        }
+        if (policyType == NetworkPolicyType.ALLOWLIST && destinations.isEmpty()) {
+            // An empty allowlist permits nothing, which is DENY_ALL wearing a name that suggests otherwise.
+            // Refusing it keeps the two policies distinguishable by their type alone.
+            throw new IllegalArgumentException("An ALLOWLIST policy names at least one destination.");
+        }
+        if (destinations.size() != destinations.stream().map(EgressDestination::canonical).distinct().count()) {
+            throw new IllegalArgumentException("An allowlist names each destination once.");
+        }
     }
 
     /**
@@ -61,7 +96,8 @@ public record NetworkPolicyRevision(
      * same byte sequence as a different combination. Concatenation without that is how {@code ("ab", "c")} and
      * {@code ("a", "bc")} come to share a digest.
      */
-    public static String digestOf(NetworkPolicyType policyType, int policyVersion) {
+    public static String digestOf(
+            NetworkPolicyType policyType, int policyVersion, java.util.List<EgressDestination> destinations) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             update(digest, FORMAT);
@@ -69,6 +105,23 @@ public record NetworkPolicyRevision(
             update(digest, policyType.name());
             update(digest, "POLICY_VERSION");
             update(digest, Integer.toString(policyVersion));
+            // Destinations are covered ALWAYS, including the count when there are none.
+            //
+            // One canonical form rather than a shape that varies by policy type. A conditional encoding would
+            // have left the pre-existing DENY_ALL digest untouched, which is convenient and is exactly the kind
+            // of special case that later lets a field go uncovered — a DENY_ALL that somehow acquired
+            // destinations would have had them excluded from its own digest.
+            //
+            // Sorted, so two policies listing the same destinations in different orders are the same policy.
+            update(digest, "DESTINATION_COUNT");
+            update(digest, Integer.toString(destinations.size()));
+            destinations.stream()
+                    .map(EgressDestination::canonical)
+                    .sorted()
+                    .forEach(canonical -> {
+                        update(digest, "DESTINATION");
+                        update(digest, canonical);
+                    });
             return "sha256:" + HexFormat.of().formatHex(digest.digest());
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException("SHA-256 is unavailable", impossible);
@@ -77,7 +130,7 @@ public record NetworkPolicyRevision(
 
     /** Whether the digest recorded for this revision still matches its content. */
     public boolean digestMatchesContent() {
-        return digestOf(policyType, policyVersion).equals(canonicalDigest);
+        return digestOf(policyType, policyVersion, destinations).equals(canonicalDigest);
     }
 
     private static void update(MessageDigest digest, String value) {

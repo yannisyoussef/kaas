@@ -52,11 +52,23 @@ public record SandboxSecurityProfile(
         droppedCapabilities = List.copyOf(droppedCapabilities);
         addedCapabilities = List.copyOf(addedCapabilities);
         environment = Map.copyOf(environment);
-        if (!"none".equals(networkMode)) {
-            // Deny-all is the baseline this slice is proving. A destination allowlist is a real product
-            // requirement and gets its own policy model; approximating one here would mean claiming egress
-            // control that has never been tested.
-            throw new IllegalArgumentException("The synthetic sandbox has no network.");
+        // EXACTLY TWO SHAPES, and everything else is refused.
+        //
+        //   "none"          no network at all — the DENY_ALL baseline
+        //   "kaas-exec-..." one per-execution INTERNAL network created by this launcher
+        //
+        // The second exists so an allowlist can be enforced by topology: the sandbox's only reachable peer is
+        // the proxy on that network. It is deliberately not "any network name the caller supplies" — that
+        // string is the whole of the isolation, and accepting an arbitrary one would let a request place an
+        // untrusted container on the bridge, the host network, or another execution's network.
+        //
+        // "host" and "bridge" are refused by this rule rather than by a denylist, because a denylist of unsafe
+        // network names is a list that stops being complete.
+        boolean denyAll = "none".equals(networkMode);
+        boolean perExecution = networkMode != null && networkMode.startsWith(ExecutionNetwork.NAME_PREFIX);
+        if (!denyAll && !perExecution) {
+            throw new IllegalArgumentException(
+                    "A sandbox runs with no network or on one per-execution internal network.");
         }
         if (!addedCapabilities.isEmpty()) {
             throw new IllegalArgumentException("No capability is added back without a concrete requirement.");
@@ -99,6 +111,16 @@ public record SandboxSecurityProfile(
      * through whatever the daemon happens to hold at the time.
      */
     private static boolean isContentAddressed(String imageReference) {
+        return isContentAddressedReference(imageReference);
+    }
+
+    /**
+     * The same rule, reachable by the egress proxy's profile.
+     *
+     * <p>Shared rather than reimplemented: two copies of "what counts as a content address" is two chances to
+     * get it wrong, and the one that is wrong is the one that accepts a tag.
+     */
+    public static boolean isContentAddressedReference(String imageReference) {
         String digest = imageReference.contains("@sha256:")
                 ? imageReference.substring(imageReference.indexOf("@sha256:") + "@sha256:".length())
                 : imageReference.startsWith("sha256:")
@@ -112,6 +134,81 @@ public record SandboxSecurityProfile(
      *
      * @param imageReference the digest-pinned probe image; a tag would be a mutable pointer to executable code
      */
+    /**
+     * The same profile, attached to one per-execution internal network instead of no network at all.
+     *
+     * <p>Every other control is identical — same user, same dropped capabilities, same read-only root, same
+     * ceilings. Only the network differs, and it differs to a network whose sole reachable peer is the trusted
+     * proxy. Deriving it from {@link #version1} rather than restating the fields is deliberate: a second full
+     * constructor call is a second place for a control to be quietly weakened, and the two would drift.
+     *
+     * <p>The version string changes with it, because the attestation binds a profile version and a sandbox on a
+     * network is not the same security posture as one with no network. Reusing {@code kaas.sandbox.v1} here
+     * would let an attestation gathered against an airgapped sandbox vouch for a networked one.
+     */
+    public static SandboxSecurityProfile version1OnNetwork(String imageReference, String networkName) {
+        return version1OnNetwork(imageReference, networkName, Map.of());
+    }
+
+    /**
+     * What a base profile is called once a sandbox running under it is on a network.
+     *
+     * <p>Derived rather than written down twice, and public because the execution loop has to check the
+     * relationship rather than assume it. A command is authorized under the base profile the deployment's
+     * attestation names; an ALLOWLIST execution then runs under the networked derivative of <em>that</em>
+     * profile, and the loop refuses if what the launcher holds is not the derivative of what the command
+     * authorized. Without that check, a launcher configured against some other profile entirely would run the
+     * execution anyway and the evidence would name a policy that did not produce it.
+     */
+    public static String networkedVersionOf(String baseVersion) {
+        return baseVersion + NETWORKED_SUFFIX;
+    }
+
+    /** What distinguishes the networked derivative from its base. One place, so the two cannot drift. */
+    private static final String NETWORKED_SUFFIX = "-internal";
+
+    /**
+     * The networked profile, with the egress material the workload needs to reach its proxy.
+     *
+     * <p>The extra environment is <em>added to</em> the base profile's own allowlist rather than replacing it,
+     * so nothing here can remove PATH or the sandbox marker, and it is a map the launcher builds from the
+     * execution's policy — never anything a tenant wrote.
+     *
+     * <p>The capability token travels here, in the sandbox's environment, and that is deliberate. Anything
+     * delivered into a sandbox must be assumed readable by whatever runs there, so the credential's protection
+     * is not secrecy from the workload but the narrowness of what it authorizes: one execution, one assignment
+     * epoch, one policy, briefly. It is kept out of labels, digests, and durable stores for the different
+     * reason that those outlive the execution and are readable by things that are not it.
+     */
+    public static SandboxSecurityProfile version1OnNetwork(
+            String imageReference, String networkName, Map<String, String> egressEnvironment) {
+        SandboxSecurityProfile base = version1(imageReference);
+        if (networkName == null || !networkName.startsWith(ExecutionNetwork.NAME_PREFIX)) {
+            throw new IllegalArgumentException("A networked sandbox joins a per-execution internal network.");
+        }
+        Map<String, String> environment = new java.util.HashMap<>(base.environment());
+        environment.putAll(egressEnvironment);
+        return new SandboxSecurityProfile(
+                networkedVersionOf(base.version()),
+                base.imageReference(),
+                base.runAsUser(),
+                base.readOnlyRootFilesystem(),
+                base.noNewPrivileges(),
+                base.droppedCapabilities(),
+                base.addedCapabilities(),
+                networkName,
+                base.memoryLimitBytes(),
+                base.memorySwapLimitBytes(),
+                base.cpuQuotaMicroseconds(),
+                base.cpuPeriodMicroseconds(),
+                base.pidsLimit(),
+                base.temporaryFilesystemBytes(),
+                base.wallClockTimeout(),
+                base.maximumOutputBytes(),
+                base.maximumLogBytes(),
+                Map.copyOf(environment));
+    }
+
     public static SandboxSecurityProfile version1(String imageReference) {
         return new SandboxSecurityProfile(
                 "kaas.sandbox.v1",

@@ -216,11 +216,15 @@ class ExecutionSecurityGateDependencyTests {
         Map<String, String> controls = new TreeMap<>();
         SandboxSecurityAttestation.REQUIRED_MANDATORY_CONTROLS.forEach(control -> controls.put(control, "PASS"));
         controls.putAll(overrides);
+        // No egress controls. Every test in this class is about the mandatory sandbox boundary, and an
+        // assessment that makes no egress claim is the correct shape for one — it is also the shape that must
+        // keep ALLOWLIST refused.
+        Map<String, String> egress = Map.of();
         String probe = "sha256:" + "a".repeat(64);
         Instant truncated = assessedAt.truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
         var draft = new SandboxSecurityAttestation(
                 SandboxSecurityAttestation.SCHEMA_VERSION,
-                "kaas.sandbox.v1", probe, "docker", truncated, controls, "");
+                "kaas.sandbox.v1", probe, "docker", truncated, controls, egress, "");
         String body = controls.entrySet().stream()
                 .map(entry -> "\"" + entry.getKey() + "\":\"" + entry.getValue() + "\"")
                 .reduce((left, right) -> left + "," + right)

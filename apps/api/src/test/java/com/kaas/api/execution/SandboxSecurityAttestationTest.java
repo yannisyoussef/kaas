@@ -7,6 +7,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -117,6 +118,7 @@ class SandboxSecurityAttestationTest {
                 "docker",
                 now.minusSeconds(60),
                 tamperedControls,
+                Map.of(),
                 // Keeps the digest of a document that said something else.
                 "sha256:" + "b".repeat(64));
 
@@ -135,6 +137,7 @@ class SandboxSecurityAttestationTest {
                 "docker",
                 now.minusSeconds(60),
                 allPassing(),
+                Map.of(),
                 "sha256:" + "c".repeat(64));
 
         assertThat(tagged.reasonItCannotBeTrusted(now, MAX_AGE, PROFILE))
@@ -145,12 +148,16 @@ class SandboxSecurityAttestationTest {
     void aDifferentSchemaVersionIsRefused() {
         Instant now = Instant.parse("2026-08-29T12:00:00Z");
         var future = new SandboxSecurityAttestation(
-                "kaas.sandbox-security-attestation.v2",
+                // A version this build does not know. Bumped past v2 when the egress controls made v2 the
+                // current schema: leaving it would have turned a test about refusing an unknown schema into a
+                // test that accidentally used the current one.
+                "kaas.sandbox-security-attestation.v3",
                 PROFILE,
                 PROBE,
                 "docker",
                 now.minusSeconds(60),
                 allPassing(),
+                Map.of(),
                 "sha256:" + "d".repeat(64));
 
         assertThat(future.reasonItCannotBeTrusted(now, MAX_AGE, PROFILE)).hasValueSatisfying(reason -> assertThat(reason).contains("schema version"));
@@ -178,7 +185,8 @@ class SandboxSecurityAttestationTest {
     /** Builds an attestation whose digest genuinely describes its own content. */
     private static SandboxSecurityAttestation attestation(Instant assessedAt, Map<String, String> controls) {
         var draft = new SandboxSecurityAttestation(
-                SandboxSecurityAttestation.SCHEMA_VERSION, PROFILE, PROBE, "docker", assessedAt, controls, "");
+                SandboxSecurityAttestation.SCHEMA_VERSION, PROFILE, PROBE, "docker", assessedAt, controls,
+                Map.of(), "");
         return new SandboxSecurityAttestation(
                 draft.schemaVersion(),
                 draft.securityProfileVersion(),
@@ -186,6 +194,7 @@ class SandboxSecurityAttestationTest {
                 draft.runtime(),
                 draft.assessedAt(),
                 draft.mandatoryControls(),
+                draft.egressControls(),
                 draft.expectedDigest());
     }
 
@@ -193,5 +202,128 @@ class SandboxSecurityAttestationTest {
         Map<String, String> controls = new LinkedHashMap<>();
         SandboxSecurityAttestation.REQUIRED_MANDATORY_CONTROLS.forEach(control -> controls.put(control, "PASS"));
         return controls;
+    }
+    @Test
+    @DisplayName("an assessment making no egress claim cannot enforce an allowlist")
+    void anAbsentEgressClaimIsARefusal() {
+        // The most important case, because it is the one every existing deployment is in. Absent evidence is
+        // not neutral: read as a pass it would authorize allowlist executions on hosts that have never
+        // demonstrated they can isolate anything.
+        assertThat(attestation(Instant.now().minusSeconds(60), allPassing()).reasonEgressCannotBeEnforced())
+                .hasValueSatisfying(reason -> assertThat(reason).contains("exactly the required egress controls"));
+    }
+
+    @Test
+    @DisplayName("an assessment covering exactly the egress controls, all passing, can enforce an allowlist")
+    void aCompletePassingEgressClaimIsAccepted() {
+        assertThat(withEgress(allEgressPassing()).reasonEgressCannotBeEnforced()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a partial egress claim is refused, so a failing control cannot be omitted")
+    void aPartialEgressClaimIsRefused() {
+        Map<String, String> partial = allEgressPassing();
+        partial.remove(partial.keySet().iterator().next());
+
+        // Containment would let a truncated assessment pass by leaving out the control it failed, which is
+        // the shortest path from "this host cannot isolate a sandbox" to "this host may run tenant egress".
+        assertThat(withEgress(partial).reasonEgressCannotBeEnforced()).isPresent();
+    }
+
+    @Test
+    @DisplayName("an egress claim carrying an unknown control is refused")
+    void anUnknownEgressControlIsRefused() {
+        Map<String, String> extra = allEgressPassing();
+        extra.put("EGRESS_SOMETHING_ELSE", "PASS");
+
+        // Exact equality in both directions. Accepting a superset would let this build trust an assessment
+        // produced for a different, possibly weaker, set of controls.
+        assertThat(withEgress(extra).reasonEgressCannotBeEnforced()).isPresent();
+    }
+
+    @Test
+    @DisplayName("one failing egress control refuses the whole claim, and says which")
+    void aFailingEgressControlIsNamed() {
+        Map<String, String> failing = allEgressPassing();
+        failing.put("EGRESS_NO_DIRECT_ROUTE", "FAIL");
+
+        assertThat(withEgress(failing).reasonEgressCannotBeEnforced())
+                .hasValueSatisfying(reason -> assertThat(reason).contains("EGRESS_NO_DIRECT_ROUTE"));
+    }
+
+    @Test
+    @DisplayName("UNSUPPORTED is not a pass")
+    void anUnsupportedEgressControlIsNotAPass() {
+        Map<String, String> unsupported = allEgressPassing();
+        unsupported.put("EGRESS_PROXY_READY", "UNSUPPORTED");
+
+        // A host that cannot report a control has not demonstrated it. Treating "I could not tell" as "yes"
+        // is the failure mode this whole document exists to avoid.
+        assertThat(withEgress(unsupported).reasonEgressCannotBeEnforced()).isPresent();
+    }
+
+    @Test
+    @DisplayName("the egress controls are covered by the digest, so they cannot be edited in afterwards")
+    void egressControlsAreCoveredByTheDigest() {
+        // Without this, an operator holding a valid assessment could paste a passing egress block into it and
+        // keep the digest that described a document which claimed nothing about egress.
+        //
+        // ONE base attestation, so assessedAt is identical on both sides. The first version of this test built
+        // two attestations from two separate Instant.now() calls, and their digests differed because their
+        // timestamps did — it would have passed with the egress controls left out of the preimage entirely,
+        // which is precisely the property it exists to check.
+        SandboxSecurityAttestation base = attestation(Instant.now().minusSeconds(60), allPassing());
+        SandboxSecurityAttestation claiming = new SandboxSecurityAttestation(
+                base.schemaVersion(),
+                base.securityProfileVersion(),
+                base.probeImageDigest(),
+                base.runtime(),
+                base.assessedAt(),
+                base.mandatoryControls(),
+                allEgressPassing(),
+                "");
+
+        assertThat(claiming.expectedDigest()).isNotEqualTo(base.expectedDigest());
+        // And a different verdict is a different document too, not merely a different set of keys.
+        Map<String, String> failing = allEgressPassing();
+        failing.put("EGRESS_NO_DIRECT_ROUTE", "FAIL");
+        SandboxSecurityAttestation failed = new SandboxSecurityAttestation(
+                base.schemaVersion(),
+                base.securityProfileVersion(),
+                base.probeImageDigest(),
+                base.runtime(),
+                base.assessedAt(),
+                base.mandatoryControls(),
+                failing,
+                "");
+        assertThat(failed.expectedDigest()).isNotEqualTo(claiming.expectedDigest());
+    }
+
+    private static Map<String, String> allEgressPassing() {
+        Map<String, String> controls = new java.util.TreeMap<>();
+        SandboxSecurityAttestation.REQUIRED_EGRESS_CONTROLS.forEach(control -> controls.put(control, "PASS"));
+        return controls;
+    }
+
+    private SandboxSecurityAttestation withEgress(Map<String, String> egress) {
+        SandboxSecurityAttestation base = attestation(Instant.now().minusSeconds(60), allPassing());
+        SandboxSecurityAttestation draft = new SandboxSecurityAttestation(
+                base.schemaVersion(),
+                base.securityProfileVersion(),
+                base.probeImageDigest(),
+                base.runtime(),
+                base.assessedAt(),
+                base.mandatoryControls(),
+                egress,
+                "");
+        return new SandboxSecurityAttestation(
+                draft.schemaVersion(),
+                draft.securityProfileVersion(),
+                draft.probeImageDigest(),
+                draft.runtime(),
+                draft.assessedAt(),
+                draft.mandatoryControls(),
+                draft.egressControls(),
+                draft.expectedDigest());
     }
 }

@@ -5,13 +5,22 @@ import com.kaas.runner.client.ControlPlaneUnavailable;
 import com.kaas.runner.command.CommandRejected;
 import com.kaas.runner.command.CommandValidator;
 import com.kaas.runner.command.ValidatedCommand;
+import com.kaas.runner.sandbox.EgressExecution;
+import com.kaas.runner.sandbox.EgressExecutions;
+import com.kaas.runner.sandbox.EgressFailure;
+import com.kaas.runner.sandbox.EgressPlan;
+import com.kaas.runner.sandbox.EgressProxyStartFailed;
+import com.kaas.runner.sandbox.EgressTarget;
 import com.kaas.runner.sandbox.SandboxLaunchRequest;
 import com.kaas.runner.sandbox.SandboxLauncher;
 import com.kaas.runner.sandbox.SandboxOutcome;
+import com.kaas.runner.sandbox.SandboxSecurityProfile;
 import com.kaas.runner.sandbox.SyntheticProbe;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
@@ -38,13 +47,24 @@ public final class ExecutionLoop {
     private final ObjectMapper mapper;
     private final Clock clock;
 
+    /**
+     * How this runner instantiates egress, or null if it cannot.
+     *
+     * <p>Null is the safe construction and the ordinary one for a deployment that enforces {@code DENY_ALL}
+     * only. It is not the check that keeps such a runner safe — the command validator refuses an
+     * {@code ALLOWLIST} command outright unless this host demonstrated it can enforce one — but a second,
+     * independent refusal here means a wiring mistake fails closed rather than reaching a null dereference
+     * halfway through provisioning.
+     */
+    private final EgressExecutions egressExecutions;
+
     public ExecutionLoop(
             ControlPlaneClient controlPlane,
             CommandValidator validator,
             SandboxLauncher launcher,
             ObjectMapper mapper,
             Clock clock) {
-        this(controlPlane, validator, launcher, mapper, clock, SyntheticProbe.WORKLOAD_PASS);
+        this(controlPlane, validator, launcher, mapper, clock, SyntheticProbe.WORKLOAD_PASS, null);
     }
 
     /** For the one test that needs the FAILED terminal outcome to be reachable. */
@@ -55,12 +75,25 @@ public final class ExecutionLoop {
             ObjectMapper mapper,
             Clock clock,
             SyntheticProbe workload) {
+        this(controlPlane, validator, launcher, mapper, clock, workload, null);
+    }
+
+    /** The full form: a runner that can also enforce a destination allowlist. */
+    public ExecutionLoop(
+            ControlPlaneClient controlPlane,
+            CommandValidator validator,
+            SandboxLauncher launcher,
+            ObjectMapper mapper,
+            Clock clock,
+            SyntheticProbe workload,
+            EgressExecutions egressExecutions) {
         this.controlPlane = controlPlane;
         this.validator = validator;
         this.launcher = launcher;
         this.mapper = mapper;
         this.clock = clock;
         this.workload = workload;
+        this.egressExecutions = egressExecutions;
     }
 
     /**
@@ -84,6 +117,7 @@ public final class ExecutionLoop {
         //    abandoned rather than executed partially — a document the runner does not fully understand is one
         //    whose security-relevant instructions it may be about to skip.
         ValidatedCommand command;
+        EgressPlan plan;
         try {
             JsonNode envelope = mapper.readTree(authorization.body());
             JsonNode document = envelope.get("command");
@@ -91,6 +125,13 @@ public final class ExecutionLoop {
                 return ExecutionReport.rejected("The authorization carried no command.");
             }
             command = validator.validate(document.toString(), clock.instant());
+            // Read from the envelope rather than the command, and that is deliberate on both counts. The
+            // credential rotates on every delivery, so a digest could not cover it and a field the digest
+            // cannot cover must not be inside the document. The destinations are aiming material for the
+            // platform's own workload rather than authority: the proxy resolves the policy from authoritative
+            // state on every request, so a destination altered in transit is refused there. What the command
+            // DOES bind, and what the validator already checked, is the policy's revision id and digest.
+            plan = egressPlan(envelope);
         } catch (CommandRejected rejected) {
             return ExecutionReport.rejected(rejected.getMessage());
         } catch (RuntimeException unreadable) {
@@ -114,15 +155,40 @@ public final class ExecutionLoop {
                 controlPlane, runId, attemptId, assignmentEpoch,
                 mapper.createObjectNode().put("assignmentEpoch", assignmentEpoch).toString(),
                 HEARTBEAT_INTERVAL)) {
-            return execute(runId, attemptId, assignmentEpoch, command);
+            return execute(runId, attemptId, assignmentEpoch, command, plan);
         }
+    }
+
+    /** The policy type whose executions run behind a proxy. Every other type uses the no-network path. */
+    private static final String ALLOWLIST = "ALLOWLIST";
+
+    /**
+     * The egress material from an authorization envelope, or null when it carried none.
+     *
+     * <p>Absent rather than empty for a policy that needs none, which is what the control plane emits: a
+     * {@code DENY_ALL} sandbox has nothing to present a credential to, and a null-valued field would invite a
+     * worker to pass something along anyway. Null here therefore means "this delivery was not for an
+     * allowlist", and an allowlist command that arrives with it is refused below rather than run.
+     */
+    private EgressPlan egressPlan(JsonNode envelope) {
+        JsonNode token = envelope.get("egressCapabilityToken");
+        JsonNode destinations = envelope.get("egressDestinations");
+        if (token == null || token.isNull() || destinations == null || !destinations.isArray()) {
+            return null;
+        }
+        List<EgressTarget> targets = new ArrayList<>();
+        destinations.forEach(destination -> targets.add(new EgressTarget(
+                destination.get("host").asString(),
+                destination.get("port").asInt(),
+                destination.get("scheme").asString())));
+        return new EgressPlan(token.asString(), targets);
     }
 
     /** How often the lease is renewed while a run executes. */
     private static final Duration HEARTBEAT_INTERVAL = Duration.ofSeconds(5);
 
     private ExecutionReport execute(
-            UUID runId, UUID attemptId, int assignmentEpoch, ValidatedCommand command)
+            UUID runId, UUID attemptId, int assignmentEpoch, ValidatedCommand command, EgressPlan plan)
             throws ControlPlaneUnavailable {
 
         // 3. PROVISIONING, announced before the sandbox exists. Announcing afterwards would leave a window in
@@ -154,12 +220,73 @@ public final class ExecutionLoop {
         Duration provisioningElapsed = Duration.between(provisioningStartedAt, clock.instant());
 
         // 5. THE WORKLOAD. Platform-owned, through the same hardened launcher the security harness uses. No
-        //    feature source, no secret, no network.
+        //    feature source, no secret, and — under DENY_ALL — no network.
         // The SANDBOX profile version, not the engine version. They are different things that happen to be
         // strings, and passing the engine version made the launcher refuse with "Unknown security profile
         // version" — which was the launcher correctly refusing to run under a profile it does not recognise.
-        SandboxOutcome outcome = launcher.run(new SandboxLaunchRequest(
-                workload, command.sandboxProfileVersion(), runId));
+        SandboxOutcome outcome;
+        String egressDetail = null;
+        if (ALLOWLIST.equals(command.networkPolicyType())) {
+            // Refused, never degraded. The command validator already refuses an allowlist this host cannot
+            // enforce, so arriving here without a mechanism or without egress material is a wiring mistake
+            // rather than a state a control plane can produce — and a wiring mistake that silently ran the
+            // execution with no network would be an allowlist that permits everything and delivers nothing,
+            // reported as a completed run.
+            //
+            // REPORTED, not merely returned. By this point the run is in RUNNING and the control plane is
+            // holding a phase deadline against it. Returning quietly would leave it there until a reconciler
+            // reclaimed it and recorded a timeout — a failure the worker observed within milliseconds and
+            // then discarded, which is precisely the bug the infrastructure-failure endpoint exists to end.
+            if (egressExecutions == null) {
+                return infrastructureFailure(
+                        runId, attemptId, assignmentEpoch,
+                        "This runner has no egress mechanism for an allowlist.");
+            }
+            if (plan == null) {
+                return infrastructureFailure(
+                        runId, attemptId, assignmentEpoch,
+                        "An allowlist authorization carried no egress material.");
+            }
+            // The profile the sandbox will run under has to be the networked derivative of the profile the
+            // command was authorized under. Checked rather than assumed: a launcher configured against some
+            // other profile would run the execution anyway, and the evidence would then name a policy that
+            // did not produce it. Checked here, after the mechanism exists but before any sandbox does, so a
+            // mismatch costs a network and a proxy rather than an untrusted container.
+            String expected = SandboxSecurityProfile.networkedVersionOf(command.sandboxProfileVersion());
+            try (EgressExecution egress = egressExecutions.start(runId, plan)) {
+                if (!expected.equals(egress.profileVersion())) {
+                    return infrastructureFailure(
+                            runId, attemptId, assignmentEpoch,
+                            "The egress sandbox profile is not the one this command authorized.");
+                }
+                // The egress workload, not the configured one. Which workload an allowlist execution runs is
+                // a property of the policy rather than of this runner's configuration: an allowlist run whose
+                // workload never touched the network would complete successfully having demonstrated nothing.
+                outcome = egress.launcher().run(
+                        new SandboxLaunchRequest(SyntheticProbe.WORKLOAD_EGRESS, expected, runId));
+                if (!egress.proxyIsRunning()) {
+                    // CONSERVATIVE, and deliberately unconditional. The sandbox may have produced a
+                    // perfectly well-formed result before the proxy died, and that result is still evidence
+                    // gathered while the execution's only egress peer was going away. Nothing has been
+                    // submitted yet, so nothing trustworthy is being discarded — and reporting a test outcome
+                    // from an execution whose enforcement point vanished mid-run would be the platform
+                    // blaming a tenant for its own failure.
+                    egressDetail = "The egress proxy did not survive the execution ("
+                            + EgressFailure.EGRESS_PROXY_DIED + ").";
+                }
+            } catch (EgressProxyStartFailed cannotStart) {
+                // NO SANDBOX WAS CREATED. There is no degraded mode: an allowlist execution without a proxy
+                // is an execution with no enforcement, and the truthful outcome is an infrastructure failure.
+                // The category travels; the cause does not, because a daemon error carries socket paths,
+                // host directories, and image references.
+                return infrastructureFailure(
+                        runId, attemptId, assignmentEpoch,
+                        "The egress mechanism could not be started (" + cannotStart.failure() + ").");
+            }
+        } else {
+            outcome = launcher.run(new SandboxLaunchRequest(
+                    workload, command.sandboxProfileVersion(), runId));
+        }
         // ABSENT OR INCOMPLETE EVIDENCE IS AN INFRASTRUCTURE FAILURE, NOT A TEST RESULT.
         //
         // Checking only failure() was the bug: DockerSandboxLauncher returns an EMPTY failure whenever the
@@ -168,26 +295,11 @@ public final class ExecutionLoop {
         // submitted a perfectly well-formed document saying the infrastructure succeeded and the tenant's test
         // failed. Every constraint in the system accepts that document, because it is internally consistent.
         // It is simply false, and it is false in the direction that blames the tenant for the platform.
-        String detail = infrastructureFailureDetail(outcome);
+        // The egress verdict takes precedence. An outcome gathered while the execution's enforcement point
+        // was disappearing is not evidence about anything, whatever shape it happens to have.
+        String detail = egressDetail != null ? egressDetail : infrastructureFailureDetail(outcome);
         if (detail != null) {
-            // TELL THE CONTROL PLANE. Returning this to our own caller and stopping — which is what this did —
-            // left the run in its phase until a deadline reclaimed it, recorded as a timeout. The platform had
-            // observed the failure within seconds and then discarded it.
-            var body = mapper.createObjectNode();
-            body.put("assignmentEpoch", assignmentEpoch);
-            // Sanitised to the character set the endpoint accepts. This is our description of our own sandbox,
-            // never workload output.
-            body.put("detail", detail.replaceAll("[^A-Za-z0-9 .,:;()/_-]", " "));
-            ControlPlaneClient.Response reported =
-                    controlPlane.reportInfrastructureFailure(runId, attemptId, body.toString());
-            if (!reported.ok() && reported.status() != 204) {
-                // Say so. Silently discarding the answer to "did the control plane accept my failure report"
-                // is the same shape as the bug this endpoint exists to fix — a failure the worker observed and
-                // then dropped, leaving the run to be reclaimed by a deadline under a false reason.
-                return ExecutionReport.infrastructureFailure(
-                        detail + " (report refused: " + codeOf(reported.body()) + " " + reported.status() + ")");
-            }
-            return ExecutionReport.infrastructureFailure(detail);
+            return infrastructureFailure(runId, attemptId, assignmentEpoch, detail);
         }
 
         // 6. COLLECTING, then PROCESSING. Two phases rather than one because they fail differently: collection
@@ -243,6 +355,35 @@ public final class ExecutionLoop {
             return ExecutionReport.refused("RESULT", code);
         }
         return ExecutionReport.completed(outcome.observations().get("workload_outcome"));
+    }
+
+    /**
+     * Reports an infrastructure failure to the control plane and returns it.
+     *
+     * <p>TELL THE CONTROL PLANE. Returning this to our own caller and stopping — which is what this once did —
+     * left the run in its phase until a deadline reclaimed it, recorded as a timeout. The platform had
+     * observed the failure within seconds and then discarded it.
+     *
+     * <p>Shared by the sandbox path and the egress path so both reach the control plane the same way. A
+     * second copy of this is a second chance for one of them to quietly return without reporting.
+     */
+    private ExecutionReport infrastructureFailure(
+            UUID runId, UUID attemptId, int assignmentEpoch, String detail) throws ControlPlaneUnavailable {
+        var body = mapper.createObjectNode();
+        body.put("assignmentEpoch", assignmentEpoch);
+        // Sanitised to the character set the endpoint accepts. This is our description of our own
+        // infrastructure, never workload output and never a credential.
+        body.put("detail", detail.replaceAll("[^A-Za-z0-9 .,:;()/_-]", " "));
+        ControlPlaneClient.Response reported =
+                controlPlane.reportInfrastructureFailure(runId, attemptId, body.toString());
+        if (!reported.ok() && reported.status() != 204) {
+            // Say so. Silently discarding the answer to "did the control plane accept my failure report" is
+            // the same shape as the bug this endpoint exists to fix — a failure the worker observed and then
+            // dropped, leaving the run to be reclaimed by a deadline under a false reason.
+            return ExecutionReport.infrastructureFailure(
+                    detail + " (report refused: " + codeOf(reported.body()) + " " + reported.status() + ")");
+        }
+        return ExecutionReport.infrastructureFailure(detail);
     }
 
     /**

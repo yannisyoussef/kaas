@@ -81,6 +81,61 @@ class UnenforceableCommandTests {
     private static final Instant NOW = Instant.parse("2026-09-03T12:00:00Z");
 
     /** Builds a well-formed command, applies the mutation, then digests the RESULT so the digest is correct. */
+    @Test
+    void aRunnerThatHasEstablishedNothingEnforcesOnlyDenyAll() {
+        // The safe construction, and the one every caller gets by default. A default that included ALLOWLIST
+        // would mean a caller who forgot to thread the capability through produced a runner that accepted
+        // allowlist commands and applied nothing to them.
+        assertThat(com.kaas.runner.sandbox.EgressCapability.unavailable("not attempted").enforceablePolicies())
+                .containsExactly("DENY_ALL");
+    }
+
+    @Test
+    void denyAllSurvivesAnUnhealthyEgressSubsystem() {
+        // A run that wants no network must not be blocked by a subsystem it does not use. Coupling them would
+        // increase the attack surface of exactly the runs that were meant to have none.
+        assertThat(com.kaas.runner.sandbox.EgressCapability.unavailable("proxy image would not build")
+                        .enforceablePolicies())
+                .contains("DENY_ALL")
+                .doesNotContain("ALLOWLIST");
+    }
+
+    @Test
+    void anAllowlistIsAcceptedOnceTheRunnerHasEstablishedItCanEnforceIt() throws Exception {
+        ObjectNode command = sealed(node -> ((ObjectNode) node.get("networkPolicy")).put("type", "ALLOWLIST"));
+
+        var validated = new CommandValidator(mapper, java.util.Set.of("DENY_ALL", "ALLOWLIST"))
+                .validate(command.toString(), NOW);
+
+        // The positive half of the pair. Without it the refusal test above would be satisfied by a validator
+        // that refused every allowlist command unconditionally, which is what this runner used to do — and the
+        // suite could not tell the difference between "refuses because it cannot enforce" and "refuses always".
+        assertThat(validated.networkPolicyType()).isEqualTo("ALLOWLIST");
+    }
+
+    @Test
+    void anUnknownNetworkPolicyIsRefusedHoweverTheCapabilityWasEstablished() throws Exception {
+        ObjectNode command = sealed(node -> ((ObjectNode) node.get("networkPolicy")).put("type", "UNRESTRICTED"));
+
+        // The set is an allowlist of policy names, not a denylist of bad ones. A type nobody has heard of is
+        // refused because it is absent, which is a rule that stays complete without anyone maintaining it.
+        assertThatThrownBy(() -> new CommandValidator(mapper, java.util.Set.of("DENY_ALL", "ALLOWLIST"))
+                        .validate(command.toString(), NOW))
+                .isInstanceOf(CommandRejected.class);
+    }
+
+    @Test
+    void anEmptyCapabilitySetStillEnforcesDenyAll() throws Exception {
+        // A caller cannot remove DENY_ALL, deliberately. The constructor adds it back, so a mistake in
+        // computing the capability can narrow what a runner accepts but can never stop it running the
+        // executions that need nothing from the network.
+        ObjectNode command = sealed(node -> {});
+
+        assertThat(new CommandValidator(mapper, java.util.Set.of()).validate(command.toString(), NOW)
+                        .networkPolicyType())
+                .isEqualTo("DENY_ALL");
+    }
+
     private ObjectNode sealed(java.util.function.Consumer<ObjectNode> mutation) throws Exception {
         ObjectNode command = baseline();
         mutation.accept(command);

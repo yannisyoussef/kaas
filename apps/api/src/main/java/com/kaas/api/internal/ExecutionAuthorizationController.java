@@ -98,6 +98,28 @@ class ExecutionAuthorizationController {
         // a metric, or the persisted command, and the server cannot produce it again.
         body.put("sourceCapabilityToken", delivery.sourceCapabilityToken());
         body.put("secretCapabilityTokens", delivery.secretCapabilityTokens());
+        // Present only for a policy that needs one, and absent rather than null for one that does not: a
+        // DENY_ALL sandbox has nothing to present a credential to, and emitting an empty field would invite a
+        // worker to pass something along anyway.
+        //
+        // Like the others, this token exists in this response and nowhere else. It is deliberately absent
+        // from the command document, because the command is immutable and digested while this rotates on
+        // every delivery — a field the digest cannot cover must not be emitted inside it.
+        delivery.egressCapabilityToken().ifPresent(token -> body.put("egressCapabilityToken", token));
+        // The destinations the pinned policy permits, present only alongside a credential that could use
+        // them. This is launch material for the worker's platform-owned workload, not authority: the proxy
+        // asks this control plane about every destination on every request, so nothing a worker does with
+        // this list widens what it may reach. It is deliberately outside the command for the same reason the
+        // token is — the command is immutable and digested, and a second copy of the policy inside it would
+        // be a field nothing enforces from.
+        if (!delivery.egressDestinations().isEmpty()) {
+            body.put("egressDestinations", delivery.egressDestinations().stream()
+                    .map(destination -> Map.<String, Object>of(
+                            "host", destination.host(),
+                            "port", destination.port(),
+                            "scheme", destination.scheme().name()))
+                    .toList());
+        }
         // The parsed document, not its serialization. Putting the string here produced a double-encoded field a
         // consumer had to unwrap before it could validate against the contract — which is the mildest form of
         // the "verified a projection, transmitted different bytes" trap, and one nobody would notice until they

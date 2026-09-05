@@ -324,13 +324,24 @@ class CommandValidationPipelineTests {
     }
 
     private static String validAttestation(Instant assessedAt) {
+        return validAttestation(assessedAt, Map.of());
+    }
+
+    /**
+     * An attestation document, optionally claiming this deployment can enforce egress.
+     *
+     * <p>Absent by default, because that is what an assessment produced by a host that has not demonstrated
+     * egress enforcement looks like — and it is the state in which ALLOWLIST must keep being refused. A test
+     * that wants the allowlist path has to say so.
+     */
+    private static String validAttestation(Instant assessedAt, Map<String, String> egress) {
         Map<String, String> controls = new TreeMap<>();
         SandboxSecurityAttestation.REQUIRED_MANDATORY_CONTROLS.forEach(control -> controls.put(control, "PASS"));
         String probe = "sha256:" + "a".repeat(64);
         Instant truncated = assessedAt.truncatedTo(ChronoUnit.SECONDS);
         var draft = new SandboxSecurityAttestation(
                 SandboxSecurityAttestation.SCHEMA_VERSION,
-                "kaas.sandbox.v1", probe, "docker", truncated, controls, "");
+                "kaas.sandbox.v1", probe, "docker", truncated, controls, egress, "");
         StringBuilder json = new StringBuilder("{\"schemaVersion\":\"")
                 .append(SandboxSecurityAttestation.SCHEMA_VERSION)
                 .append("\",\"securityProfileVersion\":\"kaas.sandbox.v1\",\"probeImageDigest\":\"")
@@ -338,12 +349,19 @@ class CommandValidationPipelineTests {
                 .append("\",\"runtime\":\"docker\",\"assessedAt\":\"")
                 .append(truncated)
                 .append("\",\"mandatoryControls\":{");
-        String body = controls.entrySet().stream()
+        json.append(asJsonBody(controls)).append("}");
+        if (!egress.isEmpty()) {
+            json.append(",\"egressControls\":{").append(asJsonBody(new TreeMap<>(egress))).append("}");
+        }
+        return json.append(",\"digest\":\"").append(draft.expectedDigest()).append("\"}")
+                .toString();
+    }
+
+    private static String asJsonBody(Map<String, String> entries) {
+        return entries.entrySet().stream()
                 .map(entry -> "\"" + entry.getKey() + "\":\"" + entry.getValue() + "\"")
                 .reduce((left, right) -> left + "," + right)
                 .orElseThrow();
-        return json.append(body).append("},\"digest\":\"").append(draft.expectedDigest()).append("\"}")
-                .toString();
     }
 
     private static KeyPair keyPair() {

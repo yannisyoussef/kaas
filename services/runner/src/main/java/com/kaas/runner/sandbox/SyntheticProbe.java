@@ -59,7 +59,52 @@ public enum SyntheticProbe {
     WORKLOAD_SILENT(List.of("workload", "silent")),
 
     /** Reports a confident verdict under the wrong identity: something that is not our workload at all. */
-    WORKLOAD_IMPOSTER(List.of("workload", "imposter"));
+    WORKLOAD_IMPOSTER(List.of("workload", "imposter")),
+
+    // The egress probes. Every destination they use arrives in an environment variable the trusted launcher
+    // sets from the execution's own policy — none of it is an argument, and none of it is tenant input. The
+    // sub-mode is a constant here for the same reason the modes above are: a caller that could name one could
+    // name something else.
+
+    /** An ordinary proxied request to a destination the policy names. The success path. */
+    EGRESS_ALLOWED(List.of("egress", "allowed")),
+
+    /** A proxied request to a destination the policy does not name. */
+    EGRESS_DENIED(List.of("egress", "denied")),
+
+    /** A permitted name whose DNS answer is a private address — the only way to reach the classifier. */
+    EGRESS_PRIVATE_ADDRESS(List.of("egress", "private")),
+
+    /** An allowed target that redirects elsewhere, with the client following it into a second authorization. */
+    EGRESS_REDIRECT_ESCAPE(List.of("egress", "redirect")),
+
+    /**
+     * Raw sockets straight at the addresses the proxy would reach, ignoring every proxy setting.
+     *
+     * <p>The half of the pair that has to fail. On its own it proves nothing — a workload with no network at
+     * all passes it — so it is only ever evidence alongside {@link #EGRESS_ALLOWED} succeeding.
+     */
+    EGRESS_DIRECT_BYPASS(List.of("egress", "bypass")),
+
+    /** Opens a CONNECT tunnel and holds it, so fencing can be applied underneath and its latency measured. */
+    EGRESS_LONG_LIVED_TUNNEL(List.of("egress", "tunnel")),
+
+    /**
+     * The synthetic workload for an ALLOWLIST execution.
+     *
+     * <p>A <em>workload</em> rather than an egress probe, and the distinction is load-bearing. The probes
+     * above report {@code egress_*} observations for a security suite to assert on; this one reports the
+     * fixed workload identity and a workload outcome, which is what makes an ALLOWLIST run a run — it
+     * completes through the ordinary lifecycle with {@code infrastructureOutcome=SUCCEEDED} and
+     * {@code testOutcome=PASSED} rather than being a measurement taken outside one.
+     *
+     * <p>Its scenarios are the pair the whole slice rests on — a destination the policy names is reachable
+     * through the proxy, and nothing is reachable without it — plus a destination the policy does not name
+     * being refused. A deliberate denial is <em>successful security evidence</em> here, not a failed test:
+     * there is no tenant test, and confusing "the policy correctly refused" with "an assertion failed" is the
+     * single most misleading thing this workload could report.
+     */
+    WORKLOAD_EGRESS(List.of("workload", "egress"));
 
     private final List<String> arguments;
 

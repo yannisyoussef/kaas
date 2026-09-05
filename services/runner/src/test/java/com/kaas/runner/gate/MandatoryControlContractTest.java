@@ -25,6 +25,22 @@ import org.junit.jupiter.api.Test;
 class MandatoryControlContractTest {
 
     @Test
+    void theGateEmitsExactlyTheSharedEgressControlSet() throws IOException {
+        // The same agreement, for the smaller set that decides whether this deployment may enforce an
+        // allowlist. It is a separate set on both sides because it is required under a different condition,
+        // and separate sets need separate contract tests — one test over a union would go green when a
+        // control moved from one set to the other, which changes when it is demanded.
+        Set<String> shared = sharedList("egressControls");
+        Set<String> emitted = controlsInSource(
+                "services/runner/src/main/java/com/kaas/runner/gate/EgressEnforcementGate.java",
+                "check\\(\\s*\"([A-Z_]+)\"");
+
+        assertThat(emitted)
+                .as("the egress gate's controls must equal the shared contract")
+                .isEqualTo(shared);
+    }
+
+    @Test
     void theGateEmitsExactlyTheSharedMandatoryControlSet() throws IOException {
         Set<String> shared = sharedContract();
         Set<String> emitted = mandatoryControlsInGateSource();
@@ -45,21 +61,40 @@ class MandatoryControlContractTest {
      * missed would already be failing there.
      */
     private static Set<String> mandatoryControlsInGateSource() throws IOException {
-        String source = Files.readString(locate("services/runner/src/main/java/com/kaas/runner/gate"
-                + "/HostileExecutionSecurityGate.java"));
-        Matcher matcher = Pattern.compile("mandatory\\(\\s*outcome,\\s*\"([A-Z_]+)\"").matcher(source);
+        return controlsInSource(
+                "services/runner/src/main/java/com/kaas/runner/gate/HostileExecutionSecurityGate.java",
+                "mandatory\\(\\s*outcome,\\s*\"([A-Z_]+)\"");
+    }
+
+    private static Set<String> controlsInSource(String path, String pattern) throws IOException {
+        Matcher matcher = Pattern.compile(pattern).matcher(Files.readString(locate(path)));
         Set<String> controls = new LinkedHashSet<>();
         while (matcher.find()) {
             controls.add(matcher.group(1));
         }
-        assertThat(controls).as("the gate source must contain mandatory controls to compare").isNotEmpty();
+        assertThat(controls).as("the source at %s must contain controls to compare", path).isNotEmpty();
         return controls;
     }
 
     private static Set<String> sharedContract() throws IOException {
+        return sharedList("controls");
+    }
+
+    /**
+     * One named array from the shared contract, bounded to that array.
+     *
+     * <p>The bound is the whole point. The previous version scanned from the start of {@code "controls"} to
+     * the end of the file, which was correct while that was the last array in it — and the moment a second
+     * array of controls was added below, the mandatory set silently grew to include the egress controls and
+     * this test would have failed for a reason that had nothing to do with the gate.
+     */
+    private static Set<String> sharedList(String field) throws IOException {
         String json = Files.readString(locate("packages/api-contracts/mandatory-sandbox-controls.json"));
-        Matcher matcher = Pattern.compile("\"([A-Z_]{3,})\"").matcher(
-                json.substring(json.indexOf("\"controls\"")));
+        int start = json.indexOf("\"" + field + "\"");
+        assertThat(start).as("the contract must declare %s", field).isNotNegative();
+        int open = json.indexOf('[', start);
+        int close = json.indexOf(']', open);
+        Matcher matcher = Pattern.compile("\"([A-Z_]{3,})\"").matcher(json.substring(open, close));
         Set<String> controls = new LinkedHashSet<>();
         while (matcher.find()) {
             controls.add(matcher.group(1));

@@ -28,16 +28,53 @@ class MandatoryControlContractTest {
 
     @Test
     void theRequiredControlSetMatchesTheSharedContract() throws Exception {
-        Path contract = locate();
-        Set<String> shared = StreamSupport.stream(
-                        JsonMapper.builder().build().readTree(Files.readString(contract)).get("controls").spliterator(),
+        assertThat(SandboxSecurityAttestation.REQUIRED_MANDATORY_CONTROLS)
+                .as("the control plane's required set must equal the shared contract at %s", locate())
+                .isEqualTo(sharedList("controls"));
+    }
+
+    @Test
+    void theRequiredEgressControlSetMatchesTheSharedContract() throws Exception {
+        // Asserted separately from the mandatory set because the two are demanded under different conditions:
+        // every execution needs the mandatory controls, only an ALLOWLIST execution needs these. A single
+        // assertion over the union would stay green if a control moved between the sets, which would silently
+        // change whether a DENY_ALL run depends on the egress subsystem being healthy.
+        assertThat(SandboxSecurityAttestation.REQUIRED_EGRESS_CONTROLS)
+                .as("the control plane's required egress set must equal the shared contract at %s", locate())
+                .isEqualTo(sharedList("egressControls"));
+    }
+
+    @Test
+    void theTwoSetsShareNoControl() throws Exception {
+        // A control in both sets would be required unconditionally through one door and conditionally through
+        // the other, and which rule applied would depend on which check ran first.
+        assertThat(SandboxSecurityAttestation.REQUIRED_MANDATORY_CONTROLS)
+                .doesNotContainAnyElementsOf(SandboxSecurityAttestation.REQUIRED_EGRESS_CONTROLS);
+    }
+
+    @Test
+    void theContractDeclaresTheSchemaVersionTheControlPlaneRequires() throws Exception {
+        // The attestation's schema version and the contract's are one statement about one document format.
+        // They drifted apart the moment the egress controls were added on one side only, and the symptom
+        // would have been every attestation in every deployment being refused with no obvious cause.
+        String declared = JsonMapper.builder()
+                .build()
+                .readTree(Files.readString(locate()))
+                .get("schemaVersion")
+                .stringValue();
+        assertThat(declared).isEqualTo(SandboxSecurityAttestation.SCHEMA_VERSION);
+    }
+
+    private static Set<String> sharedList(String field) throws Exception {
+        return StreamSupport.stream(
+                        JsonMapper.builder()
+                                .build()
+                                .readTree(Files.readString(locate()))
+                                .get(field)
+                                .spliterator(),
                         false)
                 .map(node -> node.stringValue())
                 .collect(Collectors.toUnmodifiableSet());
-
-        assertThat(SandboxSecurityAttestation.REQUIRED_MANDATORY_CONTROLS)
-                .as("the control plane's required set must equal the shared contract at %s", contract)
-                .isEqualTo(shared);
     }
 
     /** Located from the module rather than from configuration, so the test cannot be pointed at a copy. */

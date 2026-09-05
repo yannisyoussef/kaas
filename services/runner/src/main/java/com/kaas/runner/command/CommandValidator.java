@@ -62,13 +62,13 @@ public final class CommandValidator {
             Set.of("types", "maxArtifactBytes", "maxTotalBytes");
 
     /**
-     * The only network policy this runner can enforce.
+     * The network policy every runner can always enforce.
      *
-     * <p>ALLOWLIST is a defined type that no launcher here applies. A command carrying it is REFUSED rather
-     * than run with egress the runner is not actually constraining — a run that appeared to have egress control
-     * nothing was applying would be worse than one with none, because somebody would rely on it.
+     * <p>A sandbox with no network needs nothing from the egress subsystem, which is why DENY_ALL is
+     * unconditional here and deliberately keeps the simpler proven path. Nothing about the allowlist mechanism
+     * being unhealthy should stop a run that wanted no network in the first place.
      */
-    private static final String ENFORCEABLE_NETWORK_POLICY = "DENY_ALL";
+    private static final String ALWAYS_ENFORCEABLE = "DENY_ALL";
 
     /**
      * The only engine this runner can execute.
@@ -80,11 +80,37 @@ public final class CommandValidator {
      */
     private static final String EXECUTABLE_ENGINE = "SYNTHETIC";
 
-    private final ObjectMapper mapper;
+    private ObjectMapper mapper;
 
+    private final java.util.Set<String> enforceablePolicies;
+
+    /**
+     * A validator that can enforce nothing but DENY_ALL.
+     *
+     * <p>The safe default, and the one every caller gets unless it has positively established otherwise. A
+     * default that included ALLOWLIST would mean forgetting to pass the capability produced a runner that
+     * accepted allowlist commands and applied nothing.
+     */
     public CommandValidator(ObjectMapper mapper) {
+        this(mapper, java.util.Set.of(ALWAYS_ENFORCEABLE));
+    }
+
+    /**
+     * @param enforceablePolicies the policy types this runner has established it can actually apply on this
+     *     host. DENY_ALL is added unconditionally; a caller cannot remove it, and a caller that passes an
+     *     empty set gets a runner that can still execute the runs that need no network.
+     */
+    public CommandValidator(ObjectMapper mapper, java.util.Set<String> enforceablePolicies) {
+        java.util.Set<String> policies = new java.util.LinkedHashSet<>(enforceablePolicies);
+        policies.add(ALWAYS_ENFORCEABLE);
+        this.enforceablePolicies = java.util.Set.copyOf(policies);
+        initialize(mapper);
+    }
+
+    private void initialize(ObjectMapper mapper) {
         this.mapper = mapper;
     }
+
 
     /**
      * <strong>{@code executionTimeoutSeconds} is validated and digested but NOT enforced here, and is therefore
@@ -148,11 +174,16 @@ public final class CommandValidator {
         }
 
         String networkType = text(network, "type");
-        if (!ENFORCEABLE_NETWORK_POLICY.equals(networkType)) {
+        if (!enforceablePolicies.contains(networkType)) {
             // NOT_ENFORCEABLE, and refused rather than degraded.
+            //
+            // This is the runner's OWN refusal, independent of the control plane's. Both sides check, because
+            // a single check is a single thing to get wrong: a control plane that authorized an allowlist a
+            // worker could not apply would produce a run with egress nobody was constraining, and the worker
+            // is the only party in a position to know what its own host can do.
             throw new CommandRejected(
                     "This runner cannot enforce the network policy " + networkType
-                            + "; only " + ENFORCEABLE_NETWORK_POLICY + " is enforceable.");
+                            + "; enforceable here: " + enforceablePolicies + ".");
         }
 
         String engineType = text(engine, "type");

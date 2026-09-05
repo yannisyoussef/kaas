@@ -8,12 +8,14 @@ import com.kaas.api.controlplane.domain.SnapshotFeature;
 import com.kaas.api.controlplane.domain.TestRun;
 import com.kaas.api.execution.domain.CapabilityToken;
 import com.kaas.api.execution.domain.CapabilityType;
+import com.kaas.api.execution.domain.EgressDestination;
 import com.kaas.api.execution.domain.ExecutionAuthorization;
 import com.kaas.api.execution.domain.ExecutionCapability;
 import com.kaas.api.execution.domain.ExecutionCommand;
 import com.kaas.api.execution.domain.ExecutionCommandPolicy;
 import com.kaas.api.execution.domain.ExecutionDenial;
 import com.kaas.api.execution.domain.NetworkPolicyRevision;
+import com.kaas.api.execution.domain.NetworkPolicyType;
 import com.kaas.api.execution.domain.SandboxSecurityAttestation;
 import com.kaas.api.execution.domain.SecretValueProvider;
 import com.kaas.api.execution.domain.SourceBundlePolicy;
@@ -228,13 +230,41 @@ public class ExecutionAuthorizationService {
             return denied(ExecutionDenial.SECURITY_GATE_FAILED);
         }
 
-        Optional<NetworkPolicyRevision> policy = repository.findNetworkPolicy(NetworkPolicyRevision.DENY_ALL_ID);
+        // The policy this run was SEALED with, not a constant. While DENY_ALL was the only policy that
+        // existed, looking it up by its well-known identifier was equivalent and simpler; with a second
+        // enforceable type it would mean every run silently executing under a policy nobody selected.
+        Optional<NetworkPolicyRevision> policy = repository.findNetworkPolicy(context.networkPolicyRevisionId());
         if (policy.isEmpty()
                 || !policy.orElseThrow().policyType().enforceable()
                 || !policy.orElseThrow().digestMatchesContent()) {
             // A policy whose digest no longer matches its own content has been tampered with in the database,
             // and one whose type nothing can enforce would be a promise the runtime does not keep.
+            //
             return denied(ExecutionDenial.NETWORK_POLICY_NOT_ENFORCEABLE);
+        }
+        if (policy.orElseThrow().policyType() == NetworkPolicyType.ALLOWLIST) {
+            // Having the mechanism is not the same as this host being able to run it.
+            //
+            // The mandatory controls above say the sandbox confines what it runs. These say the deployment can
+            // build the proxy image, create an isolated network, verify it is isolated, bring a proxy up on
+            // it, and leave a sandbox with no route of its own. An attestation produced before those controls
+            // existed carries none of them, and the fail-closed reading of "no evidence" is "not enforceable"
+            // — which is why this is asked of the assessment rather than of a configuration flag. A flag would
+            // be an operator's optimism; this is a measurement of the machine.
+            //
+            // Asked only for ALLOWLIST. A DENY_ALL run refused because the egress subsystem is unhealthy would
+            // be a run refused for a subsystem it does not use.
+            Optional<String> unenforceable = attestation.orElseThrow().reasonEgressCannotBeEnforced();
+            if (unenforceable.isPresent()) {
+                LOGGER.atWarn()
+                        .addKeyValue("event", "EGRESS_NOT_ENFORCEABLE")
+                        .addKeyValue("runId", runId)
+                        .addKeyValue("reason", unenforceable.orElseThrow())
+                        .log("Refused an allowlist execution because this deployment cannot enforce egress");
+                // A refusal, never a downgrade to DENY_ALL. A run that appeared to have egress control nothing
+                // was applying would be worse than one that has none and says so.
+                return denied(ExecutionDenial.NETWORK_POLICY_NOT_ENFORCEABLE);
+            }
         }
 
         if (!context.secretBindings().isEmpty() && !secrets.available()) {
@@ -265,7 +295,7 @@ public class ExecutionAuthorizationService {
 
         Optional<ExecutionAuthorization> existing = repository.findAuthorization(attemptId, assignmentEpoch);
         if (existing.isPresent()) {
-            return reissue(existing.orElseThrow(), attempt, workerId, now, expiresAt);
+            return reissue(existing.orElseThrow(), attempt, workerId, policy.orElseThrow(), now, expiresAt);
         }
         return issue(
                 organizationId, run, attempt, context, attestation.orElseThrow(), policy.orElseThrow(), now, expiresAt);
@@ -288,6 +318,7 @@ public class ExecutionAuthorizationService {
             ExecutionAuthorization authorization,
             ExecutionAttempt attempt,
             String workerId,
+            NetworkPolicyRevision policy,
             Instant now,
             Instant expiresAt) {
         if (authorization.revokedAt() != null) {
@@ -341,7 +372,14 @@ public class ExecutionAuthorizationService {
             return denied(ExecutionDenial.CAPABILITY_EXPIRED);
         }
         Minted source = mintSource(authorization.authorizationId(), now, capabilityExpiry);
-        repository.rotateCapabilities(authorization.authorizationId(), List.of(source.capability()), now);
+        Optional<Minted> egress = mintEgress(policy, authorization.authorizationId(), now, capabilityExpiry);
+        // Rotated together, in one transaction, with whatever was there before revoked. Rotating one and
+        // leaving the other would leave a live token from a previous delivery usable alongside a fresh one,
+        // which is exactly the accumulation the at-most-one-live rule exists to prevent.
+        List<ExecutionCapability> replacements = new java.util.ArrayList<>();
+        replacements.add(source.capability());
+        egress.ifPresent(minted -> replacements.add(minted.capability()));
+        repository.rotateCapabilities(authorization.authorizationId(), List.copyOf(replacements), now);
         count("kaas.execution.authorization", "REISSUED");
         var stored = command.orElseThrow();
         return new Outcome(
@@ -353,7 +391,11 @@ public class ExecutionAuthorizationService {
                         stored.expiresAt(),
                         source.capability().capabilityId(),
                         source.token(),
-                        List.of())),
+                        List.of(),
+                        egress.map(Minted::token),
+                        // Named only when a capability was minted, so the two cannot disagree: a destination
+                        // list beside an absent credential would describe an allowlist nothing can use.
+                        egress.isPresent() ? policy.destinations() : List.of())),
                 Optional.empty());
     }
 
@@ -384,6 +426,7 @@ public class ExecutionAuthorizationService {
             return denied(ExecutionDenial.CAPABILITY_EXPIRED);
         }
         Minted source = mintSource(authorizationId, now, capabilityExpiry);
+        Optional<Minted> egress = mintEgress(policy, authorizationId, now, capabilityExpiry);
 
         var authorization = new ExecutionAuthorization(
                 authorizationId,
@@ -416,8 +459,11 @@ public class ExecutionAuthorizationService {
                     "A secret-bearing run produced a command with no secret capabilities.");
         }
         String document = ExecutionCommandPolicy.document(command, MAPPER).toString();
+        List<ExecutionCapability> issued = new java.util.ArrayList<>();
+        issued.add(source.capability());
+        egress.ifPresent(minted -> issued.add(minted.capability()));
         if (!repository.persistIssuance(new ExecutionAuthorizationRepository.Issuance(
-                authorization, List.of(source.capability()), command, document))) {
+                authorization, List.copyOf(issued), command, document))) {
             // A concurrent request for the same assignment won the unique constraint. The loser does not retry
             // in a loop: it reports the same refusal a stale caller gets, and the winner's authorization stands.
             // One semantic authorization per assignment is the invariant; two racers must not produce two.
@@ -444,7 +490,11 @@ public class ExecutionAuthorizationService {
                         command.expiresAt(),
                         source.capability().capabilityId(),
                         source.token(),
-                        List.of())),
+                        List.of(),
+                        egress.map(Minted::token),
+                        // Named only when a capability was minted, so the two cannot disagree: a destination
+                        // list beside an absent credential would describe an allowlist nothing can use.
+                        egress.isPresent() ? policy.destinations() : List.of())),
                 Optional.empty());
     }
 
@@ -492,13 +542,33 @@ public class ExecutionAuthorizationService {
     }
 
     private Minted mintSource(UUID authorizationId, Instant now, Instant expiresAt) {
-        String token = CapabilityToken.issue(CapabilityType.SOURCE);
+        return mint(CapabilityType.SOURCE, authorizationId, now, expiresAt);
+    }
+
+    /**
+     * Mints an egress capability when the policy is one the sandbox has to ask permission under.
+     *
+     * <p>DENY_ALL executions get none, and that is the point of the branch: a sandbox with no network has
+     * nothing to present a credential to, and issuing one anyway would put a live bearer token into an
+     * environment for no reason at all. It is also why DENY_ALL keeps the simpler proven path — a capability
+     * that exists is a capability that can leak.
+     */
+    private Optional<Minted> mintEgress(
+            NetworkPolicyRevision policy, UUID authorizationId, Instant now, Instant expiresAt) {
+        if (policy.policyType() != NetworkPolicyType.ALLOWLIST) {
+            return Optional.empty();
+        }
+        return Optional.of(mint(CapabilityType.EGRESS, authorizationId, now, expiresAt));
+    }
+
+    private Minted mint(CapabilityType type, UUID authorizationId, Instant now, Instant expiresAt) {
+        String token = CapabilityToken.issue(type);
         return new Minted(
                 token,
                 new ExecutionCapability(
                         UUID.randomUUID(),
                         authorizationId,
-                        CapabilityType.SOURCE,
+                        type,
                         CapabilityToken.hash(token),
                         now,
                         expiresAt,
@@ -569,5 +639,30 @@ public class ExecutionAuthorizationService {
             Instant commandExpiresAt,
             UUID sourceCapabilityId,
             String sourceCapabilityToken,
-            List<String> secretCapabilityTokens) {}
+            List<String> secretCapabilityTokens,
+            /**
+             * Present only for a policy that needs one.
+             *
+             * <p>Like every other token here it exists in this object and nowhere else: it was never written
+             * to a database, a log, a metric, a container label, or the persisted command. It is deliberately
+             * NOT part of the command's semantic digest either — the command is immutable and this rotates on
+             * every delivery, so a digest covering it would be stale from the second request onward, and the
+             * rule the digest enforces is that a field it cannot cover must not be in the document.
+             */
+            Optional<String> egressCapabilityToken,
+            /**
+             * The destinations the run's pinned policy permits, delivered so the worker's platform-owned
+             * workload knows where to aim.
+             *
+             * <p><strong>Not authority.</strong> The proxy resolves the policy from authoritative state on
+             * every request and every tunnel revalidation, so this list enforces nothing and a copy of it
+             * altered in transit changes nothing about what may be reached. It travels beside the command
+             * rather than inside it for that reason: putting a second copy of the policy into an immutable,
+             * digested artifact that nothing enforces from would be a field the runtime ignores, which is a
+             * claim with no evidence behind it. What the command binds — and what the worker independently
+             * verifies — is the policy's revision id and canonical digest.
+             *
+             * <p>Empty for a policy that names none, which is every {@code DENY_ALL}.
+             */
+            List<EgressDestination> egressDestinations) {}
 }

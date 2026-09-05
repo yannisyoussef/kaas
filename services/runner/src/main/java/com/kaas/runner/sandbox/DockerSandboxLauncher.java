@@ -139,7 +139,10 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                 .withLabels(SandboxLabels.of(generation, request.correlationId(), profile.version()))
                 .withAttachStdout(true)
                 .withAttachStderr(true)
-                .withNetworkDisabled(true)
+                // Disabled only when the profile says no network. Leaving this unconditionally true would
+                // silently override the network mode above, so a sandbox that was meant to reach its proxy
+                // would instead have nothing — an allowlist that permits everything and delivers nothing.
+                .withNetworkDisabled("none".equals(profile.networkMode()))
                 .exec();
         return created.getId();
     }

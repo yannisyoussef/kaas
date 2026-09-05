@@ -46,10 +46,24 @@ public record SandboxSecurityAttestation(
         String runtime,
         Instant assessedAt,
         Map<String, String> mandatoryControls,
+        /**
+         * Whether this deployment can actually enforce a destination allowlist, control by control.
+         *
+         * <p>Kept separate from the mandatory set rather than folded into it, because the two are required
+         * under different conditions. Every execution needs the mandatory controls. Only an ALLOWLIST
+         * execution needs these, and demanding them of a DENY_ALL run would make a sandbox that wants no
+         * network at all depend on the egress subsystem being healthy — increasing the attack surface of
+         * precisely the runs that were supposed to have none.
+         *
+         * <p>Within their own scope the same rule applies as for the mandatory set: exact equality in both
+         * directions, and every one must pass. An assessment that omits the control it failed is not a
+         * shorter assessment, it is a false one.
+         */
+        Map<String, String> egressControls,
         String digest) {
 
     /** The canonicalization the digest is taken over. A later form would be a different schema version. */
-    public static final String SCHEMA_VERSION = "kaas.sandbox-security-attestation.v1";
+    public static final String SCHEMA_VERSION = "kaas.sandbox-security-attestation.v2";
 
     /**
      * The controls this build of the control plane requires before it will authorize any execution.
@@ -77,6 +91,28 @@ public record SandboxSecurityAttestation(
             "WALL_CLOCK_TIMEOUT",
             "OUTPUT_BOUNDED");
 
+    /**
+     * What a deployment must demonstrate before this platform will authorize an ALLOWLIST execution.
+     *
+     * <p>Each one is a property of the host that would run the execution, not of the source tree, which is
+     * why it has to be assessed rather than assumed. Together they say: this host can create an isolated
+     * network and has verified it is isolated; it built the proxy image from the repository and knows its
+     * digest; a proxy on that network came up and is serving; a sandbox on that network can reach nothing on
+     * its own; and the proxy refuses traffic it cannot authorize.
+     *
+     * <p>What they deliberately do not cover is whether the proxy honours a control-plane decision, because
+     * assessing that would require the gate to hold a control plane — and the gate runs in the module that is
+     * build-forbidden from depending on one. That property is proven by the egress test suites and the
+     * full-pipeline test instead, which is the right place for it: it is a property of the code, and the code
+     * is the same everywhere, whereas these five are properties of the machine.
+     */
+    public static final Set<String> REQUIRED_EGRESS_CONTROLS = Set.of(
+            "EGRESS_NETWORK_INTERNAL",
+            "EGRESS_PROXY_IMAGE_PINNED",
+            "EGRESS_PROXY_READY",
+            "EGRESS_NO_DIRECT_ROUTE",
+            "EGRESS_PROXY_FAILS_CLOSED");
+
     private static final String PASS = "PASS";
 
     /** How far ahead of database time an assessment may be stamped before it is treated as wrong. */
@@ -84,6 +120,7 @@ public record SandboxSecurityAttestation(
 
     public SandboxSecurityAttestation {
         mandatoryControls = Map.copyOf(mandatoryControls);
+        egressControls = Map.copyOf(egressControls);
     }
 
     /**
@@ -141,6 +178,32 @@ public record SandboxSecurityAttestation(
         return java.util.Optional.empty();
     }
 
+    /**
+     * Why this deployment cannot be relied on to enforce a destination allowlist, or empty when it can.
+     *
+     * <p>Separate from {@link #reasonItCannotBeTrusted} and called only for an ALLOWLIST policy. Calling it
+     * unconditionally would be the mistake described on {@link #egressControls}: a DENY_ALL run refused
+     * because the egress subsystem is unhealthy is a run refused for a subsystem it does not use.
+     *
+     * <p>An empty map is a refusal, not a pass. That is the whole reason this returns a reason: an attestation
+     * produced before this control existed carries no egress controls at all, and the fail-closed reading of
+     * "no evidence" is "not enforceable".
+     */
+    public java.util.Optional<String> reasonEgressCannotBeEnforced() {
+        if (!egressControls.keySet().equals(REQUIRED_EGRESS_CONTROLS)) {
+            return java.util.Optional.of("assessment does not cover exactly the required egress controls");
+        }
+        List<String> notPassing = egressControls.entrySet().stream()
+                .filter(control -> !PASS.equals(control.getValue()))
+                .map(Map.Entry::getKey)
+                .sorted()
+                .toList();
+        if (!notPassing.isEmpty()) {
+            return java.util.Optional.of("egress controls did not pass: " + notPassing);
+        }
+        return java.util.Optional.empty();
+    }
+
     /** The digest this attestation's content implies, recomputed rather than read back. */
     public String expectedDigest() {
         try {
@@ -159,6 +222,16 @@ public record SandboxSecurityAttestation(
             // Sorted, so the digest describes the content rather than the order a parser happened to produce.
             new TreeMap<>(mandatoryControls).forEach((control, verdict) -> {
                 update(sha, "CONTROL");
+                update(sha, control);
+                update(sha, verdict);
+            });
+            // Covered by the digest like everything else. A field the digest does not cover is a field an
+            // editor can change without the document ceasing to describe itself — and this one decides whether
+            // a deployment may open network connections on a tenant's behalf.
+            update(sha, "EGRESS_CONTROL_COUNT");
+            update(sha, Integer.toString(egressControls.size()));
+            new TreeMap<>(egressControls).forEach((control, verdict) -> {
+                update(sha, "EGRESS_CONTROL");
                 update(sha, control);
                 update(sha, verdict);
             });

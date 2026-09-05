@@ -22,6 +22,31 @@ public enum RunLifecycle {
         return this == COMPLETED;
     }
 
+    /**
+     * Whether a run in this state may have a sandbox that can legitimately produce egress.
+     *
+     * <p>Three states, and the boundaries on both sides are deliberate.
+     *
+     * <p>{@code CLAIMED} is included because the egress capability is delivered while the run is still
+     * claimed, and a worker whose proxy asks before it has announced {@code RUNNING} is asking about a live
+     * assignment it genuinely holds. {@code PROVISIONING} and {@code RUNNING} are the states in which the
+     * proxy and then the sandbox actually exist.
+     *
+     * <p>{@code COLLECTING_RESULTS} and {@code PROCESSING_RESULTS} are excluded: by then the sandbox has been
+     * removed and its proxy torn down, so traffic arriving under this run's capability is not this run's
+     * execution. {@code STOPPING} is excluded because that is the whole of the fencing property — a cancelled
+     * run, a lapsed lease, or an overdue phase all reach it, and each must make an unexpired capability stop
+     * working. Terminal and pre-assignment states are excluded because no execution exists to authorize.
+     *
+     * <p>This lives here rather than as a condition at the call site because it is a statement about the
+     * lifecycle, and the call site that got it wrong got it wrong by restating it: an earlier version required
+     * exactly {@code CLAIMED}, which denied every request an execution ever made. It was invisible because
+     * nothing had yet run an allowlist execution end to end.
+     */
+    public boolean mayProduceExecutionEgress() {
+        return this == CLAIMED || this == PROVISIONING || this == RUNNING;
+    }
+
     private Set<RunLifecycle> transitions() {
         return switch (this) {
             case CREATED -> EnumSet.of(QUEUED, COMPLETED);

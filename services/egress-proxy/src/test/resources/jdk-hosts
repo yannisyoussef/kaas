@@ -1,0 +1,15 @@
+# A hosts file used ONLY by the JDK's own resolver during tests, via -Djdk.net.hosts.file.
+#
+# It exists to make one specific mistake visible. The proxy must connect to the address its DNS resolution
+# returned and classified — never to the hostname, which would resolve a second time inside connect() and
+# reach a socket without ever reaching the classifier. That mutation is invisible if both paths fail: the
+# connection is refused either way and the test cannot tell which resolver was consulted.
+#
+# So the name below is deliberately given two different answers. The controlled DNS server answers it with a
+# global-unicast address that nothing listens on; the JDK answers it with loopback, where the test does listen.
+# A proxy that connects by address reaches nothing. A proxy that connects by name reaches the listener, and the
+# test counts the connection.
+#
+# This changes nothing about production behaviour: the property only affects java.net.InetAddress lookups,
+# which the proxy performs exactly nowhere, and the address classifier never sees it.
+127.0.0.1 exact-address.example.com

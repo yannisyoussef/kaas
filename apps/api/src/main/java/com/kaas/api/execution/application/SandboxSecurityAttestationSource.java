@@ -111,6 +111,7 @@ public class SandboxSecurityAttestationSource {
                             "runtime",
                             "assessedAt",
                             "mandatoryControls",
+                            "egressControls",
                             "digest")
                     .contains(property)) {
                 throw new IllegalArgumentException("An attestation carries no unknown properties.");
@@ -120,13 +121,18 @@ public class SandboxSecurityAttestationSource {
         if (controls == null || !controls.isObject()) {
             throw new IllegalArgumentException("An attestation enumerates its mandatory controls.");
         }
-        Map<String, String> verdicts = new LinkedHashMap<>();
-        for (String control : controls.propertyNames()) {
-            JsonNode verdict = controls.get(control);
-            if (!verdict.isString()) {
-                throw new IllegalArgumentException("Each control carries a textual verdict.");
-            }
-            verdicts.put(control, verdict.stringValue());
+        Map<String, String> verdicts = verdictsOf(controls);
+        // Absent is legal and means "this deployment makes no claim about egress", which the ALLOWLIST path
+        // reads as a refusal. Present but malformed is an error rather than an absence: a document that tried
+        // to say something about egress and failed must not be read as one that said nothing.
+        JsonNode egress = root.get("egressControls");
+        Map<String, String> egressVerdicts;
+        if (egress == null || egress.isNull()) {
+            egressVerdicts = Map.of();
+        } else if (!egress.isObject()) {
+            throw new IllegalArgumentException("Egress controls are an object when present.");
+        } else {
+            egressVerdicts = verdictsOf(egress);
         }
         return new SandboxSecurityAttestation(
                 text(root, "schemaVersion"),
@@ -135,7 +141,20 @@ public class SandboxSecurityAttestationSource {
                 text(root, "runtime"),
                 Instant.parse(text(root, "assessedAt")),
                 verdicts,
+                egressVerdicts,
                 text(root, "digest"));
+    }
+
+    private static Map<String, String> verdictsOf(JsonNode controls) {
+        Map<String, String> verdicts = new LinkedHashMap<>();
+        for (String control : controls.propertyNames()) {
+            JsonNode verdict = controls.get(control);
+            if (!verdict.isString()) {
+                throw new IllegalArgumentException("Each control carries a textual verdict.");
+            }
+            verdicts.put(control, verdict.stringValue());
+        }
+        return verdicts;
     }
 
     private static String text(JsonNode root, String property) {

@@ -34,6 +34,65 @@ emit_tooling() {
     fi
 }
 
+# ---------------------------------------------------------------------------------------------------
+# Proxied-request helpers.
+#
+# Defined once, at the top, because two modes need them: the `egress` security probes and the synthetic
+# workload's own egress mode. Two copies of a request writer would be two chances to get the framing wrong,
+# and the copy that is wrong is the one that emits a bare LF -- which the proxy refuses on purpose, because a
+# bare LF is a header boundary to one reader and not to another, and that difference is where request
+# smuggling lives. Every terminator below is written explicitly as CRLF for that reason; a shell here-string
+# or a multi-line quoted string emits bare LF, and the first version of this probe did exactly that and got a
+# 400 for every request, which was the parser working as intended.
+#
+# The destinations are never arguments a caller chose. They arrive in environment variables the trusted
+# launcher sets from the execution's own policy.
+# ---------------------------------------------------------------------------------------------------
+
+# $1 method, $2 request target, $3 Host header value. Prints the raw response.
+proxy_send() {
+    printf '%s %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Bearer %s\r\nConnection: close\r\n\r\n' \
+        "$1" "$2" "$3" "${KAAS_EGRESS_CAPABILITY:-}" \
+        | nc -w 15 "${KAAS_EGRESS_PROXY_HOST:-}" "${KAAS_EGRESS_PROXY_PORT:-}" 2>/dev/null
+}
+
+# $1 host, $2 port. Opens a CONNECT tunnel and prints whatever the proxy answered.
+#
+# The tunnel is not used for anything: a workload here has no TLS, and intercepting the tenant's TLS to
+# inspect it is exactly what this design refuses to do. What the CONNECT response proves is the whole of the
+# proxy's decision -- authorized, resolved, classified, connected -- with the payload left end to end.
+#
+# The short idle timeout is the exit condition. On success the proxy answers and then waits for bytes that
+# never come, so nothing here would ever close the connection on its own.
+proxy_connect() {
+    printf 'CONNECT %s:%s HTTP/1.1\r\nHost: %s:%s\r\nProxy-Authorization: Bearer %s\r\n\r\n' \
+        "$1" "$2" "$1" "$2" "${KAAS_EGRESS_CAPABILITY:-}" \
+        | nc -w 5 "${KAAS_EGRESS_PROXY_HOST:-}" "${KAAS_EGRESS_PROXY_PORT:-}" 2>/dev/null
+}
+
+# The status line's code. Prints nothing when nothing came back at all, which callers report as "none" -- a
+# different fact from a refusal, and one that must not be reported as one.
+status_of() {
+    printf '%s' "$1" | head -n 1 | awk '{print $2}' | tr -d '\r'
+}
+
+# The proxy's own reason header. Present on every refusal the proxy issues and on nothing else, so its
+# ABSENCE alongside a status line is the evidence that the proxy authorized and connected and the status
+# came from the target.
+denial_of() {
+    printf '%s' "$1" | grep -i '^X-KaaS-Egress-Denial:' | head -n 1 | cut -d: -f2- | tr -d ' \r'
+}
+
+emit_status() {
+    code="$(status_of "$2")"
+    emit "$1" "${code:-none}"
+}
+
+emit_denial() {
+    reason="$(denial_of "$2")"
+    emit "$1" "${reason:-none}"
+}
+
 case "$mode" in
 inspect)
     emit_tooling id stat ls awk env find
@@ -219,12 +278,121 @@ workload)
     # Its identity is fixed and reported, so a result carrying KAAS_SYNTHETIC_V1 can never be mistaken
     # for a real engine's output by anything downstream. Reporting an engine this did not run would be
     # the single most misleading thing this slice could do.
-    emit_tooling awk tr sort
     expected="${2:-pass}"
+    if [ "$expected" = "egress" ]; then
+        emit_tooling awk tr sort nc nslookup
+    else
+        emit_tooling awk tr sort
+    fi
     if [ "$expected" != "imposter" ]; then
         emit workload_identity KAAS_SYNTHETIC_V1
     else
         emit workload_identity SOMETHING_ELSE
+    fi
+
+    if [ "$expected" = "egress" ]; then
+        # THE ALLOWLIST WORKLOAD.
+        #
+        # Still the platform's own workload, still no feature source and no secret — the only thing that
+        # changes under an allowlist is that it has one reachable peer, and what it demonstrates is that the
+        # peer is the ONLY one.
+        #
+        # Three scenarios, and the first two are only evidence together. "The destination the policy names is
+        # reachable" is satisfied by a fully routed network; "nothing is reachable directly" is satisfied by a
+        # workload with no network at all. Neither alone says anything about enforcement; the pair does.
+        host="${KAAS_EGRESS_ALLOWED_HOST:-}"
+        port="${KAAS_EGRESS_ALLOWED_PORT:-80}"
+        scheme="${KAAS_EGRESS_ALLOWED_SCHEME:-HTTP}"
+        denied_port="${KAAS_EGRESS_DENIED_PORT:-1}"
+        passed=0
+        failed=0
+
+        # 1. THROUGH THE PROXY, to the destination the policy names.
+        if [ "$scheme" = "HTTPS" ]; then
+            allowed="$(proxy_connect "$host" "$port")"
+        else
+            allowed="$(proxy_send GET "http://${host}:${port}/" "${host}:${port}")"
+        fi
+        allowed_status="$(status_of "$allowed")"
+        allowed_denial="$(denial_of "$allowed")"
+        emit egress_allowed_status "${allowed_status:-none}"
+        emit egress_allowed_denial "${allowed_denial:-none}"
+        # PASSED when the proxy authorized and connected, which is what the PLATFORM is responsible for.
+        # What the target then answers is the target's business: a 404 from an authorized destination is a
+        # successful egress and an unsuccessful request, and conflating the two would turn this workload into
+        # a health check for somebody else's service. The absence of the proxy's own denial header is what
+        # distinguishes the two, because the proxy puts that header on every refusal it issues and on nothing
+        # else -- so a 503 it produced cannot be mistaken for a 503 the target produced.
+        if [ -n "$allowed_status" ] && [ -z "$allowed_denial" ]; then
+            emit scenario_egress_allowed PASSED
+            passed=$((passed + 1))
+        else
+            emit scenario_egress_allowed FAILED
+            failed=$((failed + 1))
+        fi
+
+        # 2. A DESTINATION THE POLICY DOES NOT NAME. The same host on a port the launcher established is
+        #    absent from the policy, so this is refused by construction rather than by hope, and the proxy
+        #    refuses it before resolving anything -- no name has to exist for this to be evidence.
+        if [ "$scheme" = "HTTPS" ]; then
+            denied="$(proxy_connect "$host" "$denied_port")"
+        else
+            denied="$(proxy_send GET "http://${host}:${denied_port}/" "${host}:${denied_port}")"
+        fi
+        emit_status egress_denied_status "$denied"
+        denied_reason="$(denial_of "$denied")"
+        emit egress_denied_reason "${denied_reason:-none}"
+        # A deliberate denial is SUCCESSFUL security evidence, not a failed test. There is no tenant test
+        # here, and reporting a correct refusal as a failure would teach a reader exactly the wrong thing.
+        if [ "$denied_reason" = "DESTINATION_NOT_ALLOWED" ]; then
+            emit scenario_egress_denied PASSED
+            passed=$((passed + 1))
+        else
+            emit scenario_egress_denied FAILED
+            failed=$((failed + 1))
+        fi
+
+        # 3. NO SECOND ROUTE. A hostile workload ignores every proxy setting and opens a socket itself, so
+        #    topology has to defeat it rather than configuration. Enumerated rather than asked about one named
+        #    target: a surface nobody thought to name is exactly the one that would still be reachable.
+        reachable=""
+        for target in "1.1.1.1 53 public" "10.0.0.1 80 private" \
+                      "169.254.169.254 80 metadata" "172.17.0.1 2375 daemon"; do
+            set -- $target
+            if nc -w 2 -z "$1" "$2" 2>/dev/null; then
+                emit "egress_direct_$3" reachable
+                reachable="${reachable}$3,"
+            else
+                emit "egress_direct_$3" unreachable
+            fi
+        done
+        # Independent name resolution would let a workload discover addresses without the proxy's decision
+        # being involved at all, which is the same escape by a quieter route.
+        if nslookup "$host" 2>/dev/null >/dev/null; then
+            emit egress_direct_dns resolvable
+            reachable="${reachable}dns,"
+        else
+            emit egress_direct_dns unresolvable
+        fi
+        if [ -z "$reachable" ]; then
+            emit scenario_egress_no_bypass PASSED
+            passed=$((passed + 1))
+        else
+            emit scenario_egress_no_bypass FAILED
+            failed=$((failed + 1))
+        fi
+
+        emit workload_passed "$passed"
+        emit workload_failed "$failed"
+        if [ "$failed" -gt 0 ]; then
+            emit workload_outcome FAILED
+        else
+            emit workload_outcome PASSED
+        fi
+        # Exit zero either way, for the same reason every other workload mode does: a failing workload is not
+        # a failing execution, and collapsing the two here would make the sandbox's exit code report the
+        # outcome -- which is the conflation the orthogonal-outcome rule exists to prevent.
+        exit 0
     fi
 
     # A fixed, deterministic set of assertions. Deterministic on purpose: the lifecycle is what is
@@ -288,6 +456,146 @@ workload)
     # the orthogonal-outcome rule exists to prevent. The infrastructure succeeded: it ran the
     # workload and collected its result.
     exit 0
+    ;;
+egress)
+    # Egress probes. Like every other mode here, the destinations are NOT arguments a caller chose: they
+    # arrive in environment variables the trusted launcher sets from the execution's own policy, and the
+    # sub-mode is one of a fixed set. Nothing a tenant writes reaches this script.
+    #
+    # The pair that matters most is "through the proxy it works" and "straight at the same address it does
+    # not". Either alone proves nothing: a workload that cannot reach anything at all satisfies the second,
+    # and a workload on a fully routed network satisfies the first.
+    emit_tooling nc nslookup
+
+    submode="${2:-status}"
+    proxy_host="${KAAS_EGRESS_PROXY_HOST:-}"
+    proxy_port="${KAAS_EGRESS_PROXY_PORT:-}"
+    capability="${KAAS_EGRESS_CAPABILITY:-}"
+
+    case "$submode" in
+    allowed)
+        # The success path: an ordinary proxied request to a destination the policy names.
+        host="${KAAS_EGRESS_ALLOWED_HOST:-}"
+        port="${KAAS_EGRESS_ALLOWED_PORT:-80}"
+        response="$(proxy_send GET "http://${host}:${port}/ok" "${host}:${port}")"
+        emit_status egress_allowed_status "$response"
+        if printf '%s' "$response" | grep -q 'KAAS_EGRESS_TARGET_OK'; then
+            emit egress_allowed_body present
+        else
+            emit egress_allowed_body absent
+        fi
+        ;;
+    denied)
+        # A destination the policy does not name. The refusal must come from the proxy, with a reason.
+        host="${KAAS_EGRESS_DENIED_HOST:-}"
+        response="$(proxy_send GET "http://${host}:80/ok" "${host}:80")"
+        emit_status egress_denied_status "$response"
+        emit_denial egress_denied_reason "$response"
+        ;;
+    private)
+        # A destination the policy DOES name, whose DNS answer is a private address. The name passes policy
+        # and the address does not, which is the only way to reach the classifier at all.
+        host="${KAAS_EGRESS_PRIVATE_HOST:-}"
+        response="$(proxy_send GET "http://${host}:80/ok" "${host}:80")"
+        emit_status egress_private_status "$response"
+        emit_denial egress_private_reason "$response"
+        ;;
+    redirect)
+        # Escape by redirect. The proxy does not follow redirects; the client does, and that second request
+        # is a new proxied request which must be authorized on its own. This probe performs both halves and
+        # reports both, so "the redirect was returned" and "following it was refused" are separate evidence.
+        host="${KAAS_EGRESS_ALLOWED_HOST:-}"
+        port="${KAAS_EGRESS_ALLOWED_PORT:-80}"
+        first="$(proxy_send GET "http://${host}:${port}/redirect" "${host}:${port}")"
+        emit_status egress_redirect_first_status "$first"
+        location="$(printf '%s' "$first" | grep -i '^Location:' | head -n 1 | cut -d: -f2- | tr -d ' \r')"
+        if [ -z "$location" ]; then
+            emit egress_redirect_location absent
+        else
+            emit egress_redirect_location present
+            # Follow it exactly as a client would: a second proxied request to whatever it pointed at.
+            target="$(printf '%s' "$location" | sed 's|^http://||' | cut -d/ -f1)"
+            path="/$(printf '%s' "$location" | sed 's|^http://[^/]*/||')"
+            second="$(proxy_send GET "http://${target}${path}" "${target}")"
+            emit_status egress_redirect_second_status "$second"
+            emit_denial egress_redirect_second_reason "$second"
+        fi
+        ;;
+    bypass)
+        # The load-bearing negative. A hostile workload ignores every proxy environment variable and opens a
+        # socket straight at the address it wants. Topology has to defeat that, not configuration.
+        #
+        # Reported as an enumeration of what was reachable rather than as a verdict, so a surface nobody
+        # thought to name is still visible in the evidence.
+        for target in "${KAAS_EGRESS_DIRECT_IP:-11.0.0.9} ${KAAS_EGRESS_ALLOWED_PORT:-80} direct_target" \
+                      "1.1.1.1 53 public" "10.0.0.1 80 private" \
+                      "169.254.169.254 80 metadata" "172.17.0.1 2375 daemon"; do
+            set -- $target
+            if nc -w 2 -z "$1" "$2" 2>/dev/null; then
+                emit "egress_direct_$3" reachable
+            else
+                emit "egress_direct_$3" unreachable
+            fi
+        done
+        # Independent name resolution would let a workload discover addresses without the proxy's decision
+        # being involved at all.
+        if nslookup "${KAAS_EGRESS_ALLOWED_HOST:-example.com}" 2>/dev/null >/dev/null; then
+            emit egress_direct_dns resolvable
+        else
+            emit egress_direct_dns unresolvable
+        fi
+        ;;
+    tunnel)
+        # Opens a CONNECT tunnel and holds it, so the test can fence the assignment underneath it and measure
+        # how long the tunnel stays usable.
+        #
+        # The measurement is of nc's lifetime, not of a pipeline's. The first version held the connection open
+        # with "{ printf; sleep N; } | nc" and timed the whole pipeline, which always reported N: the sleep
+        # kept running after nc had exited, so a tunnel that was cut promptly looked identical to one that was
+        # never cut at all. The revocation was working; the probe could not see it.
+        #
+        # A FIFO gives nc a stdin that never reaches end of file, so nc stays up until the far end closes,
+        # and nc is the only background process -- which makes $! unambiguous.
+        host="${KAAS_EGRESS_ALLOWED_HOST:-}"
+        port="${KAAS_EGRESS_ALLOWED_PORT:-80}"
+        hold="${KAAS_EGRESS_TUNNEL_SECONDS:-60}"
+        rm -f /tmp/tunnel.in
+        mkfifo /tmp/tunnel.in 2>/dev/null || { emit error tunnel_fifo_unavailable; exit 70; }
+
+        start="$(date +%s)"
+        nc -w "$hold" "$proxy_host" "$proxy_port" < /tmp/tunnel.in > /tmp/tunnel.out 2>/dev/null &
+        tunnel_pid=$!
+        # Held open for the whole probe, so nothing this end does can be mistaken for the far end closing.
+        exec 3> /tmp/tunnel.in
+        printf 'CONNECT %s:%s HTTP/1.1\r\nHost: %s:%s\r\nProxy-Authorization: Bearer %s\r\n\r\n' \
+            "$host" "$port" "$host" "$port" "$capability" >&3
+
+        # A byte a second into the tunnel. Not decoration: busybox nc does not exit merely because the far
+        # end went away while its own stdin is still open, so polling liveness alone reports the full hold
+        # whether the tunnel was cut or not — which is what the first two versions of this probe did. A write
+        # onto a socket the proxy has closed fails, and that is what ends nc and stops the clock.
+        #
+        # Whatever crosses the tunnel is irrelevant to the far end, which reads nothing. The write is the
+        # measurement, not the payload.
+        elapsed=0
+        while [ "$elapsed" -lt "$hold" ]; do
+            kill -0 "$tunnel_pid" 2>/dev/null || break
+            printf '.' >&3 2>/dev/null || break
+            sleep 1
+            elapsed=$((elapsed + 1))
+        done
+        finish="$(date +%s)"
+        exec 3>&-
+        kill "$tunnel_pid" 2>/dev/null
+
+        emit_status egress_tunnel_open_status "$(cat /tmp/tunnel.out 2>/dev/null)"
+        emit egress_tunnel_held_seconds "$((finish - start))"
+        ;;
+    *)
+        emit error unsupported_egress_submode
+        exit 64
+        ;;
+    esac
     ;;
 *)
     emit error unsupported_mode

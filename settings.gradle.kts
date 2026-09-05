@@ -13,4 +13,8 @@ rootProject.name = "kaas"
 // daemon at all — so the test that needs both has to live somewhere that depends on both, and neither of them
 // is that place. A third module is the honest answer; weakening either guard to avoid it would trade a real
 // security boundary for build convenience.
-include(":apps:api", ":services:runner", ":tests:pipeline")
+// :services:egress-proxy is the trusted egress enforcement point. It is a separate module because it is a
+// separate trust domain: it holds no Docker client, so a compromise of the proxy cannot start containers, and
+// it holds no control-plane code, so the canonicalization it applies to a request is an independent
+// implementation of the written contract rather than the same code agreeing with itself.
+include(":apps:api", ":services:runner", ":services:egress-proxy", ":tests:pipeline")

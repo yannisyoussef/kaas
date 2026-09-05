@@ -16,8 +16,17 @@ package com.kaas.api.execution.domain;
 public enum NetworkPolicyType {
     /** No network whatsoever. Enforced by the sandbox and demonstrated by the probe. */
     DENY_ALL(true),
-    /** A destination allowlist. Modelled, not yet enforceable by any launcher this platform has. */
-    ALLOWLIST(false);
+    /**
+     * A destination allowlist, enforced by the trusted egress proxy.
+     *
+     * <p>Enforceable in the sense this flag means — the platform has a mechanism for it — but that is
+     * necessary and not sufficient. Whether a particular <em>deployment</em> can enforce it is a separate
+     * question with a separate answer: the authorization path also requires the sandbox security assessment
+     * to carry passing egress controls, which are properties of the host that would run the execution rather
+     * than of this source tree. A build that has the mechanism running on a host that cannot demonstrate it
+     * still refuses.
+     */
+    ALLOWLIST(true);
 
     private final boolean enforceable;
 

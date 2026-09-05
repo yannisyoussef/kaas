@@ -108,6 +108,16 @@ public interface ExecutionAuthorizationRepository {
     record SnapshotContext(
             String runSnapshotSha256,
             boolean sealed,
+            /**
+             * The policy revision this run was sealed with.
+             *
+             * <p>Read from the snapshot rather than looked up by a well-known identifier, which is what the
+             * service did while DENY_ALL was the only policy that existed. A constant in the code cannot
+             * express "this run, and only this run, was authorized for these destinations", and a policy
+             * resolved at authorization time rather than at seal time would let a configuration change alter
+             * what an already-running execution may reach.
+             */
+            UUID networkPolicyRevisionId,
             /** Total UTF-8 bytes of the pinned sources, so issuance can refuse what redemption could not build. */
             long totalSourceBytes,
             List<SnapshotFeature> features,

@@ -131,6 +131,27 @@ class MigrationUpgradeTests {
         assertThat(count(database, "run_lifecycle_events where previous_state = 'QUEUED'"
                         + " and lifecycle_state = 'COMPLETED' and attempt_id is not null")).isPositive();
 
+        // V12 DROPS and re-ADDS ck_execution_capabilities_type, and PostgreSQL validates a re-added CHECK
+        // against every row already in the table. Both existing values have to be present BEFORE the upgrade
+        // runs, or the widened constraint is checked against nothing and a version of it that accidentally
+        // dropped 'SOURCE' or 'SECRET' would apply cleanly here and reject real rows on first deployment.
+        assertThat(count(database, "execution_capabilities where capability_type = 'SOURCE'")).isPositive();
+        assertThat(count(database, "execution_capabilities where capability_type = 'SECRET'")).isPositive();
+        // V12 also adds ck_execution_capabilities_egress_is_not_redeemed, which is likewise validated against
+        // every existing row. Its subject is the redemption counter, so a fixture whose capabilities have all
+        // been redeemed zero times leaves the interesting half of the constraint short-circuited — a redeemed
+        // row is what proves the exemption is scoped to EGRESS and does not accidentally forbid redemption
+        // everywhere.
+        assertThat(count(database, "execution_capabilities where redemption_count > 0")).isPositive();
+
+        // V12 adds NOT NULL columns with defaults and foreign keys to projects and run_snapshots. Both are
+        // validated against every existing row, so both tables have to be non-empty here or the new
+        // references are checked against nothing.
+        assertThat(count(database, "projects")).isPositive();
+        assertThat(count(database, "run_snapshots")).isPositive();
+        // And it adds two CHECKs to network_policy_revisions, validated against the seeded DENY_ALL row.
+        assertThat(count(database, "network_policy_revisions")).isPositive();
+
         // V10 DOES revalidate against existing rows, and this is what the fixture has to satisfy for it.
         //
         // It drops and re-adds four constraints that are then checked against every row already present: the
@@ -299,22 +320,59 @@ class MigrationUpgradeTests {
         assertThat(count(database, "pg_indexes where indexname = 'ix_execution_attempts_lease'")).isEqualTo(1);
         assertThat(count(database, "pg_indexes where indexname = 'ix_test_runs_stopping'")).isEqualTo(1);
 
-        // V9 invents no authority. An upgrade that materialised an authorization, a capability, or a command
-        // would be granting permission to execute to an assignment that never asked for it — and the run it
-        // pointed at would have been claimed by a worker that has since gone.
-        assertThat(count(database, "execution_authorizations")).isZero();
-        assertThat(count(database, "execution_capabilities")).isZero();
+        // No migration INVENTS authority. Granting permission to execute to an assignment that never asked for
+        // it would point a live capability at a run whose worker is long gone.
+        //
+        // The counts are now exact rather than zero: the fixture seeds one authorization and two capabilities
+        // so that V12's re-added type CHECK has rows to be validated against. Asserting the exact number is
+        // what keeps the original claim intact — an upgrade that materialised one more would still fail here,
+        // and so would one that silently dropped the fixture's own.
+        assertThat(count(database, "execution_authorizations")).isEqualTo(1);
+        assertThat(count(database, "execution_capabilities")).isEqualTo(2);
+        assertThat(count(database, "execution_capabilities where capability_type = 'SOURCE'")).isEqualTo(1);
+        assertThat(count(database, "execution_capabilities where capability_type = 'SECRET'")).isEqualTo(1);
+        // And V12 invents no egress authority either. The type became legal; no row acquired it.
+        assertThat(count(database, "execution_capabilities where capability_type = 'EGRESS'")).isZero();
+
+        // Every project and every existing snapshot keeps the egress posture it already had. A migration that
+        // defaulted these to anything but DENY_ALL would silently widen what work already in the system can
+        // reach, which is the one direction an upgrade must never move on its own.
+        assertThat(count(database, "projects where network_policy_revision_id"
+                        + " <> '00000000-0000-4000-8000-00000000d001'")).isZero();
+        assertThat(count(database, "run_snapshots where network_policy_revision_id"
+                        + " <> '00000000-0000-4000-8000-00000000d001'")).isZero();
+        // The seeded DENY_ALL stays platform-global. Giving it an owner would mean every project needed its
+        // own copy, and the one project whose copy was missing would have no policy at all.
+        assertThat(count(database, "network_policy_revisions where policy_type = 'DENY_ALL'"
+                        + " and organization_id is null and project_id is null")).isEqualTo(1);
+        // Policy versions are unique per owner now, not globally. The global form permitted exactly one
+        // ALLOWLIST across the whole platform, so the second project to configure egress would have failed on
+        // a unique violation naming a row belonging to a tenant it cannot see.
+        assertThat(count(database, "pg_indexes where indexname = 'uq_network_policy_scope_type_version'"))
+                .isEqualTo(1);
+        assertThat(count(database, "pg_constraint where conname = 'uq_network_policy_type_version'")).isZero();
         assertThat(count(database, "execution_capability_secret_references")).isZero();
         assertThat(count(database, "execution_commands")).isZero();
 
         // Exactly one policy revision, seeded by the migration itself: DENY_ALL, version one, platform-authored,
         // and carrying the digest its own content implies. A digest that did not match would mean the seeded
         // row and the code that verifies it had drifted, and every authorization would refuse forever.
+        //
+        // The value is the v2 digest. V11 moved the canonical form to cover destinations — including a count of
+        // zero — which changes every policy's digest, DENY_ALL included, and restates this row accordingly.
         assertThat(count(database, "network_policy_revisions")).isEqualTo(1);
         assertThat(count(database, "network_policy_revisions where policy_type = 'DENY_ALL'"
                         + " and policy_version = 1 and created_by = 'kaas.platform'"
                         + " and canonical_digest = "
-                        + "'sha256:90bc5fe597d868eb21bc933950f31f10f4ea1f528e9e96a8eabdc7bd73a02450'"))
+                        + "'sha256:3944c369d57700eb13ce96b492fbac7ea9443a61faa8985a01e2394ab40e0de6'"))
+                .isEqualTo(1);
+        // The upgrade invents no destinations. ALLOWLIST is still unenforceable, and a seeded destination would
+        // mean the platform had authorized egress nobody asked for.
+        assertThat(count(database, "network_policy_destinations")).isZero();
+        // And the immutability trigger V11 had to disable is enabled again. A migration that disabled a guard
+        // and failed to restore it would leave every later write unguarded, silently.
+        assertThat(count(database, "pg_trigger where tgname = 'network_policy_revisions_immutable'"
+                        + " and tgrelid = 'network_policy_revisions'::regclass and tgenabled <> 'D'"))
                 .isEqualTo(1);
 
         // V10 invents no execution either. An upgrade that materialised a phase deadline, a sandbox reference,
@@ -434,6 +492,16 @@ class MigrationUpgradeTests {
         // the same populated-but-unexercised gap the terminated runs above were added to close, one state later.
         statements.add(stoppingRunFixture("34"));
         statements.add(settledLeaseLostRunFixture("35"));
+
+        // Capabilities that a deployment running the previous version would already hold.
+        //
+        // Added for V12, which DROPS and re-ADDS ck_execution_capabilities_type to admit a third value. A
+        // re-added CHECK is validated against every row already in the table — and over an empty table it
+        // validates nothing at all. This fixture previously seeded no capabilities, so V12 would have shipped
+        // green here having never once been evaluated against a SOURCE or a SECRET row, which is exactly the
+        // "a fresh-schema migration test is not a migration test" failure this class exists to catch, one
+        // table deeper than it was looking.
+        statements.add(executionAuthorityFixture("34"));
 
         // One RUN_STATE_CHANGED row as well, so the generalized schema is exercised beside the real type.
         statements.add("""
@@ -732,6 +800,47 @@ class MigrationUpgradeTests {
                         "0".equals(delivery[2]) ? "null" : "now()", delivery[5], delivery[4],
                         dispatchId));
         return sql.toString();
+    }
+
+    /**
+     * An authorization and its capabilities, at the shape the previous version produces.
+     *
+     * <p>Hung off the fenced attempt of the stopping run rather than off a fresh claimed one, for two reasons.
+     * It is the realistic shape — an authorization outlives the assignment it was issued for and is revoked
+     * rather than deleted, because it is audit evidence. And materialising a CLAIMED attempt here would
+     * contradict the assertion elsewhere in this class that no pre-existing attempt is claimed, which exists
+     * because a claimed attempt implies a live worker that this database has never met.
+     *
+     * <p>One capability is redeemed and one is not, so that both sides of the redemption accounting are
+     * present for any constraint that reasons about it.
+     */
+    private static String executionAuthorityFixture(String suffix) {
+        String runId = "00000000-0000-4000-8000-0000000000" + suffix;
+        String attemptId = "00000000-0000-4000-8000-0000000001" + suffix;
+        String authorizationId = "00000000-0000-4000-8000-0000000006" + suffix;
+        return """
+            INSERT INTO execution_authorizations (authorization_id, organization_id, project_id, run_id,
+                    run_version, attempt_id, attempt_number, assignment_epoch, worker_id, run_snapshot_sha256,
+                    security_profile_version, security_assessment_digest, probe_image_digest,
+                    network_policy_revision_id, issued_at, expires_at, revoked_at, revoked_reason)
+            VALUES ('%s', '00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001',
+                    '%s', 4, '%s', 1, 1, 'kaas.worker.fixture', repeat('8', 64), 'kaas.sandbox.v1',
+                    'sha256:' || repeat('a', 64), 'sha256:' || repeat('b', 64),
+                    '00000000-0000-4000-8000-00000000d001', now() - interval '2 min',
+                    now() + interval '3 min', now() - interval '1 min', 'ASSIGNMENT_FENCED');
+            INSERT INTO execution_capabilities (capability_id, authorization_id, organization_id, project_id,
+                    capability_type, token_sha256, issued_at, expires_at, redemption_count, last_redeemed_at,
+                    revoked_at)
+            VALUES ('00000000-0000-4000-8000-0000000007%s', '%s',
+                    '00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001',
+                    'SOURCE', repeat('c', 64), now() - interval '2 min', now() + interval '3 min',
+                    3, now() - interval '90 seconds', now() - interval '1 min'),
+                   ('00000000-0000-4000-8000-0000000008%s', '%s',
+                    '00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001',
+                    'SECRET', repeat('d', 64), now() - interval '2 min', now() + interval '3 min',
+                    0, null, now() - interval '1 min');
+            """
+                .formatted(authorizationId, runId, attemptId, suffix, authorizationId, suffix, authorizationId);
     }
 
     /** Migration versions as they exist on disk, in applied order. The source of truth is the files themselves. */

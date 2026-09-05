@@ -86,8 +86,22 @@ class JdbcRunIntentRepository implements RunIntentRepository {
                      run_profile_id, run_profile_revision_id, run_profile_revision_number, run_profile_sha256,
                      environment_id, environment_revision_id, environment_revision_number, environment_sha256,
                      parallelism, retry_max_attempts, retry_delay_milliseconds, execution_timeout_seconds,
-                     max_artifact_bytes, max_total_bytes, engine, engine_version, content_sha256, sealed)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false)
+                     max_artifact_bytes, max_total_bytes, engine, engine_version, content_sha256,
+                     network_policy_revision_id, sealed)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        -- The egress policy is PINNED HERE, in the same statement that creates the snapshot.
+                        --
+                        -- Copied from the project rather than resolved later, because "later" is when a
+                        -- configuration change could alter what an already-created run is permitted to reach.
+                        -- A run means one thing for as long as it exists; that is what a snapshot is for, and
+                        -- the destinations it may talk to are part of what it means.
+                        --
+                        -- The subquery is scoped by tenant as well as by project. A project identifier alone
+                        -- would be a lookup on a caller-influenced key, and the composite is what every other
+                        -- read in this schema uses.
+                        (select p.network_policy_revision_id from projects p
+                          where p.project_id = ? and p.organization_id = ?),
+                        false)
                 """,
                 snapshot.runId(), organizationId, snapshot.projectId(), snapshot.snapshotVersion(),
                 snapshot.runProfile().resourceId(), snapshot.runProfile().revisionId(),
@@ -97,7 +111,8 @@ class JdbcRunIntentRepository implements RunIntentRepository {
                 snapshot.parallelism(), snapshot.scenarioRetry().maxAttempts(),
                 snapshot.scenarioRetry().delayMilliseconds(), snapshot.executionTimeoutSeconds(),
                 snapshot.artifactPolicy().maxArtifactBytes(), snapshot.artifactPolicy().maxTotalBytes(),
-                snapshot.engine().engine(), snapshot.engine().version(), hex(snapshot.snapshotDigest()));
+                snapshot.engine().engine(), snapshot.engine().version(), hex(snapshot.snapshotDigest()),
+                snapshot.projectId(), organizationId);
         int ordinal = 0;
         for (SnapshotFeature feature : snapshot.features()) {
             jdbc.update(

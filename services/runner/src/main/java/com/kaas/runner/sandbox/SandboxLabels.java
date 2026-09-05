@@ -17,13 +17,37 @@ public final class SandboxLabels {
     public static final String CORRELATION = "kaas.correlation";
     public static final String PROFILE = "kaas.security.profile";
 
+    /**
+     * What kind of resource this is, so reconciliation can tell a sandbox from the proxy that constrains it.
+     *
+     * <p>Without it the two are indistinguishable to a reconciler, and the failure is asymmetric: removing a
+     * sandbox and leaving its proxy leaves a running gateway with no execution behind it, which is exactly the
+     * surviving egress path this slice exists to prevent.
+     */
+    public static final String RESOURCE = "kaas.resource";
+
+    /** An untrusted execution sandbox. */
+    public static final String RESOURCE_SANDBOX = "sandbox";
+
+    /** A trusted egress proxy. */
+    public static final String RESOURCE_PROXY = "egress-proxy";
+
+    /** A per-execution internal network. */
+    public static final String RESOURCE_NETWORK = "execution-network";
+
     private SandboxLabels() {}
 
     public static Map<String, String> of(String generation, UUID correlationId, String profileVersion) {
+        return of(generation, correlationId, profileVersion, RESOURCE_SANDBOX);
+    }
+
+    public static Map<String, String> of(
+            String generation, UUID correlationId, String profileVersion, String resource) {
         return Map.of(
                 MANAGED, "true",
                 GENERATION, generation,
                 CORRELATION, correlationId.toString(),
-                PROFILE, profileVersion);
+                PROFILE, profileVersion,
+                RESOURCE, resource);
     }
 }

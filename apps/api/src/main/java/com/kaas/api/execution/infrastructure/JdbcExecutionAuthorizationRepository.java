@@ -10,6 +10,8 @@ import com.kaas.api.controlplane.domain.ScenarioRetry;
 import com.kaas.api.controlplane.domain.SecretBinding;
 import com.kaas.api.controlplane.domain.SnapshotFeature;
 import com.kaas.api.execution.application.ExecutionAuthorizationRepository;
+import com.kaas.api.execution.domain.EgressDestination;
+import com.kaas.api.execution.domain.EgressScheme;
 import com.kaas.api.execution.domain.CapabilityType;
 import com.kaas.api.execution.domain.ExecutionAuthorization;
 import com.kaas.api.execution.domain.ExecutionCapability;
@@ -47,7 +49,7 @@ class JdbcExecutionAuthorizationRepository implements ExecutionAuthorizationRepo
                         """
                         select s.sealed, s.parallelism, s.retry_max_attempts, s.retry_delay_milliseconds,
                                s.execution_timeout_seconds, s.max_artifact_bytes, s.max_total_bytes,
-                               s.engine, s.engine_version, r.snapshot_sha256
+                               s.engine, s.engine_version, s.network_policy_revision_id, r.snapshot_sha256
                           from run_snapshots s
                           join test_runs r on r.run_id = s.run_id
                          where s.organization_id = ? and s.project_id = ? and s.run_id = ?
@@ -62,6 +64,7 @@ class JdbcExecutionAuthorizationRepository implements ExecutionAuthorizationRepo
                             resultSet.getLong("max_total_bytes"),
                             resultSet.getString("engine"),
                             resultSet.getString("engine_version"),
+                            resultSet.getObject("network_policy_revision_id", UUID.class),
                             resultSet.getString("snapshot_sha256")
                         },
                         organizationId,
@@ -159,8 +162,9 @@ class JdbcExecutionAuthorizationRepository implements ExecutionAuthorizationRepo
                 runId);
 
         return Optional.of(new SnapshotContext(
-                (String) row[9],
+                (String) row[10],
                 (Boolean) row[0],
+                (UUID) row[9],
                 totalSourceBytes == null ? 0L : totalSourceBytes,
                 features,
                 List.copyOf(secretBindings),
@@ -202,6 +206,20 @@ class JdbcExecutionAuthorizationRepository implements ExecutionAuthorizationRepo
 
     @Override
     public Optional<NetworkPolicyRevision> findNetworkPolicy(UUID policyRevisionId) {
+        // The destinations are loaded with the revision rather than lazily. A policy read without its
+        // destinations is a policy whose digest cannot be verified, and every caller here verifies it.
+        List<EgressDestination> destinations = jdbc.query(
+                """
+                select host, port, scheme
+                  from network_policy_destinations
+                 where policy_revision_id = ?
+                 order by host, port, scheme
+                """,
+                (resultSet, rowNumber) -> new EgressDestination(
+                        resultSet.getString("host"),
+                        resultSet.getInt("port"),
+                        EgressScheme.valueOf(resultSet.getString("scheme"))),
+                policyRevisionId);
         return jdbc
                 .query(
                         """
@@ -213,6 +231,7 @@ class JdbcExecutionAuthorizationRepository implements ExecutionAuthorizationRepo
                                 resultSet.getObject("policy_revision_id", UUID.class),
                                 NetworkPolicyType.valueOf(resultSet.getString("policy_type")),
                                 resultSet.getInt("policy_version"),
+                                destinations,
                                 resultSet.getString("canonical_digest"),
                                 resultSet.getString("created_by"),
                                 resultSet.getTimestamp("created_at").toInstant()),

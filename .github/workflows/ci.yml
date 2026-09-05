@@ -28,7 +28,14 @@ jobs:
       # The synthetic-execution pipeline suite is excluded for the same reason and runs in its own mandatory
       # job below. It starts BOTH a PostgreSQL container and sandbox containers, so leaving it here would put
       # exactly the two-launchers-on-one-daemon condition back that excluding the sandbox suite removed.
-      - run: ./gradlew clean check --no-daemon -x :services:runner:test -x :tests:pipeline:test
+      # The egress security suites are excluded for the same reason and run in `execution-egress-gate` below.
+      # They build three images and run a proxy, a target, and a sandbox on real networks; leaving them here
+      # would put the two-launchers-on-one-daemon condition back that the other exclusions removed.
+      - run: >
+          ./gradlew clean check --no-daemon
+          -x :services:runner:test
+          -x :services:runner:egressSecurityTest
+          -x :tests:pipeline:test
 
   # The hostile-execution gate is a separate, mandatory job rather than a suite that skips when no daemon is
   # present. A security gate that quietly does not run is worse than one that fails: it produces a green build
@@ -159,6 +166,89 @@ jobs:
       - name: Remove any sandbox left behind by a failed run
         if: always()
         run: docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f
+
+  # Enforceable execution egress, against a real Docker topology.
+  #
+  # A separate mandatory job for the same reasons as the two gates above, and the same properties hold:
+  #
+  #   1. No job-level `if:`, no `continue-on-error`, no path or branch filter. A required check is satisfied
+  #      by success, skipped, OR neutral, so a job that skipped itself when Docker was absent would be
+  #      indistinguishable from one that proved a sandbox cannot reach the internet.
+  #   2. Missing prerequisites FAIL. No daemon, no proxy image, no DNS fixture, no evidence: each fails.
+  #   3. Its name is `execution-egress-gate` and must stay globally unique across every workflow here,
+  #      because required-check resolution matches on job name alone.
+  #
+  # What only this job can prove: that a sandbox reaches an authorized destination THROUGH the proxy and
+  # cannot reach the same address directly. Neither half means anything alone — a sandbox with no network at
+  # all satisfies the second, and one on a routed network satisfies the first — so the pair has to run
+  # together, on a real daemon, or the allowlist is a claim nobody has checked.
+  execution-egress-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+      - name: Confirm a container runtime is present
+        run: docker version
+      # cleanTest-equivalent: the task is deleted before it runs, so an UP-TO-DATE result cannot satisfy this
+      # gate. A cached pass would report green without having started a single container, which is the exact
+      # failure this job exists to reject.
+      - run: ./gradlew cleanEgressSecurityTest :services:runner:egressSecurityTest --no-daemon
+      - name: Confirm the gate actually produced evidence
+        run: |
+          set -euo pipefail
+          results=services/runner/build/test-results/egressSecurityTest
+          if [ ! -d "$results" ]; then
+            echo "No test results were produced; the egress gate did not run." >&2
+            exit 1
+          fi
+          executed=$(cat "$results"/*.xml | grep -o 'tests="[0-9]*"' | grep -o '[0-9]*' | awk '{n+=$1} END {print n+0}')
+          skipped=$(cat "$results"/*.xml | grep -o 'skipped="[0-9]*"' | grep -o '[0-9]*' | awk '{n+=$1} END {print n+0}')
+          echo "executed=$executed skipped=$skipped"
+          # A floor rather than an exact count, so adding tests does not break the gate while deleting the
+          # suite does. Zero skips: a skipped egress test is an unproven isolation claim.
+          if [ "$executed" -lt 30 ] || [ "$skipped" -ne 0 ]; then
+            echo "Expected at least 30 executed tests and no skips." >&2
+            exit 1
+          fi
+          # Named individually because each carries a property nothing else covers: the no-bypass pair, the
+          # resolve-once-and-connect-to-that-address rule, assignment-scoped authority including active
+          # tunnel fencing, that a crashed runner leaves no gateway behind, that this host can enforce any
+          # of it at all, and that the production path an execution actually takes creates the network, starts
+          # the proxy, and starts no sandbox when it cannot. A suite that silently stopped running would take
+          # its guarantee with it.
+          for required in EgressTopologyBoundaryTests EgressDnsSecurityTests EgressAuthorizationTests \
+                          EgressReconciliationTests EgressEnforcementGateTests \
+                          EgressExecutionLifecycleTests; do
+            if ! ls "$results" | grep -q "$required"; then
+              echo "$required did not run." >&2
+              exit 1
+            fi
+          done
+      - name: Confirm no proxy, sandbox, or network outlived the run
+        run: |
+          set -euo pipefail
+          containers=$(docker ps -aq --filter label=kaas.managed=true | wc -l | tr -d ' ')
+          networks=$(docker network ls -q --filter label=kaas.managed=true | wc -l | tr -d ' ')
+          echo "containers=$containers networks=$networks"
+          # An orphaned proxy is a running egress gateway with no execution behind it, still holding a service
+          # credential and still attached to the target network. Leaking one in CI is the same defect as
+          # leaking one in production, and this is where it is cheap to notice.
+          if [ "$containers" -ne 0 ] || [ "$networks" -ne 0 ]; then
+            echo "KaaS-managed resources outlived the suite." >&2
+            exit 1
+          fi
+      - name: Remove anything left behind by a failed run
+        if: always()
+        run: |
+          docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f
+          docker network ls -q --filter label=kaas.managed=true | xargs -r docker network rm
 
   web:
     runs-on: ubuntu-latest

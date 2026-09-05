@@ -1,6 +1,6 @@
 {
   "$comment": "The mandatory sandbox controls the platform requires before it will authorize any execution. This file is the single source of truth for a set that two modules must agree on and that neither may import from the other: services/runner produces the assessment and holds container-runtime access, and apps/api consumes it and is build-guarded against ever depending on that module. Each side has a test asserting its own set equals this file, so adding a control to the gate without teaching the control plane about it, or the reverse, fails the build instead of silently widening or narrowing what 'all mandatory controls passed' means.",
-  "schemaVersion": "kaas.sandbox-security-attestation.v1",
+  "schemaVersion": "kaas.sandbox-security-attestation.v2",
   "controls": [
     "CAPABILITIES_DROPPED",
     "KERNEL_PATHS_MASKED",
@@ -18,5 +18,13 @@
     "READ_ONLY_ROOT",
     "WALL_CLOCK_TIMEOUT",
     "WRITABLE_TMPFS"
+  ],
+  "$egressComment": "Controls required ONLY before an ALLOWLIST execution is authorized. They are a separate set from the mandatory controls above because they are required under a different condition: every execution needs the mandatory ones, and demanding these of a DENY_ALL run would make a sandbox that wants no network depend on the egress subsystem being healthy. Within their own scope the same exact-equality rule applies on both sides.",
+  "egressControls": [
+    "EGRESS_NETWORK_INTERNAL",
+    "EGRESS_NO_DIRECT_ROUTE",
+    "EGRESS_PROXY_FAILS_CLOSED",
+    "EGRESS_PROXY_IMAGE_PINNED",
+    "EGRESS_PROXY_READY"
   ]
 }

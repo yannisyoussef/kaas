@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "kaas.sandbox-security-attestation.v1",
+  "schemaVersion": "kaas.sandbox-security-attestation.v2",
   "securityProfileVersion": "kaas.sandbox.v1",
   "probeImageDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "runtime": "gvisor",

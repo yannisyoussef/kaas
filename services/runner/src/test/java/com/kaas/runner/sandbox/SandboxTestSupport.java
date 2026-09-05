@@ -48,6 +48,45 @@ final class SandboxTestSupport {
                 : Path.of("services", "runner", "src", "main", "docker", "probe");
     }
 
+    private static String proxyImageReference;
+
+    private static String targetImageReference;
+
+    /**
+     * The egress proxy image, built once from the context Gradle assembled.
+     *
+     * <p>The path comes from a system property the build sets from a resolved dependency, not from a guess
+     * about where another module's build directory is. A guess would silently build whatever a previous build
+     * left there, which is an image nobody compiled in this run.
+     */
+    static synchronized String egressProxyImage() {
+        if (proxyImageReference == null) {
+            String context = System.getProperty("kaas.egress.proxy.context");
+            if (context == null) {
+                throw new IllegalStateException(
+                        "kaas.egress.proxy.context is set by the build from the proxy image context "
+                                + "dependency; without it these tests would silently build nothing.");
+            }
+            proxyImageReference = EgressProxyImage.build(docker(), Path.of(context));
+        }
+        return proxyImageReference;
+    }
+
+    /** The egress test target image, from this module's own repository-controlled context. */
+    static synchronized String egressTargetImage() {
+        if (targetImageReference == null) {
+            targetImageReference = ProbeImage.build(docker(), egressTargetContext());
+        }
+        return targetImageReference;
+    }
+
+    static Path egressTargetContext() {
+        Path fromModule = Path.of("src", "main", "docker", "egress-target");
+        return fromModule.toFile().isDirectory()
+                ? fromModule
+                : Path.of("services", "runner", "src", "main", "docker", "egress-target");
+    }
+
     static SandboxSecurityProfile profile() {
         return SandboxSecurityProfile.version1(probeImage());
     }

@@ -1,3 +1,5 @@
+import org.gradle.api.attributes.Usage
+
 dependencies {
     // The container-runtime client lives here and only here. The control plane's own build fails if it ever
     // acquires this dependency, and this module's build fails if it acquires Karate, an object store, or a
@@ -15,10 +17,34 @@ dependencies {
     // than a convention somebody has to keep.
     implementation("tools.jackson.core:jackson-databind:3.1.5")
 
+    // The programmable authoritative DNS server, shared with the proxy's own suite rather than duplicated.
+    // This brings no production code into the runner: test fixtures are a separate source set, and the
+    // launcher's runtime classpath is unaffected — the dependency guard below still checks both classpaths.
+    testImplementation(testFixtures(project(":services:egress-proxy")))
+
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testImplementation("org.assertj:assertj-core:3.27.3")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+/**
+ * The egress proxy's image build context, obtained through dependency resolution rather than by reaching into
+ * another project's build directory.
+ *
+ * <p>Reaching across works right up until it silently does not: the test can run before the other project has
+ * produced anything, and the evidence is then an image built from whatever a previous build left behind.
+ * Resolving it means Gradle builds it first and treats its contents as an input, so editing the proxy's
+ * Dockerfile or changing a line of proxy code makes these tests run again instead of reporting UP-TO-DATE.
+ */
+val proxyImageContext: Configuration by configurations.creating {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+    attributes { attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage::class.java, "kaas-proxy-image-context")) }
+}
+
+dependencies {
+    proxyImageContext(project(":services:egress-proxy"))
 }
 
 tasks.withType<Test>().configureEach {
@@ -46,7 +72,52 @@ tasks.withType<Test>().configureEach {
     inputs.file(rootProject.file("packages/api-contracts/mandatory-sandbox-controls.json"))
         .withPropertyName("mandatorySandboxControls")
         .withPathSensitivity(PathSensitivity.RELATIVE)
+
+    // Everything the proxy image is built from — the Dockerfile, the proxy jar, and every jar on its runtime
+    // classpath. Declared as an input so that a change to any of them invalidates the security tests that
+    // make claims about how the proxy behaves.
+    inputs.files(proxyImageContext)
+        .withPropertyName("egressProxyImageContext")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+
+    // Where those files are, for the launcher to build from. The build context is repository-controlled and
+    // produced by this build; no caller supplies a path, and no test may point this somewhere else.
+    val contextPath = proxyImageContext.elements.map { it.single().asFile.absolutePath }
+    doFirst { systemProperty("kaas.egress.proxy.context", contextPath.get()) }
 }
+
+/**
+ * The egress security suites, in their own task so they get their own mandatory CI job.
+ *
+ * <p>Separate from {@code test} for the same reason the hostile-execution suite has its own job: a security
+ * gate hidden inside a general build is a gate whose failure is one line in a long log, and one that can be
+ * dropped by an exclusion nobody notices. It is also a practical matter — these build several images and run
+ * a proxy, a target, and a sandbox, and doubling that inside another job's time budget puts two launchers on
+ * one daemon, which is the condition the existing job split exists to avoid.
+ *
+ * <p>{@code check} depends on it, so a local full build still runs everything.
+ */
+val egressSecurityTest = tasks.register<Test>("egressSecurityTest") {
+    group = "verification"
+    description = "Real Docker topology, real DNS, real proxy: the enforceable-egress security suites."
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    filter {
+        includeTestsMatching("com.kaas.runner.sandbox.Egress*")
+        includeTestsMatching("com.kaas.runner.gate.EgressEnforcementGateTests")
+    }
+}
+
+tasks.named<Test>("test") {
+    // Excluded here because they run in egressSecurityTest above. Running them in both would double a
+    // Docker-heavy suite and put two launchers on one daemon.
+    filter {
+        excludeTestsMatching("com.kaas.runner.sandbox.Egress*")
+        excludeTestsMatching("com.kaas.runner.gate.EgressEnforcementGateTests")
+    }
+}
+
+tasks.named("check") { dependsOn(egressSecurityTest) }
 
 /**
  * The launcher may hold a container runtime client. It may not hold anything that would give it a reason to

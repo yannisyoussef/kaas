@@ -6,7 +6,17 @@ import com.kaas.api.KaasApiApplication;
 import com.kaas.api.controlplane.application.PendingRunScheduler;
 import com.kaas.api.controlplane.application.RunClaimService;
 import com.kaas.api.controlplane.domain.ExecutionDispatch;
+import com.kaas.api.execution.domain.EgressDestination;
+import com.kaas.api.execution.domain.EgressScheme;
+import com.kaas.api.execution.domain.NetworkPolicyRevision;
+import com.kaas.api.execution.domain.NetworkPolicyType;
 import com.kaas.api.execution.domain.SandboxSecurityAttestation;
+import com.kaas.egress.CanonicalDestination;
+import java.time.Duration;
+import com.kaas.egress.ControlPlaneAuthorizer;
+import com.kaas.egress.DenialReason;
+import com.kaas.egress.EgressAuthorizer;
+import com.kaas.egress.Scheme;
 import com.kaas.runner.client.ControlPlaneClient;
 import com.kaas.runner.command.CommandValidator;
 import com.kaas.runner.execution.ExecutionLoop;
@@ -119,7 +129,20 @@ class SyntheticExecutionPipelineTests {
 
     @DynamicPropertySource
     static void attestation(DynamicPropertyRegistry registry) {
-        registry.add("kaas.execution.sandbox-attestation", () -> validAttestation(Instant.now()));
+        // Carries the egress controls as well as the mandatory ones, so this context can authorize an
+        // ALLOWLIST run. It changes nothing for the DENY_ALL tests in this class: the egress controls are
+        // consulted only for an allowlist policy, precisely so that a run wanting no network never depends on
+        // the egress subsystem. The refusal case — an assessment making no egress claim — is pinned in
+        // apps/api, where it can be asserted without a container.
+        registry.add(
+                "kaas.execution.sandbox-attestation",
+                () -> validAttestation(Instant.now(), allEgressPassing()));
+    }
+
+    private static Map<String, String> allEgressPassing() {
+        Map<String, String> controls = new TreeMap<>();
+        SandboxSecurityAttestation.REQUIRED_EGRESS_CONTROLS.forEach(control -> controls.put(control, "PASS"));
+        return controls;
     }
 
     private final HttpClient http = HttpClient.newHttpClient();
@@ -779,6 +802,568 @@ class SyntheticExecutionPipelineTests {
         return PROBE_IMAGE;
     }
 
+    // ---------------------------------------------------------------------------------------------------
+    // Enforceable egress
+    // ---------------------------------------------------------------------------------------------------
+
+    /** The destination the allowlist below permits, and the only one it permits. */
+    private static final String ALLOWED_DESTINATION = "api.allowed.example";
+
+    @Test
+    @DisplayName("an allowlist run issues an egress capability the real proxy code can use against the real "
+            + "control plane, and fencing the assignment takes it away")
+    void anAllowlistRunAuthorizesTheProxyUntilTheAssignmentIsFenced() throws Exception {
+        UUID runId = claimedRunUnder(ALLOWED_DESTINATION, 443, "HTTPS");
+
+        // Re-authorize to obtain a fresh delivery. The token exists only in this response — it was never
+        // written to a database, a log, a metric, a label, or the persisted command.
+        HttpResponse<String> delivered = authorize(runId, attemptId(runId), 1);
+        assertThat(delivered.statusCode()).isEqualTo(200);
+        JsonNode body = mapper.readTree(delivered.body());
+        assertThat(body.get("command").get("networkPolicy").get("type").asText()).isEqualTo("ALLOWLIST");
+        String capability = body.get("egressCapabilityToken").asText();
+        assertThat(capability).startsWith("kaas_egr_");
+
+        // THE REAL PROXY-SIDE CLIENT against the REAL control plane. Not a stub of the exchange on either
+        // side: the runner's Docker suites prove the proxy honours a decision, and this proves the decision
+        // the control plane actually produces is one that client actually understands. Two stubs agreeing
+        // would be two implementations of the same misunderstanding.
+        // The endpoint answers 200 whatever the verdict, so this asserts it is reachable and working rather
+        // than that the answer was yes. It earns its place: the service was briefly annotated readOnly, which
+        // PostgreSQL refuses for the row lock it takes, and every request returned 500. The proxy read that as
+        // AUTHORIZATION_UNAVAILABLE and refused — fail-closed behaved perfectly while nothing worked at all,
+        // and a test that only looked at the decision would have called that a policy denial.
+        HttpResponse<String> raw = postInternal(
+                "/internal/v1/egress/authorizations",
+                "kaas.egress-proxy",
+                "{\"capabilityToken\":\"" + capability + "\",\"host\":\"" + ALLOWED_DESTINATION
+                        + "\",\"port\":443,\"scheme\":\"HTTPS\"}");
+        assertThat(raw.statusCode()).as("%s", raw.body()).isEqualTo(200);
+        assertThat(raw.body()).contains("AUTHORIZED");
+
+        EgressAuthorizer authorizer = new ControlPlaneAuthorizer(
+                URI.create("http://localhost:" + port),
+                "Bearer " + token("kaas.egress-proxy", null),
+                Duration.ofSeconds(10));
+
+        var permitted = authorizer.authorize(
+                capability, new CanonicalDestination(ALLOWED_DESTINATION, 443, Scheme.HTTPS));
+        // Asserted on the reason as well as the verdict, so a failure says WHY rather than only "false".
+        assertThat(permitted.reason()).as("the destination the tenant's policy names").isNull();
+        assertThat(permitted.authorized()).isTrue();
+
+        // Everything else is refused, and the refusals are specific.
+        assertThat(authorizer.authorize(
+                        capability, new CanonicalDestination("other.example.com", 443, Scheme.HTTPS)).reason())
+                .isEqualTo(DenialReason.DESTINATION_NOT_ALLOWED);
+        assertThat(authorizer.authorize(
+                        capability, new CanonicalDestination(ALLOWED_DESTINATION, 8443, Scheme.HTTPS)).reason())
+                .as("a port the policy did not name")
+                .isEqualTo(DenialReason.DESTINATION_NOT_ALLOWED);
+        assertThat(authorizer.authorize(
+                        capability, new CanonicalDestination(ALLOWED_DESTINATION, 443, Scheme.HTTP)).reason())
+                .as("the scheme is part of the destination, so plain HTTP to a tunnelled port is not permitted")
+                .isEqualTo(DenialReason.DESTINATION_NOT_ALLOWED);
+        assertThat(authorizer.authorize(
+                        "kaas_egr_" + "z".repeat(43),
+                        new CanonicalDestination(ALLOWED_DESTINATION, 443, Scheme.HTTPS)).reason())
+                .as("a well-shaped credential that identifies nothing")
+                .isEqualTo(DenialReason.CAPABILITY_INVALID);
+
+        // Now fence the assignment, exactly as a cancellation or a lost lease does. The capability's own TTL
+        // has not moved — expiry bounds the damage from a leak, and revalidation is what makes fencing work.
+        ageLease(runId);
+
+        assertThat(authorizer.authorize(
+                        capability, new CanonicalDestination(ALLOWED_DESTINATION, 443, Scheme.HTTPS))
+                        .authorized())
+                .as("an unexpired capability whose assignment is gone must stop working")
+                .isFalse();
+    }
+
+    @Test
+    @DisplayName("a DENY_ALL run is issued no egress capability at all")
+    void aDenyAllRunCarriesNoEgressCapability() throws Exception {
+        UUID runId = claimedRun(List.of("@smoke"));
+
+        JsonNode body = mapper.readTree(authorize(runId, attemptId(runId), 1).body());
+
+        assertThat(body.get("command").get("networkPolicy").get("type").asText()).isEqualTo("DENY_ALL");
+        // A sandbox with no network has nothing to present a credential to. Issuing one anyway would put a
+        // live bearer token into an environment for no reason, and a capability that exists can leak.
+        assertThat(body.has("egressCapabilityToken") && !body.get("egressCapabilityToken").isNull())
+                .as("no capability is minted for a policy that needs none")
+                .isFalse();
+    }
+
+    @Test
+    @DisplayName("the egress capability never reaches the command, the database, or a log")
+    void theEgressCapabilityLivesOnlyInItsResponse() throws Exception {
+        UUID runId = claimedRunUnder(ALLOWED_DESTINATION, 443, "HTTPS");
+
+        JsonNode body = mapper.readTree(authorize(runId, attemptId(runId), 1).body());
+        String capability = body.get("egressCapabilityToken").asText();
+
+        // Not in the command document, which is immutable and digested: a field the digest cannot cover must
+        // not be emitted, and this rotates on every delivery so no digest could cover it.
+        assertThat(body.get("command").toString()).doesNotContain(capability);
+        // Not in the persisted command either.
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from execution_commands where document::text like ?",
+                        Integer.class,
+                        "%" + capability + "%"))
+                .isZero();
+        // Only the hash is stored, so a database backup grants nobody anything.
+        String hash = java.util.HexFormat.of()
+                .formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                        .digest(capability.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from execution_capabilities"
+                                + " where capability_type = 'EGRESS' and token_sha256 = ?",
+                        Integer.class,
+                        hash))
+                .isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("rotation leaves exactly one live egress capability, whatever a worker retries")
+    void rotationLeavesOneLiveEgressCapability() throws Exception {
+        UUID runId = claimedRunUnder(ALLOWED_DESTINATION, 443, "HTTPS");
+
+        String first = mapper.readTree(authorize(runId, attemptId(runId), 1).body())
+                .get("egressCapabilityToken").asText();
+        String second = mapper.readTree(authorize(runId, attemptId(runId), 1).body())
+                .get("egressCapabilityToken").asText();
+        assertThat(second).isNotEqualTo(first);
+
+        EgressAuthorizer authorizer = new ControlPlaneAuthorizer(
+                URI.create("http://localhost:" + port),
+                "Bearer " + token("kaas.egress-proxy", null),
+                Duration.ofSeconds(10));
+        var destination = new CanonicalDestination(ALLOWED_DESTINATION, 443, Scheme.HTTPS);
+
+        // Ten retries must leave one working token, not ten. The previous one is revoked in the same
+        // transaction that mints the replacement.
+        assertThat(authorizer.authorize(second, destination).authorized()).isTrue();
+        assertThat(authorizer.authorize(first, destination).authorized())
+                .as("a rotated-out capability is revoked, not merely superseded")
+                .isFalse();
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from execution_capabilities c"
+                                + " join execution_authorizations a on a.authorization_id = c.authorization_id"
+                                + " where a.run_id = ? and c.capability_type = 'EGRESS' and c.revoked_at is null",
+                        Integer.class,
+                        runId))
+                .isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("an allowlist run executes end to end through a real proxy and completes on its own evidence")
+    void anAllowlistRunCompletesThroughTheProxy() throws Exception {
+        // The whole thing, with nothing simulated: this control plane, this database, the repository's proxy
+        // image, a real resolver, a real target, and the production DockerEgressExecutions creating the
+        // network and starting the proxy. What no other test in this repository can establish is that the
+        // decision the control plane actually produces is one the real proxy acts on during a real execution,
+        // and that the run then completes through the ordinary lifecycle.
+        try (EgressPipelineTopology topology =
+                new EgressPipelineTopology(docker(), probeImage())) {
+            UUID runId = claimedRunUnder(
+                    EgressPipelineTopology.ALLOWED_HOST, EgressPipelineTopology.TARGET_PORT, "HTTP");
+            UUID attemptId = attemptId(runId);
+
+            ExecutionLoop.ExecutionReport report = allowlistLoop(topology).execute(runId, attemptId, 1);
+
+            assertThat(report.status())
+                    .as("report was %s at %s: %s", report.status(), report.phase(), report.detail())
+                    .isEqualTo("COMPLETED");
+            assertThat(report.detail()).isEqualTo("PASSED");
+
+            // RESULT SEMANTICS. A successful allowlist execution is an ordinary successful execution: the
+            // infrastructure worked and the workload passed. Nothing about enforceable egress makes an
+            // allowlist run a special kind of result.
+            Map<String, Object> run = jdbc.queryForMap(
+                    "select lifecycle_state, test_outcome, infrastructure_outcome, termination_reason"
+                            + " from test_runs where run_id = ?",
+                    runId);
+            assertThat(run.get("lifecycle_state")).isEqualTo("COMPLETED");
+            assertThat(run.get("test_outcome")).isEqualTo("PASSED");
+            assertThat(run.get("infrastructure_outcome")).isEqualTo("SUCCEEDED");
+            assertThat(run.get("termination_reason")).isEqualTo("EXECUTION_COMPLETED");
+
+            // The command the runner acted on bound the allowlist, and the runner accepted it — which it
+            // only does when its own host demonstrated it can enforce one.
+            assertThat(jdbc.queryForObject(
+                            "select c.document ->> 'networkPolicy' is not null from execution_commands c"
+                                    + " join execution_authorizations a"
+                                    + "   on a.authorization_id = c.authorization_id where a.run_id = ?",
+                            Boolean.class,
+                            runId))
+                    .isTrue();
+
+            // THE PROXY WAS REALLY IN THE PATH. The resolver was queried for the destination, and it was
+            // queried by the proxy — the sandbox is on an internal network with no resolver reachable at all,
+            // so no other party in this topology could have asked.
+            assertThat(topology.dns.queries())
+                    .as("the security-relevant resolution happens in the proxy")
+                    .anySatisfy(query -> assertThat(query).startsWith(EgressPipelineTopology.ALLOWED_HOST));
+
+            // AND THE EVIDENCE SAYS SO. The document is the ordinary synthetic result — it does not claim a
+            // tenant feature ran, because none did.
+            JsonNode document = mapper.readTree(jdbc.queryForObject(
+                    "select document::text from execution_results where run_id = ?", String.class, runId));
+            assertThat(document.get("producer").asString()).isEqualTo("kaas-runner-synthetic");
+            assertThat(document.get("infrastructureOutcome").asString()).isEqualTo("SUCCEEDED");
+            assertThat(document.get("features")).isEmpty();
+            assertThat(document.toString()).doesNotContain("KARATE");
+
+            // NO CREDENTIAL SURVIVED THE EXECUTION. The egress capability was delivered into a container's
+            // environment, which is the one place it has to be; it must be nowhere that outlives the run.
+            List<String> live = jdbc.queryForList(
+                    "select token_sha256 from execution_capabilities c"
+                            + " join execution_authorizations a on a.authorization_id = c.authorization_id"
+                            + " where a.run_id = ? and c.capability_type = 'EGRESS' and c.revoked_at is null",
+                    String.class,
+                    runId);
+            assertThat(live)
+                    .as("one live egress capability, and only its hash — a database backup grants nobody "
+                            + "anything")
+                    .singleElement()
+                    .asString()
+                    .matches("^[a-f0-9]{64}$");
+
+            // NOTHING OUTLIVED IT. An orphaned proxy is a running egress gateway with no execution behind it,
+            // still holding a service credential and still attached to the target network.
+            //
+            // Scoped to THIS runner's generation rather than asked globally. A global assertion on a shared
+            // daemon fails for whatever else happens to be on the machine, which turns somebody else's
+            // leftover into a product defect — it did exactly that once, and the leftover was a network a
+            // mutation run had deliberately leaked.
+            assertThat(managedByThisRunner("kaas.resource=egress-proxy"))
+                    .as("no proxy survives its execution")
+                    .isEmpty();
+            assertThat(networksOfThisRunner())
+                    .as("no execution network survives its execution")
+                    .isEmpty();
+        }
+    }
+
+    @Test
+    @DisplayName("an https destination is tunnelled, and the proxy never sees inside it")
+    void anHttpsAllowlistRunIsTunnelled() throws Exception {
+        try (EgressPipelineTopology topology =
+                new EgressPipelineTopology(docker(), probeImage())) {
+            // The same mechanism with the scheme changed, which is the half the HTTP run cannot reach: a
+            // CONNECT rather than a forward-proxied request. It is worth its own run because the workload
+            // takes a different code path for it and the proxy takes a different one too — and an untested
+            // branch in the trusted probe is a branch nobody has ever seen work.
+            UUID runId = claimedRunUnder(
+                    EgressPipelineTopology.ALLOWED_HOST, EgressPipelineTopology.TARGET_HOLD_PORT, "HTTPS");
+            UUID attemptId = attemptId(runId);
+
+            ExecutionLoop.ExecutionReport report = allowlistLoop(topology).execute(runId, attemptId, 1);
+
+            assertThat(report.status())
+                    .as("report was %s at %s: %s", report.status(), report.phase(), report.detail())
+                    .isEqualTo("COMPLETED");
+            assertThat(report.detail()).isEqualTo("PASSED");
+            assertThat(jdbc.queryForObject(
+                            "select test_outcome from test_runs where run_id = ?", String.class, runId))
+                    .isEqualTo("PASSED");
+
+            // The proxy resolved the destination itself, as it does for a forward-proxied request. TLS being
+            // end to end does not move name resolution or address classification to the client.
+            assertThat(topology.dns.queries())
+                    .anySatisfy(query -> assertThat(query).startsWith(EgressPipelineTopology.ALLOWED_HOST));
+        }
+    }
+
+    @Test
+    @DisplayName("an allowlist run whose proxy cannot start fails as infrastructure and starts no sandbox")
+    void anAllowlistRunWhoseProxyCannotStartIsAnInfrastructureFailure() throws Exception {
+        try (EgressPipelineTopology topology =
+                new EgressPipelineTopology(docker(), probeImage())) {
+            UUID runId = claimedRunUnder(
+                    EgressPipelineTopology.ALLOWED_HOST, EgressPipelineTopology.TARGET_PORT, "HTTP");
+            UUID attemptId = attemptId(runId);
+
+            // A "proxy" image that is not the proxy: digest-pinned, so every control the profile enforces is
+            // satisfied, and it exits within a second — which exercises the readiness path rather than the
+            // create path. There is no degraded mode below this: an allowlist execution without a proxy is an
+            // execution with no enforcement.
+            var deployment = topology.deployment(port, "Bearer " + token("kaas.egress-proxy", null));
+            var broken = new com.kaas.runner.sandbox.EgressDeployment(
+                    deployment.probeImageReference(),
+                    deployment.probeImageReference(),
+                    deployment.controlPlaneBaseUri(),
+                    deployment.serviceAuthorization(),
+                    deployment.dnsServer(),
+                    deployment.egressNetworkIds(),
+                    deployment.hostAliases(),
+                    deployment.dnsTimeout(),
+                    deployment.authorizationTimeout(),
+                    deployment.revalidationInterval(),
+                    deployment.connectTimeout());
+
+            ExecutionLoop.ExecutionReport report =
+                    allowlistLoop(topology, broken).execute(runId, attemptId, 1);
+
+            assertThat(report.status()).isEqualTo("INFRASTRUCTURE_FAILED");
+            // The DETAIL as well as the status. The status alone is set whether or not the control plane
+            // accepted the report, so asserting it by itself lets a refused report pass as success.
+            assertThat(report.detail())
+                    .as("the control plane must have accepted the failure report")
+                    .doesNotContain("report refused");
+            // The category, which is what an operator acts on. A container that started and then exited is a
+            // start failure; one still running but silent past its bound is EGRESS_PROXY_NOT_READY, and the
+            // two want different investigations.
+            assertThat(report.detail()).contains("EGRESS_PROXY_START_FAILED");
+
+            // TRUTHFULLY CLASSIFIED. The platform failed, so the platform says so — reporting this as a test
+            // outcome would send a user looking at their own code for a fault that is entirely ours. The run
+            // is STOPPING with the reason named, and the attempt's disposition is FAILED; the terminal
+            // settle that turns those into a run-level outcome is the reconciler's job, not the worker's.
+            Map<String, Object> run = jdbc.queryForMap(
+                    "select lifecycle_state, stop_reason, test_outcome from test_runs where run_id = ?", runId);
+            assertThat(run.get("lifecycle_state")).isEqualTo("STOPPING");
+            assertThat(run.get("stop_reason")).isEqualTo("INFRASTRUCTURE_FAILURE");
+            // NO TEST OUTCOME WAS INVENTED. Nothing ran, so there is nothing to report about a test — which
+            // is the difference between "not available" and "failed".
+            assertThat(run.get("test_outcome")).isNull();
+            assertThat(jdbc.queryForObject(
+                            "select infrastructure_disposition from execution_attempts where run_id = ?",
+                            String.class, runId))
+                    .isEqualTo("FAILED");
+
+            // AND NO SANDBOX RAN. Not "ran and was cleaned up": never created. There is no submitted result
+            // because there was never an execution to produce one.
+            assertThat(jdbc.queryForObject(
+                            "select count(*) from execution_results where run_id = ?", Integer.class, runId))
+                    .isZero();
+            assertThat(managedByThisRunner("kaas.resource=sandbox")).isEmpty();
+            assertThat(networksOfThisRunner())
+                    .as("the network goes too, or the correlation is unusable for a retry")
+                    .isEmpty();
+        }
+    }
+
+    @Test
+    @DisplayName("a proxy that dies mid-run is an infrastructure failure, never a failed test")
+    void anAllowlistRunWhoseProxyDiesIsAnInfrastructureFailure() throws Exception {
+        try (EgressPipelineTopology topology =
+                new EgressPipelineTopology(docker(), probeImage())) {
+            UUID runId = claimedRunUnder(
+                    EgressPipelineTopology.ALLOWED_HOST, EgressPipelineTopology.TARGET_PORT, "HTTP");
+            UUID attemptId = attemptId(runId);
+
+            // The proxy is stopped the instant it has come up, so the sandbox runs with its only egress peer
+            // already gone. Stopped rather than removed: its network endpoints survive, so the only thing
+            // that changed is that nothing is listening — removing it would also tear down the endpoints and
+            // the sandbox would lose connectivity for a different reason than the one under test.
+            ExecutionLoop.ExecutionReport report =
+                    allowlistLoop(topology, this::stopProxyImmediately).execute(runId, attemptId, 1);
+
+            // THE POINT. The workload could not reach anything, so it reported FAILED — and a platform that
+            // read that as the answer would tell a tenant their test failed when the platform's own gateway
+            // had died underneath it. The proxy's health is checked, so the run is classified as ours.
+            assertThat(report.status())
+                    .as("report was %s at %s: %s", report.status(), report.phase(), report.detail())
+                    .isEqualTo("INFRASTRUCTURE_FAILED");
+            assertThat(report.detail()).contains("EGRESS_PROXY_DIED");
+            assertThat(report.detail()).doesNotContain("report refused");
+
+            Map<String, Object> run = jdbc.queryForMap(
+                    "select lifecycle_state, stop_reason, test_outcome from test_runs where run_id = ?", runId);
+            assertThat(run.get("lifecycle_state")).isEqualTo("STOPPING");
+            assertThat(run.get("stop_reason")).isEqualTo("INFRASTRUCTURE_FAILURE");
+            assertThat(run.get("test_outcome"))
+                    .as("no test outcome is invented from evidence gathered while the gateway was going away")
+                    .isNull();
+            assertThat(jdbc.queryForObject(
+                            "select count(*) from execution_results where run_id = ?", Integer.class, runId))
+                    .isZero();
+        }
+    }
+
+    @Test
+    @DisplayName("a cancelled run's egress stops for being cancelled, not merely for being fenced")
+    void aStoppingRunAuthorizesNoEgress() throws Exception {
+        Tenant tenant = tenant(List.of("@smoke"));
+        UUID runId = claimedRunUnder(tenant, ALLOWED_DESTINATION, 443, "HTTPS");
+        String capability = mapper.readTree(authorize(runId, attemptId(runId), 1).body())
+                .get("egressCapabilityToken").asString();
+        EgressAuthorizer authorizer = new ControlPlaneAuthorizer(
+                URI.create("http://localhost:" + port),
+                "Bearer " + token("kaas.egress-proxy", null),
+                Duration.ofSeconds(10));
+        var destination = new CanonicalDestination(ALLOWED_DESTINATION, 443, Scheme.HTTPS);
+        // Anti-vacuity: it works first, so what is asserted below is the cancellation taking it away rather
+        // than a capability that never worked.
+        assertThat(authorizer.authorize(capability, destination).authorized()).isTrue();
+
+        // Cancelled through the real tenant API rather than by writing STOPPING directly: a raw UPDATE is
+        // refused by the scheduling-bundle guard, which requires a stopping run's assignment to be fenced.
+        assertThat(post("/api/v1/runs/" + runId + "/cancellations", tenant.bearer(),
+                        json(Map.of("reason", "USER_REQUESTED"))).statusCode())
+                .isBetween(200, 299);
+
+        var decision = authorizer.authorize(capability, destination);
+        assertThat(decision.authorized()).isFalse();
+        // THE REASON, not merely the refusal. Cancellation both moves the run to STOPPING and fences its
+        // assignment, so two independent checks would refuse this — and asserting only `false` would leave
+        // the lifecycle check jointly covered with the fencing one and provable by neither. The lifecycle
+        // check runs first and answers RUN_NOT_EXECUTING, so this pins that specific check.
+        assertThat(decision.reason()).isEqualTo(DenialReason.RUN_NOT_EXECUTING);
+    }
+
+    /** The runner, wired to enforce an allowlist against this topology. */
+    private ExecutionLoop allowlistLoop(EgressPipelineTopology topology) throws Exception {
+        return allowlistLoop(
+                topology, topology.deployment(port, "Bearer " + token("kaas.egress-proxy", null)));
+    }
+
+    /**
+     * The same runner, with something done to the egress the moment it is up.
+     *
+     * <p>A decorator rather than a substitute: the real {@code DockerEgressExecutions} still creates the
+     * network and starts the proxy, and the hook then interferes with the result. Replacing the factory
+     * outright would prove the loop handles a stub, which is a different and much smaller claim.
+     */
+    private ExecutionLoop allowlistLoop(
+            EgressPipelineTopology topology, Runnable afterStart) throws Exception {
+        var deployment = topology.deployment(port, "Bearer " + token("kaas.egress-proxy", null));
+        var real = new com.kaas.runner.sandbox.DockerEgressExecutions(docker(), deployment, "pipeline");
+        var decorated = new com.kaas.runner.sandbox.EgressExecutions() {
+            @Override
+            public com.kaas.runner.sandbox.EgressExecution start(
+                    UUID correlationId, com.kaas.runner.sandbox.EgressPlan plan) {
+                var execution = real.start(correlationId, plan);
+                afterStart.run();
+                return execution;
+            }
+
+            @Override
+            public java.time.Duration maximumRevocationLatency() {
+                return real.maximumRevocationLatency();
+            }
+        };
+        return allowlistLoop(deployment, decorated);
+    }
+
+    /**
+     * Containers this runner generation created, carrying the given label.
+     *
+     * <p>Scoped by generation, always. These suites share a daemon with whatever else is on the machine, and
+     * a global "nothing is left" assertion answers a question this test cannot own. The job-level check in CI
+     * is the right place for the global form, after everything has finished.
+     */
+    private List<com.github.dockerjava.api.model.Container> managedByThisRunner(String label) {
+        String[] parts = label.split("=", 2);
+        return docker().listContainersCmd()
+                .withShowAll(true)
+                .withLabelFilter(Map.of(parts[0], parts[1], "kaas.launcher.generation", "pipeline"))
+                .exec();
+    }
+
+    private List<com.github.dockerjava.api.model.Network> networksOfThisRunner() {
+        return docker().listNetworksCmd()
+                .withFilter("label", List.of("kaas.launcher.generation=pipeline"))
+                .exec();
+    }
+
+    /** Stops the running proxy without removing it, so its endpoints survive and nothing is listening. */
+    private void stopProxyImmediately() {
+        var proxies = managedByThisRunner("kaas.resource=egress-proxy");
+        assertThat(proxies).as("the execution must have started a proxy to stop").isNotEmpty();
+        proxies.forEach(proxy -> docker().stopContainerCmd(proxy.getId()).withTimeout(2).exec());
+    }
+
+    private ExecutionLoop allowlistLoop(
+            EgressPipelineTopology topology, com.kaas.runner.sandbox.EgressDeployment deployment)
+            throws Exception {
+        return allowlistLoop(
+                deployment,
+                new com.kaas.runner.sandbox.DockerEgressExecutions(docker(), deployment, "pipeline"));
+    }
+
+    private ExecutionLoop allowlistLoop(
+            com.kaas.runner.sandbox.EgressDeployment deployment,
+            com.kaas.runner.sandbox.EgressExecutions executions)
+            throws Exception {
+        ControlPlaneClient client = new ControlPlaneClient(
+                HttpClient.newHttpClient(),
+                URI.create("http://localhost:" + port),
+                "Bearer " + token(WORKER, null),
+                java.time.Duration.ofSeconds(30),
+                duration -> Thread.sleep(duration.toMillis()));
+        SandboxSecurityProfile profile = SandboxSecurityProfile.version1(probeImage());
+        return new ExecutionLoop(
+                client,
+                // ALLOWLIST is accepted here because this host established it can enforce one. The default
+                // constructor still refuses it, so a runner that forgot to establish the capability fails
+                // closed rather than executing without a proxy.
+                new CommandValidator(mapper, java.util.Set.of("DENY_ALL", "ALLOWLIST")),
+                new DockerSandboxLauncher(docker(), profile, "pipeline"),
+                mapper,
+                Clock.systemUTC(),
+                com.kaas.runner.sandbox.SyntheticProbe.WORKLOAD_PASS,
+                executions);
+    }
+
+    /**
+     * A tenant-owned allowlist with exactly one destination, and the project pointed at it.
+     *
+     * <p>Written through SQL because no product surface authors a policy yet — policies are platform-owned,
+     * and this stands in for the operator action that creates one. What is NOT stood in for is the pinning:
+     * the run below goes through the ordinary creation path, so the snapshot copies the project's selection
+     * the way a real run does.
+     */
+    private UUID allowlistFor(Tenant tenant, String host, int port, String scheme) {
+        UUID policyId = UUID.randomUUID();
+        // Scoped to the tenant that will use it, named explicitly. An earlier version of this helper picked
+        // "the most recently created project", which — because it runs BEFORE the run is created — silently
+        // selected the PREVIOUS test's project and configured egress for a tenant that was not under test.
+        jdbc.update(
+                "insert into network_policy_revisions (policy_revision_id, policy_type, policy_version,"
+                        + " canonical_digest, created_by, created_at, organization_id, project_id)"
+                        + " values (?, 'ALLOWLIST', 1, ?, 'kaas.platform', now(), ?, ?)",
+                policyId,
+                NetworkPolicyRevision.digestOf(
+                        NetworkPolicyType.ALLOWLIST,
+                        1,
+                        List.of(new EgressDestination(host, port, EgressScheme.valueOf(scheme)))),
+                tenant.organizationId(),
+                tenant.projectId());
+        jdbc.update(
+                "insert into network_policy_destinations (policy_revision_id, host, port, scheme)"
+                        + " values (?, ?, ?, ?)",
+                policyId, host, port, scheme);
+        jdbc.update(
+                "update projects set network_policy_revision_id = ? where project_id = ?",
+                policyId, tenant.projectId());
+        return policyId;
+    }
+
+    /** A claimed run whose snapshot pinned an allowlist, created through the ordinary path. */
+    private UUID claimedRunUnder(String host, int port, String scheme) throws Exception {
+        return claimedRunUnder(tenant(List.of("@smoke")), host, port, scheme);
+    }
+
+    private UUID claimedRunUnder(Tenant tenant, String host, int port, String scheme) throws Exception {
+        // Tenant first, then the policy for THAT tenant, then the run. The order matters: the snapshot copies
+        // the project's selection at creation, so a policy configured afterwards would not reach the run.
+        UUID policyId = allowlistFor(tenant, host, port, scheme);
+        UUID runId = claimedRunFor(tenant);
+        // Asserted rather than assumed. If the snapshot did not copy the project's selection, every
+        // assertion below would be about a DENY_ALL run and would pass for the wrong reason.
+        assertThat(jdbc.queryForObject(
+                        "select network_policy_revision_id from run_snapshots where run_id = ?",
+                        UUID.class,
+                        runId))
+                .as("the snapshot pins the policy the project selected, at creation")
+                .isEqualTo(policyId);
+        return runId;
+    }
+
     private UUID claimedRun(List<String> tags) throws Exception {
         return claimedRunFor(tenant(tags));
     }
@@ -1030,6 +1615,17 @@ class SyntheticExecutionPipelineTests {
     }
 
     private static String validAttestation(Instant assessedAt) {
+        return validAttestation(assessedAt, Map.of());
+    }
+
+    /**
+     * An attestation document, optionally claiming this deployment can enforce egress.
+     *
+     * <p>Absent by default, because that is what an assessment produced by a host that has not demonstrated
+     * egress enforcement looks like — and it is the state in which ALLOWLIST must keep being refused. A test
+     * that wants the allowlist path has to say so.
+     */
+    private static String validAttestation(Instant assessedAt, Map<String, String> egress) {
         Map<String, String> controls = new TreeMap<>();
         SandboxSecurityAttestation.REQUIRED_MANDATORY_CONTROLS.forEach(control -> controls.put(control, "PASS"));
         String probe = "sha256:" + "a".repeat(64);
@@ -1039,7 +1635,7 @@ class SyntheticExecutionPipelineTests {
         // an attestation it cannot verify is absent evidence, and absent evidence fails closed.
         var draft = new SandboxSecurityAttestation(
                 SandboxSecurityAttestation.SCHEMA_VERSION,
-                "kaas.sandbox.v1", probe, "docker", truncated, controls, "");
+                "kaas.sandbox.v1", probe, "docker", truncated, controls, egress, "");
         StringBuilder json = new StringBuilder("{\"schemaVersion\":\"")
                 .append(SandboxSecurityAttestation.SCHEMA_VERSION)
                 .append("\",\"securityProfileVersion\":\"kaas.sandbox.v1\",\"probeImageDigest\":\"")
@@ -1047,12 +1643,19 @@ class SyntheticExecutionPipelineTests {
                 .append("\",\"runtime\":\"docker\",\"assessedAt\":\"")
                 .append(truncated)
                 .append("\",\"mandatoryControls\":{");
-        String body = controls.entrySet().stream()
+        json.append(asJsonBody(controls)).append("}");
+        if (!egress.isEmpty()) {
+            json.append(",\"egressControls\":{").append(asJsonBody(new TreeMap<>(egress))).append("}");
+        }
+        return json.append(",\"digest\":\"").append(draft.expectedDigest()).append("\"}")
+                .toString();
+    }
+
+    private static String asJsonBody(Map<String, String> entries) {
+        return entries.entrySet().stream()
                 .map(entry -> "\"" + entry.getKey() + "\":\"" + entry.getValue() + "\"")
                 .reduce((left, right) -> left + "," + right)
                 .orElseThrow();
-        return json.append(body).append("},\"digest\":\"").append(draft.expectedDigest()).append("\"}")
-                .toString();
     }
 
     private static KeyPair keyPair() {
