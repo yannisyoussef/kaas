@@ -81,7 +81,19 @@ class StrongRuntimeAuthorityRevocationTests {
         Thread execution = new Thread(() -> outcome.set(launcher.run(request, authority)));
         execution.start();
 
-        waitUntil(() -> !managed().isEmpty());
+        // WAIT FOR IT TO BE RUNNING, not merely to exist.
+        //
+        // `managed()` lists created-but-not-started containers too, so waiting on that returned as soon as the
+        // container was created -- before the runtime had spawned anything. The sentry count then read zero
+        // and the process table printed beside it, evaluated microseconds later, showed the runtime starting
+        // up. The test was racing the thing it was measuring.
+        waitUntil(() -> managed().stream()
+                .anyMatch(container -> "running".equalsIgnoreCase(container.getState())));
+        // And a runtime process actually exists. Waited for rather than asserted cold, for the same reason:
+        // the sentry appears a moment after the container does. A runtime that never spawns one still fails
+        // here, as a wait that times out.
+        waitUntil(() -> runscProcesses() > 0);
+
         // And it is genuinely running under the mediating runtime, not merely labelled for it.
         String containerId = managed().get(0).getId();
         assertThat(SandboxTestSupport.docker()
