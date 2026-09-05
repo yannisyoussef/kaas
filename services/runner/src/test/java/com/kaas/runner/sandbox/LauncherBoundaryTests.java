@@ -1,12 +1,16 @@
 package com.kaas.runner.sandbox;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import java.util.UUID;
 
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -99,4 +103,38 @@ class LauncherBoundaryTests {
                 ? fromModule
                 : Path.of("services/runner/src/main/java/com/kaas/runner/sandbox/DockerSandboxLauncher.java");
     }
+    @Test
+    @DisplayName("a launcher refuses a request naming a profile it does not hold")
+    void aForeignProfileVersionIsRefused() {
+        // THE GUARD THAT STOPS A COMMAND CHOOSING A SECURITY POSTURE, and until now it had no test.
+        //
+        // A launcher holds exactly one profile. A request naming a different one is refused rather than run
+        // under whatever profile happens to be configured -- otherwise a command authorized against one
+        // boundary could be executed behind another, and the evidence would describe a policy that did not
+        // produce it. Since the profile version is derived from the runtime, this is also what stops a
+        // mediated-runtime command from being served by a baseline launcher.
+        var launcher = SandboxTestSupport.launcher(SandboxTestSupport.profile(), "boundary-" + UUID.randomUUID());
+
+        assertThatThrownBy(() -> launcher.run(new SandboxLaunchRequest(
+                        SyntheticProbe.INSPECT, "kaas.sandbox.somebody-elses.v1", UUID.randomUUID())))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Unknown security profile version");
+    }
+
+    @Test
+    @DisplayName("the mediated runtime's own profile version is refused by a baseline launcher")
+    void aBaselineLauncherRefusesMediatedWork() {
+        // The same guard in the shape that matters for the boundary: a worker configured for the baseline
+        // cannot serve work authorized for the mediating runtime, because the two runtimes produce different
+        // profile versions. Asserted here as well as in the execution loop, because this is the last line of
+        // defence and it does not depend on the loop having checked anything.
+        var baseline = SandboxTestSupport.launcher(SandboxTestSupport.profile(), "boundary-" + UUID.randomUUID());
+
+        assertThatThrownBy(() -> baseline.run(new SandboxLaunchRequest(
+                        SyntheticProbe.INSPECT,
+                        ExecutionRuntimeType.GVISOR.profileVersion(),
+                        UUID.randomUUID())))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
 }

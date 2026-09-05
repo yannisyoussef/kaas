@@ -425,6 +425,53 @@ jobs:
           # this slice exists to answer, and the suite -- not this step -- is what makes a claim about it.
           exit $status
 
+      # THE LEAK CHECK, CHECKED. Both directions, before it is relied on below.
+      #
+      # This step exists because the leak check has been wrong twice, in opposite directions, and each time it
+      # still reported a number that looked like evidence. `pgrep -c` on the runtime name could never match
+      # the sentry, because gVisor re-executes it under a different process name. Grepping the whole argument
+      # list matched the checking script's own command line and could never reach zero.
+      #
+      # A safety check whose answer does not depend on the hazard is not evidence, so this runs the exact rule
+      # used below against a host that demonstrably HAS a sentry and then against one that does not.
+      - name: Confirm the leak check can see a sentry, and can see its absence
+        run: |
+          set -euo pipefail
+          count() { ps -eo args= | awk '{print $1}' | grep -cE '(^|/)runsc(-sandbox|-gofer)?$' || true; }
+
+          before=$(count)
+          if [ "$before" -ne 0 ]; then
+            echo "The runner already had runtime processes before this step; the check below proves nothing." >&2
+            exit 1
+          fi
+
+          docker run -d --name leak-probe --runtime=runsc --network=none alpine:3.20 sleep 120 >/dev/null
+          # The sentry does not appear at the same instant the daemon returns, so this waits rather than
+          # asserting cold -- the same race that made an earlier version of the revocation test flaky.
+          for _ in $(seq 1 50); do
+            [ "$(count)" -gt 0 ] && break
+            sleep 0.2
+          done
+          during=$(count)
+          echo "with a mediated container running: $during"
+
+          docker rm -f leak-probe >/dev/null
+          for _ in $(seq 1 50); do
+            [ "$(count)" -eq 0 ] && break
+            sleep 0.2
+          done
+          after=$(count)
+          echo "after removing it: $after"
+
+          if [ "$during" -eq 0 ]; then
+            echo "The leak check cannot see a sentry that exists. It would report a clean host either way." >&2
+            exit 1
+          fi
+          if [ "$after" -ne 0 ]; then
+            echo "The leak check cannot see the absence of a sentry. It would fail a clean host." >&2
+            exit 1
+          fi
+
       # THE PRODUCTION PATH, under the mediating runtime, end to end.
       #
       # Everything else about this runtime is exercised by suites that build their own profile. This runs the
