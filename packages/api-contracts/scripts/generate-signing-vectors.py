@@ -13,7 +13,16 @@ So this is written from the contract document, in a different language, using a 
 all three agree byte for byte, the agreement is evidence. When they disagree, the contract is ambiguous and
 the fix is the contract.
 
-Run:  python3 packages/api-contracts/scripts/generate-signing-vectors.py
+Not part of any build. It is run by hand when the contract changes, and what it writes is committed --
+generating the vectors during the build would mean the implementations were checked against whatever the
+generator said today rather than against a value fixed in the repository and reviewed.
+
+Run:
+    python3 -m venv /tmp/kaas-vectors && /tmp/kaas-vectors/bin/pip install cryptography
+    /tmp/kaas-vectors/bin/python packages/api-contracts/scripts/generate-signing-vectors.py
+
+`cryptography` is deliberately not a repository dependency: this is a cross-check tool, and pinning a second
+crypto library into the build to verify the first one would defeat the point of the independence.
 """
 
 import base64
