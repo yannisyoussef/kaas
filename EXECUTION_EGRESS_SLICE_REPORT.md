@@ -880,13 +880,41 @@ one-in-three local failure that nobody writes down is a CI flake somebody else d
 
 ## 40. GitHub Actions verification
 
-Not yet run: **nothing in this slice has been committed.** The prompt's own constraint is that work is not
-committed unless asked, and this slice has not been. The verification above is local and complete; the GitHub
-Actions run, its ID, its commit SHA, and its per-job conclusions are the one piece of evidence this report
-cannot yet carry, and it should not claim otherwise.
+**Run [33965580342](https://github.com/yannisyoussef/kaas/actions/runs/33965580342), commit `70e1ea1`
+("docs: record the enforceable execution egress slice"), conclusion `success`.**
 
-What will need recording once it is pushed: commit SHA, workflow run ID, all seven job conclusions, and the
-egress, hostile, and pipeline executed/skipped counts.
+| Job | Conclusion | Duration |
+|---|---|---|
+| `backend` | **success** | 6m 12s |
+| `hostile-execution-gate` | **success** | 4m 20s |
+| `synthetic-execution-pipeline` | **success** | 2m 29s |
+| `execution-egress-gate` | **success** | 2m 46s |
+| `web` | **success** | 30s |
+| `contracts` | **success** | 12s |
+| `infrastructure` | **success** | 6s |
+
+Seven of seven green, on the two commits of this slice: `3069cb2` (the mechanism) and `70e1ea1` (the
+documentation).
+
+**Evidence counts, read from the jobs' own inspection steps rather than from the build summary:**
+
+```
+execution-egress-gate        executed=35   skipped=0
+                             containers=0  networks=0
+hostile-execution-gate       executed=116  skipped=0
+synthetic-execution-pipeline executed=33   skipped=0
+```
+
+These are identical to the local numbers in §35 and §39, which is the point of recording both: a gate whose CI
+count differs from its local count is a gate running something other than what was verified.
+
+The egress gate's floor is 30 against 35 actual, and it ran `cleanEgressSecurityTest` first — so the 35 were
+executed on that machine in that run rather than satisfied by an `UP-TO-DATE` result. Zero KaaS-managed
+containers and zero KaaS-managed networks survived the job, checked on the runner itself.
+
+**The one apps/api flake described in §39 did not reproduce.** The `backend` job ran the same 407 tests on a
+clean Linux runner and passed, which is consistent with that failure being local contention rather than a
+property of the tree — but it is one data point, and the observation in §39 stands as written.
 
 ## 41. Required-check governance
 
@@ -901,8 +929,10 @@ web        contracts                 infrastructure
 because required-check resolution matches on job name alone.
 
 **This report does not claim these are enforced.** Branch-protection state is administration configuration that
-this work has no permission to read or modify. What is asserted is that the jobs exist, are mandatory in the
-sense that nothing in the workflow can make them skip, and are named exactly as above.
+this work has no permission to read or modify. What is asserted is that the jobs exist, all seven ran and
+passed on run 33965580342 (§40), are mandatory in the sense that nothing in the workflow can make them skip,
+and are named exactly as above. Whether GitHub *requires* them before a merge is a setting somebody has to
+check in the repository's own configuration.
 
 ## 42. Residual risks
 
