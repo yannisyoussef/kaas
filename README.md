@@ -38,6 +38,7 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | PostgreSQL persistence | IMPLEMENTED | Flyway schema, JPA validation, tenant composite FKs, immutable-revision trigger, query indexes |
 | SSE and object storage integration | PLANNED | No stream or storage adapter exists. RabbitMQ publication and consumption are implemented, as the two rows above record |
 | Hostile-execution sandbox | EVIDENCED FOR A TRUSTED PROBE, NOT APPROVED FOR USER CONTENT | ADR-022 supersedes ADR-006 and **remains open**. A container launcher and a probe image now exist and hold daemon access; the launcher runs one repository-controlled probe under a fixed profile, and no source, secret, or caller-supplied command can enter it |
+| Continuous execution authority | IMPLEMENTED + VALIDATED | A worker maintains evidence it still owns its assignment for every phase it owns, and acts on the answer (ADR-029). Cancellation, fencing or an expired lease **stops the running sandbox** — measured at 10.2 seconds end to end — and an unreachable control plane consumes the remaining lease budget and then stops it fail-closed. Database fencing stops a stale worker writing; this stops it running, and both are required |
 | Mediating sandbox runtime | IMPLEMENTED + VALIDATED IN CI | The sandbox runs under gVisor with **no fallback to the baseline** — not a flag, not a catch block (ADR-028). Requested and enforced are separately observable: the daemon's assigned runtime is read back before the workload starts, and the guest kernel names itself from inside. The mandatory control set is scoped to the runtime, and the mediating one carries **one fewer demonstrable control** than the baseline because gVisor exposes no `NoNewPrivs` flag. Evidence exists only in the mandatory `strong-runtime-gate` job: the runtime cannot be installed on macOS, so a green local build proves nothing about it |
 | Authentication and product APIs | IMPLEMENTED FOR CURRENT SLICES | External OIDC-compatible bearer JWT; trusted tenant claims only; full-parent scoping and cross-tenant concealment |
 | SSE and artifact semantics | DESIGNED + VALIDATED | Proposed ADRs, canonical docs, strict schemas, fixtures, and OpenAPI; no runtime adapters |
@@ -149,6 +150,7 @@ The checked-in values are local-development defaults, not production secret mana
 - [Implemented signed sandbox security attestation](docs/architecture/signed-sandbox-security-attestation.md)
 - [Signed runtime attestation](docs/security/signed-runtime-attestation.md)
 - [Running the sandbox under a mediating runtime](docs/security/mediated-sandbox-runtime.md)
+- [Continuous execution authority](docs/architecture/continuous-execution-authority.md)
 - [Hostile runtime candidate evaluation](docs/architecture/hostile-runtime-evaluation.md)
 - [Signed security attestation slice report](SIGNED_SECURITY_ATTESTATION_SLICE_REPORT.md)
 - [Architecture decisions](docs/adr/README.md)

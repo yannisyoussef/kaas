@@ -26,6 +26,7 @@
 | [026](026-enforceable-assignment-scoped-execution-egress.md) | Enforceable assignment-scoped egress through a purpose-built trusted proxy the sandbox cannot route around | ACCEPTED; allowlist enforceable for synthetic execution |
 | [027](027-signed-runtime-security-attestations.md) | Sandbox security evidence is signed by the gate that observed it and verified against a pinned key, replacing a self-consistency digest an operator wrote | ACCEPTED; v3 required, v2 refused |
 | [028](028-mediated-sandbox-runtime.md) | The sandbox runs under a mediating runtime with no fallback to the baseline, and the mandatory control set is scoped to the runtime that produced the evidence | ACCEPTED; v4 required, v3 refused; ADR-022 stays open |
+| [029](029-continuous-execution-authority.md) | The lease bounds how long a worker may keep executing, not only what it may write: revocation stops a running sandbox, and an unrenewable lease stops it fail-closed | ACCEPTED; ADR-022 stays open |
 
 Deferred topics without active decisions remain: concrete object-storage/upload adapter, secret **delivery**
 mechanism and a real secret provider, outbox and CREATED-run retention policy, self-service quarantine
@@ -68,5 +69,15 @@ observable: the mediating one cannot demonstrate `NO_NEW_PRIVILEGES` at all and 
 demonstrable mandatory control than the baseline, which is recorded as a finding rather than a footnote.
 **ADR-022 stays open**: a stronger runtime starting is not the same as hostile tenant content being safe to
 run, and tenant execution remains unavailable.
+
+ADR-029 closes an authority-lifetime gap the earlier slices left open. Database fencing already stopped a
+stale worker **writing**; nothing stopped it **running**. A workload already inside a sandbox continued after
+cancellation, fencing or lease expiry until it finished on its own or hit the sandbox deadline — acceptable
+for a workload this repository wrote, and not acceptable for hostile code. The heartbeat now returns the
+decision the control plane had already computed and was discarding, together with the lease window in the
+database's own clock; the runner converts that to a **monotonic** budget, stops promptly on a definitive
+refusal, and stops fail-closed when the budget is exhausted. A transient outage inside the budget still does
+not end a healthy run. **ADR-022 stays open**: bounding a stale worker's execution is a prerequisite for
+hostile tenant code, not permission to run it.
 
 `IMPLEMENTED` means verified by repository code or tooling. `PROPOSED` means design intent only. `DEFERRED` means no decision is active and implementation must not assume one.

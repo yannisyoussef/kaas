@@ -2,6 +2,34 @@
 
 **Status: IMPLEMENTED FOR A TRUSTED SYNTHETIC PROBE.** The sandbox boundary exists, is enforced, and is proven from inside by a repository-controlled probe. No user content has been anywhere near it, and a passing assessment does not change that.
 
+## Two kinds of fencing, and why both are needed
+
+**State fencing** — the database refuses a stale worker's writes. A worker whose assignment was fenced,
+cancelled, or whose lease expired cannot advance a phase, submit a result, or redeem a capability. This has
+been true since ADR-021 and is unchanged.
+
+**Execution fencing** — the runner stops a stale worker's computation. Added by
+[ADR-029](../adr/029-continuous-execution-authority.md).
+
+They are different claims and neither implies the other:
+
+```
+a fenced worker whose writes are all rejected
+        is still burning CPU inside a sandbox
+        until something stops the sandbox
+```
+
+For a workload this repository wrote, that gap is wasteful. For hostile tenant code the compute *is* the
+problem, so a test proving stale results are rejected proves nothing about it.
+
+What execution fencing guarantees: a sandbox is terminated within roughly one heartbeat interval plus one
+graceful stop window of a definitive revocation, and within the remaining lease budget when the control plane
+cannot be reached at all. **No sandbox continues indefinitely after its execution authority has ended.**
+
+What it does not guarantee: instantaneous termination, or cleanup after a hard crash — a `SIGKILL`ed runner
+still relies on the lease expiring and the orphan reconciler removing what is left.
+
+
 ## What this is, and what it is not
 
 ```
