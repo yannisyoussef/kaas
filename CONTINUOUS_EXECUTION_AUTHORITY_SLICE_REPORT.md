@@ -314,9 +314,28 @@ the mistake matters more than the fix.
 | Transient outage survived | pipeline | run COMPLETED / PASSED |
 | Prolonged outage, fail-closed | pipeline | 10.3s, no result |
 | Egress: sandbox + proxy + network | egress gate | 7.1s |
-| Mediated runtime + sentry gone | strong-runtime gate | CI only |
+| Mediated runtime + sentry gone | strong-runtime gate | CI only — `runsc_processes=0` after |
 
 ## 38. CI evidence
+
+**Final run 33994573630 at `ab7720aa`: eight of eight green.**
+
+```
+backend · hostile-execution-gate · synthetic-execution-pipeline · execution-egress-gate
+strong-runtime-gate · web · contracts · infrastructure
+```
+
+From the gate's own inspection steps:
+
+```
+executed=7  skipped=0
+containers=0  networks=0  runsc_processes=0
+mediated attestation: kaas.sandbox.gvisor.v1 GVISOR 17 controls   verification=VALID
+```
+
+The leak line is the one worth reading twice. It says zero because the check now counts the runtime's own
+executables; the two earlier versions of that line would have said zero and one respectively, whatever was
+running.
 
 No ninth check. `StrongRuntimeAuthorityRevocationTests` was added to the existing `strong-runtime-gate`, named
 explicitly rather than by a glob so a renamed class cannot silently drop out of a mandatory gate. The gate's
