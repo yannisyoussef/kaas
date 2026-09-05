@@ -132,6 +132,38 @@ class ExecutionAuthorityMonitorTest {
 
     @Test
     @Timeout(30)
+    @DisplayName("a refused renewal does not extend the budget, even when it carries a lease window")
+    void aRefusalDoesNotExtendTheBudget() throws Exception {
+        // THE SUBTLE ONE. A CLOCK_NOT_ADVANCED answer carries the lease window, because the lease really is
+        // still valid and the worker needs to know how much of it is left. What it must NOT do is RESET the
+        // budget: the renewal did not take, so the lease is expiring on its original schedule, and treating
+        // the window as a fresh grant would let a worker run past authority it never renewed.
+        //
+        // Asserted on the budget rather than by waiting for expiry. Waiting made the outcome a race between
+        // the expiry check and the next refusal, which the correct code won often enough to look like a pass
+        // -- so the test agreed with the mutant roughly as often as it disagreed.
+        FakeClock clock = new FakeClock();
+        var attempts = new AtomicLong();
+        try (var monitor = start(clock, () -> {
+            attempts.incrementAndGet();
+            return new Renewal(AuthorityDecision.CLOCK_NOT_ADVANCED, LEASE);
+        })) {
+            waitUntil(() -> attempts.get() >= 2);
+            Duration spent = Duration.ofSeconds(8);
+            clock.advance(spent);
+            long processedBefore = attempts.get();
+            waitUntil(() -> attempts.get() >= processedBefore + 2);
+
+            // The budget shrank by exactly the time that passed. Under a monitor that treats a refusal as a
+            // grant it would have been reset to the full window instead.
+            assertThat(monitor.remainingBudget())
+                    .as("a refusal that resets the budget is a lease that never expires")
+                    .isEqualTo(LEASE.minus(MARGIN).minus(spent));
+        }
+    }
+
+    @Test
+    @Timeout(30)
     @DisplayName("a refusal this build cannot interpret stops execution")
     void anUnrecognisedDecisionFailsClosed() throws Exception {
         FakeClock clock = new FakeClock();

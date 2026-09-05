@@ -534,7 +534,12 @@ jobs:
           networks=$(docker network ls -q --filter label=kaas.managed=true | wc -l | tr -d ' ')
           # A mediated sandbox leaves a sentry process behind if the container is not reaped, so this is not
           # only about Docker objects.
-          sentries=$(pgrep -c runsc || true)
+          #
+          # Matched on the full command line. `pgrep -c runsc` matches the process NAME, and gVisor re-executes
+          # itself for the sentry so that name is not `runsc` -- measured: the count was zero while a mediated
+          # sandbox was demonstrably running. A leak check that can only ever return zero is worse than none,
+          # because it reads as evidence.
+          sentries=$(pgrep -fc '[r]unsc' || true)
           echo "containers=$containers networks=$networks runsc_processes=${sentries:-0}"
           if [ "$containers" -ne 0 ] || [ "$networks" -ne 0 ] || [ "${sentries:-0}" -ne 0 ]; then
             echo "Resources outlived the suite." >&2

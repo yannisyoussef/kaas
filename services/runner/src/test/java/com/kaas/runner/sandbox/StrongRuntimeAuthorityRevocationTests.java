@@ -89,7 +89,8 @@ class StrongRuntimeAuthorityRevocationTests {
                 .isEqualTo(ExecutionRuntimeType.GVISOR.daemonRuntimeName());
         long sentriesWhileRunning = runscProcesses();
         assertThat(sentriesWhileRunning)
-                .as("a mediated sandbox runs behind a sentry; if none exists the rest of this test is vacuous")
+                .as("a mediated sandbox runs behind a sentry; if none exists the rest of this test is "
+                        + "vacuous. Process table:%n%s", runtimeProcesses())
                 .isPositive();
 
         Instant revokedAt = Instant.now();
@@ -106,7 +107,8 @@ class StrongRuntimeAuthorityRevocationTests {
         // AND SO IS THE RUNTIME PROCESS. This is the half a baseline test cannot assert.
         waitUntil(() -> runscProcesses() == 0);
         assertThat(runscProcesses())
-                .as("a sentry outliving its container is a host process still holding the workload")
+                .as("a sentry outliving its container is a host process still holding the workload. "
+                        + "Process table:%n%s", runtimeProcesses())
                 .isZero();
     }
 
@@ -123,17 +125,43 @@ class StrongRuntimeAuthorityRevocationTests {
      *
      * <p>Counted from the host rather than asked of the daemon. The daemon's view is exactly the view that is
      * insufficient here: it knows about containers, and the question is about the process that served one.
+     *
+     * <h2>Matched on the command line, not the process name</h2>
+     *
+     * <p>{@code pgrep -c runsc} finds nothing at all while a mediated sandbox is running — measured in CI.
+     * gVisor re-executes itself for the sentry, so the process's {@code comm} is not {@code runsc} and a
+     * name match never sees it. A leak check written that way reports zero survivors whether or not any
+     * exist, which is the most dangerous shape a safety check can have: it passes for the same reason
+     * whether the system is healthy or broken.
+     *
+     * <p>{@code -f} matches the full command line, which does carry the runtime's path.
      */
     private static long runscProcesses() {
+        return countProcesses("pgrep -fc '[r]unsc' || true");
+    }
+
+    private static long countProcesses(String command) {
         try {
-            Process ps = new ProcessBuilder("sh", "-c", "pgrep -c runsc || true")
-                    .redirectErrorStream(true)
-                    .start();
+            Process ps = new ProcessBuilder("sh", "-c", command).redirectErrorStream(true).start();
             String output = new String(ps.getInputStream().readAllBytes()).trim();
             ps.waitFor();
             return output.isEmpty() ? 0 : Long.parseLong(output.lines().findFirst().orElse("0").trim());
         } catch (Exception unavailable) {
             throw new AssertionError("the host's process table must be readable for this suite", unavailable);
+        }
+    }
+
+    /** What the process table actually holds, for when a count disagrees with expectation. */
+    private static String runtimeProcesses() {
+        try {
+            Process ps = new ProcessBuilder("sh", "-c", "ps -eo pid,comm,args | grep -i '[r]unsc' || true")
+                    .redirectErrorStream(true)
+                    .start();
+            String output = new String(ps.getInputStream().readAllBytes());
+            ps.waitFor();
+            return output.isBlank() ? "(no runsc processes)" : output;
+        } catch (Exception unavailable) {
+            return "(process table unreadable)";
         }
     }
 

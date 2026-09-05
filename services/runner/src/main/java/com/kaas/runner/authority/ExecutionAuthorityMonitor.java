@@ -116,16 +116,16 @@ public final class ExecutionAuthorityMonitor implements ExecutionAuthority, Auto
                 break;
             }
             // Never sleep past the deadline. Waking after authority could already have expired would make the
-            // budget an interval-rounding artifact rather than a bound.
+            // budget an interval-rounding artifact rather than a bound: the sleep is clamped to whatever
+            // budget is left, so an exhausted budget sleeps for nothing and the check below fires at once.
             long remaining = deadlineNanos.get() - clock.nanoTime();
-            long sleep = Math.min(interval.toNanos(), Math.max(0L, remaining));
-            if (remaining <= 0) {
-                expire();
-                break;
-            }
-            if (!sleepNanos(sleep)) {
+            if (!sleepNanos(Math.min(interval.toNanos(), Math.max(0L, remaining)))) {
                 return;
             }
+            // One expiry check, deliberately. An earlier version tested the budget before sleeping as well,
+            // which read as defence in depth and was not: with the sleep clamped as above, the two could never
+            // disagree, and a mutation removing the first was undetectable by any test because the second
+            // always covered it. A guard nothing can distinguish from its absence is not a guard.
             if (clock.nanoTime() - deadlineNanos.get() >= 0 && lost.get() == null && !stopping) {
                 expire();
             }
