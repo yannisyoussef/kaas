@@ -848,7 +848,17 @@ class SyntheticExecutionPipelineTests {
                     .isEqualTo("AUTHORITY_LOST");
             assertThat(report.get().detail()).isEqualTo("RUN_NOT_OWNED");
             // Bounded by the platform: one heartbeat interval to notice, one graceful window to stop.
-            assertThat(stoppedIn).as("stopped in %s", stoppedIn).isLessThan(Duration.ofSeconds(45));
+            // 18 seconds separates two different reasons the worker could have returned.
+            //
+            // A real termination is one heartbeat interval to notice plus one graceful window to stop:
+            // measured at 10.2s. A sandbox that was never terminated still disappears when its own 30-second
+            // profile deadline fires, and the loop's authority check then reports exactly what is asserted
+            // above -- measured at 30.1s under a mutation that dropped the authority from the launch. A looser
+            // bound admits both, which proves the report and not the termination. Those are the two axes.
+            assertThat(stoppedIn)
+                    .as("stopped in %s, which must be sooner than the sandbox's own deadline could explain",
+                            stoppedIn)
+                    .isLessThan(Duration.ofSeconds(18));
     
             // NO STALE SUCCESS. The run is cancelled, and no result was submitted by a worker that had already
             // lost the right to submit one.

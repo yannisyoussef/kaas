@@ -539,7 +539,7 @@ jobs:
           # itself for the sentry so that name is not `runsc` -- measured: the count was zero while a mediated
           # sandbox was demonstrably running. A leak check that can only ever return zero is worse than none,
           # because it reads as evidence.
-          sentries=$(pgrep -fc '[r]unsc' || true)
+          sentries=$(ps -eo args= | grep -c runsc || true)
           echo "containers=$containers networks=$networks runsc_processes=${sentries:-0}"
           if [ "$containers" -ne 0 ] || [ "$networks" -ne 0 ] || [ "${sentries:-0}" -ne 0 ]; then
             echo "Resources outlived the suite." >&2

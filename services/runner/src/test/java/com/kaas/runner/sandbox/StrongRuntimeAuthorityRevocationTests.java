@@ -137,15 +137,30 @@ class StrongRuntimeAuthorityRevocationTests {
      * <p>{@code -f} matches the full command line, which does carry the runtime's path.
      */
     private static long runscProcesses() {
-        return countProcesses("pgrep -fc '[r]unsc' || true");
+        return runtimeProcessLines().size();
     }
 
-    private static long countProcesses(String command) {
+    /**
+     * Every process whose command line names the mediating runtime.
+     *
+     * <p>Read straight from {@code ps} and filtered here, so the count and the evidence come from one source.
+     * They did not before: the count used {@code pgrep} and the diagnostic used {@code ps}, and in CI they
+     * disagreed outright — {@code pgrep} reported none while {@code ps} listed a {@code runsc-sandbox} and a
+     * {@code runsc-gofer} for a running container. A safety check that disagrees with the evidence printed
+     * beside it is worse than no check, because it is read as agreement.
+     *
+     * <p>Filtering in Java rather than piping through {@code grep} also removes the classic self-match, where
+     * the search command's own command line contains the pattern and the count is never zero.
+     */
+    private static java.util.List<String> runtimeProcessLines() {
         try {
-            Process ps = new ProcessBuilder("sh", "-c", command).redirectErrorStream(true).start();
-            String output = new String(ps.getInputStream().readAllBytes()).trim();
+            Process ps = new ProcessBuilder("ps", "-eo", "args=").redirectErrorStream(true).start();
+            String output = new String(ps.getInputStream().readAllBytes());
             ps.waitFor();
-            return output.isEmpty() ? 0 : Long.parseLong(output.lines().findFirst().orElse("0").trim());
+            return output.lines()
+                    .map(String::trim)
+                    .filter(line -> line.contains("runsc"))
+                    .toList();
         } catch (Exception unavailable) {
             throw new AssertionError("the host's process table must be readable for this suite", unavailable);
         }
@@ -153,16 +168,8 @@ class StrongRuntimeAuthorityRevocationTests {
 
     /** What the process table actually holds, for when a count disagrees with expectation. */
     private static String runtimeProcesses() {
-        try {
-            Process ps = new ProcessBuilder("sh", "-c", "ps -eo pid,comm,args | grep -i '[r]unsc' || true")
-                    .redirectErrorStream(true)
-                    .start();
-            String output = new String(ps.getInputStream().readAllBytes());
-            ps.waitFor();
-            return output.isBlank() ? "(no runsc processes)" : output;
-        } catch (Exception unavailable) {
-            return "(process table unreadable)";
-        }
+        java.util.List<String> lines = runtimeProcessLines();
+        return lines.isEmpty() ? "(no runsc processes)" : String.join(System.lineSeparator(), lines);
     }
 
     private static void waitUntil(java.util.function.BooleanSupplier condition) throws InterruptedException {

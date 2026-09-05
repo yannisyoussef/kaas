@@ -177,6 +177,25 @@ public final class ExecutionLoop {
         }
     }
 
+    /**
+     * Starts one workload under the authority that is watching this execution.
+     *
+     * <p>One call site for both network policies, deliberately. The allowlist and deny-all paths use different
+     * launchers, different probes and different profile versions, and for a while they also each passed the
+     * authority separately — which meant a change that dropped it from one of them left the other looking
+     * correct. That is not hypothetical: mutating either call in isolation was undetectable, because the
+     * loop's own authority check still stopped the run and the abandoned sandbox merely ran to its profile
+     * deadline instead of being terminated. Bounded, real, and invisible.
+     */
+    private SandboxOutcome runWorkload(
+            SandboxLauncher sandboxes,
+            SyntheticProbe probe,
+            String profileVersion,
+            UUID runId,
+            ExecutionAuthority authority) {
+        return sandboxes.run(new SandboxLaunchRequest(probe, profileVersion, runId), authority);
+    }
+
     /** The policy type whose executions run behind a proxy. Every other type uses the no-network path. */
     private static final String ALLOWLIST = "ALLOWLIST";
 
@@ -338,8 +357,8 @@ public final class ExecutionLoop {
                 // The egress workload, not the configured one. Which workload an allowlist execution runs is
                 // a property of the policy rather than of this runner's configuration: an allowlist run whose
                 // workload never touched the network would complete successfully having demonstrated nothing.
-                outcome = egress.launcher().run(
-                        new SandboxLaunchRequest(SyntheticProbe.WORKLOAD_EGRESS, expected, runId), authority);
+                outcome = runWorkload(
+                        egress.launcher(), SyntheticProbe.WORKLOAD_EGRESS, expected, runId, authority);
                 if (!egress.proxyIsRunning()) {
                     // CONSERVATIVE, and deliberately unconditional. The sandbox may have produced a
                     // perfectly well-formed result before the proxy died, and that result is still evidence
@@ -360,8 +379,8 @@ public final class ExecutionLoop {
                         "The egress mechanism could not be started (" + cannotStart.failure() + ").");
             }
         } else {
-            outcome = launcher.run(
-                    new SandboxLaunchRequest(workload, command.sandboxProfileVersion(), runId), authority);
+            outcome = runWorkload(
+                    launcher, workload, command.sandboxProfileVersion(), runId, authority);
         }
         // ABSENT OR INCOMPLETE EVIDENCE IS AN INFRASTRUCTURE FAILURE, NOT A TEST RESULT.
         //
