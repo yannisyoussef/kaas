@@ -13,6 +13,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -100,7 +101,14 @@ public final class SignedAttestationFixture {
         private Builder(String profileVersion, Instant assessedAt) {
             this.profileVersion = profileVersion;
             this.assessedAt = assessedAt;
-            RequiredSecurityControls.MANDATORY.forEach(control -> mandatory.put(control, "PASS"));
+            // Scoped to this fixture's own profile version, so a fixture built for one runtime cannot
+            // accidentally carry the other runtime's control set and look valid. A version this build does
+            // not recognise still has to produce a document -- that is exactly what the profile-mismatch
+            // tests need one for -- so it is populated with the baseline set and refused on the profile.
+            Set<String> required = RequiredSecurityControls.knownProfileVersions().contains(profileVersion)
+                    ? RequiredSecurityControls.mandatoryFor(profileVersion)
+                    : RequiredSecurityControls.mandatoryFor("kaas.sandbox.v1");
+            required.forEach(control -> mandatory.put(control, "PASS"));
             RequiredSecurityControls.EGRESS.forEach(control -> egress.put(control, "PASS"));
         }
 

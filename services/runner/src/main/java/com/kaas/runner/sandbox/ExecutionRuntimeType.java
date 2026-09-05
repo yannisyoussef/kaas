@@ -120,6 +120,50 @@ public enum ExecutionRuntimeType {
         return inSandboxKernelMarker().map(observedRelease::endsWith).orElse(false);
     }
 
+    /**
+     * Character devices this runtime <em>emulates</em>, which a sandbox under it will therefore see.
+     *
+     * <p>gVisor's guest presents {@code /dev/fuse} and {@code /dev/net/tun}. Neither is a host device: both are
+     * served by the sentry's own VFS and netstack, and reaching either means talking to the userspace kernel
+     * rather than to the host's. Under {@link #DOCKER} the same two names would mean a real host device was
+     * passed in, which is exactly what {@code NO_HOST_DEVICES} exists to catch.
+     *
+     * <p>So the allowance is scoped to the runtime rather than added to the shared list. A global allowance
+     * would silently stop catching a genuinely exposed {@code /dev/fuse} under the baseline runtime — the
+     * check would keep its name and stop meaning what it says.
+     *
+     * <p>This is a real difference in surface, not a formality: it is two more interfaces reachable from
+     * inside the sandbox, and they are recorded as a finding of the runtime evaluation rather than waved
+     * through.
+     */
+    public java.util.Set<String> emulatedCharacterDevices() {
+        return this == GVISOR ? java.util.Set.of("/dev/fuse", "/dev/net/tun") : java.util.Set.of();
+    }
+
+    /**
+     * Whether a sandbox under this runtime can read the kernel's {@code NoNewPrivs} flag out of
+     * {@code /proc/self/status}.
+     *
+     * <p>runc can. gVisor does not emit the line at all — the control is still in the OCI spec and still
+     * applied, but the guest exposes no way to observe it, so the gate's evidence for it disappears while the
+     * control name stays.
+     *
+     * <h2>Why the platform answers this and not the probe</h2>
+     *
+     * <p>The obvious implementation is "if the observation is missing, the runtime must not support it". That
+     * hands the decision to whatever produced the observation: a workload that simply withheld the line would
+     * downgrade a mandatory blocking control into a non-blocking one, which is evidence suppression rewarded
+     * with a weaker gate. Answering it from the runtime constant instead means a missing flag under
+     * {@link #DOCKER} stays a failure, and only a runtime the platform knows cannot report it is excused.
+     *
+     * <p>The excusal is not a pass. Where this is false the check reports {@code UNSUPPORTED} and says so —
+     * see the runtime evaluation, which records the reduced mandatory set under the mediating runtime as a
+     * finding rather than a footnote.
+     */
+    public boolean exposesNoNewPrivilegesFlag() {
+        return this == DOCKER;
+    }
+
     /** Whether this runtime is the one ADR-022 requires before hostile tenant content could be considered. */
     public boolean mediatesHostKernelSyscalls() {
         return this == GVISOR;

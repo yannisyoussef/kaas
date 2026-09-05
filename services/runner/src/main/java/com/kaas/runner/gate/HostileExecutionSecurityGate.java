@@ -160,10 +160,31 @@ public final class HostileExecutionSecurityGate {
         List<String> unexpectedMounts = mounts.stream().filter(path -> !allowedMount(path)).sorted().toList();
         List<String> unexpectedWritable =
                 writable.stream().filter(path -> !allowedMount(path)).sorted().toList();
-        List<String> missingMasks =
-                REQUIRED_MASKED_PATHS.stream().filter(path -> !mounts.contains(path)).toList();
+        // Masked or absent, and PROVABLY one of the two.
+        //
+        // runc mounts over these paths, so they show up in the mount table. gVisor never implemented them, so
+        // they do not exist at all -- which is at least as strong, and produces none of the same evidence.
+        // Requiring the mount would fail a sandbox that is stricter than the one that passes.
+        //
+        // The trap is that "not in the mount table and not in the present list" is also what a probe that
+        // never looked produces. So the probe reports the list it examined, and a required path missing from
+        // THAT list fails: absent evidence is not a pass.
+        Set<String> kernelPathsExamined = outcome.observedSet("kernel_paths_checked");
+        Set<String> kernelPathsPresent = outcome.observedSet("kernel_paths_present");
+        List<String> unexaminedPaths = REQUIRED_MASKED_PATHS.stream()
+                .filter(path -> !kernelPathsExamined.contains(path))
+                .toList();
+        // Present AND not overmounted: the systempaths=unconfined case, still a failure.
+        List<String> exposedKernelPaths = REQUIRED_MASKED_PATHS.stream()
+                .filter(kernelPathsPresent::contains)
+                .filter(path -> !mounts.contains(path))
+                .toList();
+        // The baseline list plus whatever THIS runtime emulates. Scoped to the runtime on purpose: see
+        // ExecutionRuntimeType#emulatedCharacterDevices.
+        Set<String> allowedCharDevices = new java.util.HashSet<>(ALLOWED_CHARACTER_DEVICES);
+        allowedCharDevices.addAll(launcher.profile().runtime().emulatedCharacterDevices());
         List<String> unexpectedCharDevices =
-                charDevices.stream().filter(path -> !ALLOWED_CHARACTER_DEVICES.contains(path)).sorted().toList();
+                charDevices.stream().filter(path -> !allowedCharDevices.contains(path)).sorted().toList();
 
         // The read-only claim rests on writing to a directory this uid owns: writing to "/" would be refused by
         // ordinary permissions even on a writable filesystem. That ownership lives in one Dockerfile line, so
@@ -201,8 +222,9 @@ public final class HostileExecutionSecurityGate {
                 mandatory(
                         outcome,
                         "KERNEL_PATHS_MASKED",
-                        missingMasks.isEmpty(),
-                        "missing_masks=" + missingMasks));
+                        unexaminedPaths.isEmpty() && exposedKernelPaths.isEmpty(),
+                        "exposed=" + exposedKernelPaths + " unexamined=" + unexaminedPaths
+                                + " present=" + kernelPathsPresent.stream().sorted().toList()));
     }
 
     private static boolean allowedMount(String path) {
@@ -223,13 +245,22 @@ public final class HostileExecutionSecurityGate {
                 .reduce((left, right) -> left + " " + right)
                 .orElse("none");
         String noNewPrivs = outcome.observation("no_new_privs").orElse(null);
+        Set<String> setuidBinaries = outcome.observedSet("setuid_binaries");
         String seccomp = outcome.observation("seccomp").orElse(null);
         return List.of(
                 mandatory(outcome, "CAPABILITIES_DROPPED", allZero, capabilityEvidence),
-                // "1" passes, anything else fails, and nothing at all fails. This previously passed on any
-                // non-null value, so no_new_privs=0 — the kernel reporting the control switched off — was read
-                // as the control being enforced.
-                mandatory(outcome, "NO_NEW_PRIVILEGES", "1".equals(noNewPrivs), "no_new_privs=" + noNewPrivs),
+                noNewPrivilegesCheck(outcome, noNewPrivs),
+                // The escalation path itself, observed rather than inferred.
+                //
+                // no-new-privileges stops the kernel performing a privilege transition; this establishes there
+                // is nothing in the sandbox to transition through. It is the one of the two that reads the
+                // same under every runtime, which is why it is mandatory everywhere while the flag check is
+                // not — see ExecutionRuntimeType#exposesNoNewPrivilegesFlag.
+                mandatory(
+                        outcome,
+                        "NO_SETUID_BINARIES",
+                        outcome.observation("setuid_binaries").isPresent() && setuidBinaries.isEmpty(),
+                        "setuid_binaries=" + outcome.observation("setuid_binaries").orElse("unreported")),
                 // Seccomp filtering is on by default on most daemons and absent on some. Reported honestly as
                 // deployment-specific rather than claimed: a control we cannot demonstrate everywhere is not
                 // part of the mandatory baseline, and pretending otherwise would make the baseline a fiction.
@@ -381,6 +412,38 @@ public final class HostileExecutionSecurityGate {
      * passes for reasons nobody chose. The check reports {@code UNSUPPORTED} there — not a pass, and not
      * required of the baseline either, because {@link Enforcement#DEPLOYMENT_SPECIFIC} controls never block.
      */
+    /**
+     * {@code NO_NEW_PRIVILEGES}, reported at the strength the runtime actually supports.
+     *
+     * <p>Under a runtime that exposes the kernel flag this is unchanged and unweakened: {@code 1} passes,
+     * anything else fails, and a missing observation fails — evidence suppression must not buy a pass.
+     *
+     * <p>Under a runtime that does not expose it, there is no in-sandbox observation to make. The honest
+     * report is {@code UNSUPPORTED}, not a pass: the control is still applied by the launcher and still in the
+     * OCI spec, but "we asked for it" is the *requested* side of exactly the distinction this gate exists to
+     * keep, and recording a request as though it were an observation is the failure mode that makes a gate
+     * decorative.
+     *
+     * <p><strong>This means the mediating runtime carries one fewer demonstrable mandatory control than the
+     * baseline.</strong> That is a real reduction, it is recorded as a finding in the runtime evaluation, and
+     * {@code NO_SETUID_BINARIES} — which reads identically under both — is what covers the underlying
+     * escalation path in the meantime.
+     */
+    private SecurityCheck noNewPrivilegesCheck(SandboxOutcome outcome, String noNewPrivs) {
+        if (!launcher.profile().runtime().exposesNoNewPrivilegesFlag() && noNewPrivs == null) {
+            return check(
+                    "NO_NEW_PRIVILEGES",
+                    Enforcement.DEPLOYMENT_SPECIFIC,
+                    Verdict.UNSUPPORTED,
+                    "this runtime does not expose NoNewPrivs; the control is applied but not observable "
+                            + "from inside, and NO_SETUID_BINARIES covers the escalation path it closes");
+        }
+        // "1" passes, anything else fails, and nothing at all fails. This previously passed on any non-null
+        // value, so no_new_privs=0 — the kernel reporting the control switched off — was read as the control
+        // being enforced.
+        return mandatory(outcome, "NO_NEW_PRIVILEGES", "1".equals(noNewPrivs), "no_new_privs=" + noNewPrivs);
+    }
+
     private SecurityCheck runtimeCheck(SandboxOutcome inspect) {
         ExecutionRuntimeType expected = launcher.profile().runtime();
         String observed = inspect.observation("runtime_kernel_release").orElse("");

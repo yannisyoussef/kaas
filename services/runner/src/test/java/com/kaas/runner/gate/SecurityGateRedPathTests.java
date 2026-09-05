@@ -2,6 +2,7 @@ package com.kaas.runner.gate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.kaas.runner.sandbox.ExecutionRuntimeType;
 import com.kaas.runner.sandbox.SandboxFailure;
 import com.kaas.runner.sandbox.SandboxLaunchRequest;
 import com.kaas.runner.sandbox.SandboxLauncher;
@@ -53,6 +54,14 @@ class SecurityGateRedPathTests {
         observations.put("cap_inh", "0000000000000000");
         observations.put("cap_amb", "0000000000000000");
         observations.put("no_new_privs", "1");
+        // Nothing in the sandbox for a privilege transition to act on.
+        observations.put("setuid_binaries", "");
+        // Every required kernel path examined, and every one of them present -- the runc shape, where they
+        // exist and are overmounted. The gVisor shape (examined, none present) is exercised separately.
+        observations.put("kernel_paths_checked",
+                "/proc/kcore,/proc/keys,/proc/timer_list,/proc/scsi,/sys/firmware");
+        observations.put("kernel_paths_present",
+                "/proc/kcore,/proc/keys,/proc/timer_list,/proc/scsi,/sys/firmware");
         observations.put("seccomp", "2");
         observations.put("uid_map", "0:0:4294967295,");
         observations.put("block_device_nodes", "");
@@ -107,8 +116,20 @@ class SecurityGateRedPathTests {
         private final Map<SyntheticProbe, Map<String, String>> observations = new HashMap<>();
         private final Map<SyntheticProbe, SandboxFailure> failures = new HashMap<>();
         private boolean bounding = true;
+        private final ExecutionRuntimeType runtime;
+
+        private FakeLauncher(ExecutionRuntimeType runtime) {
+            this.runtime = runtime;
+            observations.put(SyntheticProbe.INSPECT, healthyInspect());
+            observations.put(SyntheticProbe.NETWORK, healthyNetwork());
+            observations.put(SyntheticProbe.PROCESSES, healthyProcesses());
+            observations.put(SyntheticProbe.MEMORY, healthyMemory());
+            observations.put(SyntheticProbe.SLEEP, healthySleep());
+            observations.put(SyntheticProbe.OUTPUT, healthyOutput());
+        }
 
         private FakeLauncher() {
+            this.runtime = ExecutionRuntimeType.DOCKER;
             observations.put(SyntheticProbe.INSPECT, healthyInspect());
             observations.put(SyntheticProbe.NETWORK, healthyNetwork());
             observations.put(SyntheticProbe.PROCESSES, healthyProcesses());
@@ -142,7 +163,7 @@ class SecurityGateRedPathTests {
 
         @Override
         public SandboxSecurityProfile profile() {
-            return SandboxSecurityProfile.version1("sha256:" + "a".repeat(64));
+            return SandboxSecurityProfile.version1("sha256:" + "a".repeat(64), runtime);
         }
 
         @Override
@@ -186,7 +207,7 @@ class SecurityGateRedPathTests {
                 .containsExactlyInAnyOrder(
                         "NON_ROOT_UID", "NON_ROOT_GID", "READ_ONLY_ROOT", "WRITABLE_TMPFS",
                         "NO_DOCKER_SOCKET", "NO_HOST_MOUNTS", "NO_HOST_DEVICES", "KERNEL_PATHS_MASKED",
-                        "CAPABILITIES_DROPPED", "NO_NEW_PRIVILEGES", "MINIMAL_ENVIRONMENT",
+                        "CAPABILITIES_DROPPED", "NO_NEW_PRIVILEGES", "NO_SETUID_BINARIES", "MINIMAL_ENVIRONMENT",
                         "NETWORK_DENIED", "PID_LIMIT", "MEMORY_LIMIT", "WALL_CLOCK_TIMEOUT",
                         "OUTPUT_BOUNDED");
     }
@@ -312,6 +333,55 @@ class SecurityGateRedPathTests {
         assertThat(blockers(assess(instant))).contains("WALL_CLOCK_TIMEOUT");
     }
 
+    @Test
+    void aRuntimeThatCannotReportTheFlagGetsAnHonestVerdictRatherThanAPass() {
+        // UNSUPPORTED, not PASS. The control is applied either way; what is absent is the ability to observe
+        // it, and the gate has to say which of those two it is looking at.
+        HostileExecutionAssessment assessment = assess(new FakeLauncher(ExecutionRuntimeType.GVISOR)
+                .withholding(SyntheticProbe.INSPECT, "no_new_privs"));
+
+        assertThat(assessment.checks())
+                .filteredOn(check -> "NO_NEW_PRIVILEGES".equals(check.control()))
+                .singleElement()
+                .satisfies(check -> {
+                    assertThat(check.verdict()).isEqualTo(SecurityCheck.Verdict.UNSUPPORTED);
+                    assertThat(check.enforcement()).isEqualTo(SecurityCheck.Enforcement.DEPLOYMENT_SPECIFIC);
+                });
+    }
+
+    @Test
+    void withholdingTheFlagOnARuntimeThatDoesReportItStillBlocks() {
+        // The suppression path. Without this, "the observation is missing" would be a way to buy the excusal
+        // that only the mediating runtime is entitled to.
+        assertThat(blockers(assess(new FakeLauncher().withholding(SyntheticProbe.INSPECT, "no_new_privs"))))
+                .contains("NO_NEW_PRIVILEGES");
+    }
+
+    @Test
+    void aRuntimeThatNeverImplementedTheKernelPathsSatisfiesTheMaskingControl() {
+        // The gVisor shape: every required path examined, none of them present, and therefore none of them in
+        // the mount table either. Absent is at least as strong as overmounted, and a check that demanded the
+        // mount would fail the stricter sandbox while passing the weaker one.
+        HostileExecutionAssessment assessment = assess(new FakeLauncher()
+                .reporting(SyntheticProbe.INSPECT, "mount_points", "/,/dev,/proc,/sys,/tmp,/etc/hosts")
+                .reporting(SyntheticProbe.INSPECT, "kernel_paths_present", ""));
+
+        assertThat(blockers(assessment)).doesNotContain("KERNEL_PATHS_MASKED");
+    }
+
+    @Test
+    void oneUnexaminedKernelPathIsNotTreatedAsAnAbsentOne() {
+        // Anti-vacuity, stated as its own property because it is the failure mode the "absent is fine" rule
+        // creates: a probe that examined four of the five paths must not have the fifth counted as absent.
+        HostileExecutionAssessment assessment = assess(new FakeLauncher()
+                .reporting(SyntheticProbe.INSPECT, "mount_points", "/,/dev,/proc,/sys,/tmp,/etc/hosts")
+                .reporting(SyntheticProbe.INSPECT, "kernel_paths_present", "")
+                .reporting(SyntheticProbe.INSPECT, "kernel_paths_checked",
+                        "/proc/kcore,/proc/keys,/proc/timer_list,/proc/scsi"));
+
+        assertThat(blockers(assessment)).contains("KERNEL_PATHS_MASKED");
+    }
+
     private static FakeLauncher switchOff(FakeLauncher launcher, String control) {
         return switch (control) {
             case "NON_ROOT_UID" -> launcher.reporting(SyntheticProbe.INSPECT, "uid", "0");
@@ -324,11 +394,18 @@ class SecurityGateRedPathTests {
                     launcher.reporting(SyntheticProbe.INSPECT, "mount_points", "/,/proc,/tmp,/mnt/host");
             case "NO_HOST_DEVICES" ->
                     launcher.reporting(SyntheticProbe.INSPECT, "block_device_nodes", "/dev/sda1");
+            // systempaths=unconfined: the paths are there and nothing is mounted over them. Both halves are
+            // needed now -- dropping them from the mount table alone is indistinguishable from the runtime
+            // never having implemented them, which is the stricter case rather than the weaker one.
             case "KERNEL_PATHS_MASKED" ->
-                    launcher.reporting(SyntheticProbe.INSPECT, "mount_points", "/,/proc,/tmp");
+                    launcher.reporting(SyntheticProbe.INSPECT, "mount_points", "/,/proc,/tmp")
+                            .reporting(SyntheticProbe.INSPECT, "kernel_paths_present",
+                                    "/proc/kcore,/proc/keys,/proc/timer_list,/proc/scsi,/sys/firmware");
             case "CAPABILITIES_DROPPED" ->
                     launcher.reporting(SyntheticProbe.INSPECT, "cap_prm", "0000003fffffffff");
             case "NO_NEW_PRIVILEGES" -> launcher.reporting(SyntheticProbe.INSPECT, "no_new_privs", "0");
+            case "NO_SETUID_BINARIES" ->
+                    launcher.reporting(SyntheticProbe.INSPECT, "setuid_binaries", "/bin/mount");
             case "MINIMAL_ENVIRONMENT" -> launcher.reporting(
                     SyntheticProbe.INSPECT, "env_names", "AWS_SECRET_ACCESS_KEY,HOME,KAAS_SANDBOX,PATH");
             case "NETWORK_DENIED" -> launcher.reporting(SyntheticProbe.NETWORK, "net_public", "reachable");
@@ -353,9 +430,16 @@ class SecurityGateRedPathTests {
             case "WRITABLE_TMPFS" -> launcher.withholding(SyntheticProbe.INSPECT, "tmp_writable");
             case "NO_HOST_DEVICES" -> launcher.withholding(SyntheticProbe.INSPECT, "char_device_nodes")
                     .reporting(SyntheticProbe.INSPECT, "block_device_nodes", "/dev/vda1");
-            case "KERNEL_PATHS_MASKED" -> launcher.withholding(SyntheticProbe.INSPECT, "mount_points");
+            // The list of paths the probe examined. Without it, "not present" cannot be told apart from
+            // "never looked", and the check would read a silent probe as a stricter runtime.
+            case "KERNEL_PATHS_MASKED" -> launcher.withholding(SyntheticProbe.INSPECT, "kernel_paths_checked");
             case "CAPABILITIES_DROPPED" -> launcher.withholding(SyntheticProbe.INSPECT, "cap_amb");
+            // Still fail-closed under the BASELINE runtime, which is the one this fixture describes. The
+            // excusal for a runtime that cannot report the flag is granted by the runtime constant, not by
+            // the observation going missing -- otherwise withholding it would be a way to downgrade a
+            // blocking control, which is evidence suppression rewarded.
             case "NO_NEW_PRIVILEGES" -> launcher.withholding(SyntheticProbe.INSPECT, "no_new_privs");
+            case "NO_SETUID_BINARIES" -> launcher.withholding(SyntheticProbe.INSPECT, "setuid_binaries");
             case "MINIMAL_ENVIRONMENT" -> launcher.withholding(SyntheticProbe.INSPECT, "env_names");
             case "NETWORK_DENIED" -> launcher.withholding(SyntheticProbe.NETWORK, "net_global_addresses");
             case "PID_LIMIT" -> launcher.withholding(SyntheticProbe.PROCESSES, "processes_started");

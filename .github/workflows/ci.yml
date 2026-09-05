@@ -419,6 +419,34 @@ jobs:
           # this slice exists to answer, and the suite -- not this step -- is what makes a claim about it.
           exit $status
 
+      # MEASUREMENT, not a gate. The resource-limit controls read differently under the mediating runtime --
+      # the fork loop stopped at 20 processes against a ceiling of 64, and the memory probe reported nothing at
+      # all -- and the question is whether the ceiling is what bound them or something else did. Comparing the
+      # same loops across both runtimes and two memory ceilings answers that; guessing from one data point
+      # would produce a check tuned to a number rather than to a property.
+      - name: Measure the resource ceilings under both runtimes
+        run: |
+          image=busybox@sha256:8d7b1636e974e0adfd8d945955fca609304f0a56c18799dfd032d6e661382d84
+          for rt in runc runsc; do
+            for mem in 256m 512m; do
+              echo "===== fork loop runtime=$rt memory=$mem pids=64"
+              docker run --rm --runtime=$rt --network=none --user 65534:65534 --read-only \
+                --cap-drop=ALL --pids-limit 64 --memory $mem \
+                --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m "$image" \
+                sh -c 'i=0; while [ $i -lt 200 ]; do sleep 5 & i=$((i+1)); printf "started=%s\n" "$i"; done; echo LOOP_COMPLETED' \
+                2>&1 | tail -2
+            done
+            echo "===== memory loop runtime=$rt memory=256m"
+            name=mem-$rt-$RANDOM
+            docker run --name "$name" --runtime=$rt --network=none --user 65534:65534 --read-only \
+              --cap-drop=ALL --pids-limit 64 --memory 256m \
+              --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m "$image" \
+              sh -c 'i=0; while [ $i -lt 256 ]; do eval "c$i=\$(head -c 1048576 /dev/zero | tr \\0 x)" 2>/dev/null || break; i=$((i+1)); done; printf "allocated=%s\n" "$i"; echo LOOP_COMPLETED' \
+              2>&1 | tail -2 || true
+            echo "inspect: $(docker inspect --format '{{.State.ExitCode}} OOMKilled={{.State.OOMKilled}}' "$name")"
+            docker rm -f "$name" >/dev/null
+          done
+
       # cleanTest-equivalent: the task is deleted before it runs, so an UP-TO-DATE result cannot satisfy this
       # gate. A cached pass would report green without having started a single mediated container.
       - run: ./gradlew cleanStrongRuntimeTest :services:runner:strongRuntimeTest --no-daemon

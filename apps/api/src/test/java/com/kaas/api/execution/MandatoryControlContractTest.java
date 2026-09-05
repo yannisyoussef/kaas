@@ -1,6 +1,7 @@
 package com.kaas.api.execution;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.kaas.api.execution.domain.AttestationPayloadFields;
 import com.kaas.api.execution.domain.RequiredSecurityControls;
@@ -28,10 +29,36 @@ import tools.jackson.databind.json.JsonMapper;
 class MandatoryControlContractTest {
 
     @Test
-    void theRequiredControlSetMatchesTheSharedContract() throws Exception {
-        assertThat(RequiredSecurityControls.MANDATORY)
-                .as("the control plane's required set must equal the shared contract at %s", locate())
-                .isEqualTo(sharedList("controls"));
+    void everyProfileVersionsRequiredSetMatchesTheSharedContract() throws Exception {
+        // Every version in the file, and every version this build knows, checked against each other in both
+        // directions. Iterating only over what the code knows would let the contract gain a profile version
+        // this build silently cannot authorize; iterating only over the file would let the code carry one
+        // nobody agreed to.
+        Set<String> declared = sharedProfileVersions();
+        assertThat(RequiredSecurityControls.knownProfileVersions())
+                .as("the profile versions this build can judge must be exactly those in %s", locate())
+                .isEqualTo(declared);
+        for (String version : declared) {
+            assertThat(RequiredSecurityControls.mandatoryFor(version))
+                    .as("required controls for %s must equal the shared contract at %s", version, locate())
+                    .isEqualTo(sharedControlsFor(version));
+        }
+    }
+
+    @Test
+    void anUnknownProfileVersionIsRefusedRatherThanTreatedAsRequiringNothing() {
+        // An empty required set is satisfied by an attestation that demonstrates nothing at all, so the
+        // permissive default is the dangerous one.
+        assertThatThrownBy(() -> RequiredSecurityControls.mandatoryFor("kaas.sandbox.unheard-of.v1"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void theTwoRuntimesDoNotRequireTheSameControls() throws Exception {
+        // Anti-vacuity for the whole runtime-scoping exercise. If the two sets were equal, every test above
+        // would still pass and the scoping would be an elaborate way of expressing one list.
+        assertThat(RequiredSecurityControls.mandatoryFor("kaas.sandbox.v1"))
+                .isNotEqualTo(RequiredSecurityControls.mandatoryFor("kaas.sandbox.gvisor.v1"));
     }
 
     @Test
@@ -49,8 +76,11 @@ class MandatoryControlContractTest {
     void theTwoSetsShareNoControl() throws Exception {
         // A control in both sets would be required unconditionally through one door and conditionally through
         // the other, and which rule applied would depend on which check ran first.
-        assertThat(RequiredSecurityControls.MANDATORY)
-                .doesNotContainAnyElementsOf(RequiredSecurityControls.EGRESS);
+        for (String version : RequiredSecurityControls.knownProfileVersions()) {
+            assertThat(RequiredSecurityControls.mandatoryFor(version))
+                    .as("profile version %s", version)
+                    .doesNotContainAnyElementsOf(RequiredSecurityControls.EGRESS);
+        }
     }
 
     @Test
@@ -64,6 +94,28 @@ class MandatoryControlContractTest {
                 .get("schemaVersion")
                 .stringValue();
         assertThat(declared).isEqualTo(AttestationPayloadFields.SCHEMA_VERSION);
+    }
+
+    private static Set<String> sharedProfileVersions() throws Exception {
+        var node = JsonMapper.builder().build()
+                .readTree(Files.readString(locate()))
+                .get("controlsByProfileVersion");
+        return StreamSupport.stream(
+                        java.util.Spliterators.spliteratorUnknownSize(node.propertyNames().iterator(), 0),
+                        false)
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
+    private static Set<String> sharedControlsFor(String profileVersion) throws Exception {
+        return StreamSupport.stream(
+                        JsonMapper.builder().build()
+                                .readTree(Files.readString(locate()))
+                                .get("controlsByProfileVersion")
+                                .get(profileVersion)
+                                .spliterator(),
+                        false)
+                .map(control -> control.stringValue())
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     private static Set<String> sharedList(String field) throws Exception {

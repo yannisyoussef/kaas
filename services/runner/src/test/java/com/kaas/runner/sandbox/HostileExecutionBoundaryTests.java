@@ -3,13 +3,17 @@ package com.kaas.runner.sandbox;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.model.HostConfig;
 import com.kaas.runner.gate.HostileExecutionAssessment;
 import com.kaas.runner.gate.HostileExecutionSecurityGate;
 import com.kaas.runner.gate.SecurityCheck;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -221,7 +225,7 @@ class HostileExecutionBoundaryTests {
                 .containsExactlyInAnyOrder(
                         "NON_ROOT_UID", "NON_ROOT_GID", "READ_ONLY_ROOT", "WRITABLE_TMPFS", "NO_DOCKER_SOCKET",
                         "NO_HOST_MOUNTS", "NO_HOST_DEVICES", "KERNEL_PATHS_MASKED",
-                        "CAPABILITIES_DROPPED", "NO_NEW_PRIVILEGES",
+                        "CAPABILITIES_DROPPED", "NO_NEW_PRIVILEGES", "NO_SETUID_BINARIES",
                         "MINIMAL_ENVIRONMENT", "NETWORK_DENIED", "PID_LIMIT", "MEMORY_LIMIT",
                         "WALL_CLOCK_TIMEOUT", "OUTPUT_BOUNDED");
         // A control the host cannot enforce is reported as unsupported, never as a pass.
@@ -314,4 +318,60 @@ class HostileExecutionBoundaryTests {
                         && generation.equals(container.getLabels().get(SandboxLabels.GENERATION)))
                 .count();
     }
+    /**
+     * The negative control for the setuid scan.
+     *
+     * <p>{@code NO_SETUID_BINARIES} passes because the probe reports an empty set. That is only evidence if
+     * the scan can produce a non-empty one — a {@code find} with a wrong predicate, a wrong path, or an
+     * {@code -xdev} that stops at the wrong boundary would report "none" forever, and a mandatory control
+     * would pass because nothing was ever looked for.
+     *
+     * <p>So this puts a real setuid binary in a real sandbox and requires the scan to find it. It runs the
+     * probe directly rather than through the launcher, as root and with a writable root filesystem, because
+     * planting the file is the point; the production profile permits neither, which is why the control holds
+     * there.
+     */
+    @Test
+    @Timeout(120)
+    void theSetuidScanFindsASetuidBinaryWhenThereIsOne() throws Exception {
+        DockerClient docker = SandboxTestSupport.docker();
+        String id = docker.createContainerCmd(SandboxTestSupport.probeImage())
+                .withHostConfig(HostConfig.newHostConfig().withNetworkMode("none"))
+                .withUser("0:0")
+                .withEntrypoint("/bin/sh")
+                .withCmd("-c", "cp /bin/busybox /tmp/planted && chmod 4755 /tmp/planted && "
+                        + "/bin/sh /probe.sh inspect")
+                .withLabels(Map.of("kaas.managed", "true", "kaas.launcher.generation", generation))
+                .exec()
+                .getId();
+        try {
+            docker.startContainerCmd(id).exec();
+            docker.waitContainerCmd(id).start().awaitStatusCode(60, TimeUnit.SECONDS);
+            StringBuilder logs = new StringBuilder();
+            docker.logContainerCmd(id)
+                    .withStdOut(true)
+                    .withStdErr(true)
+                    .exec(new com.github.dockerjava.core.command.LogContainerResultCallback() {
+                        @Override
+                        public void onNext(com.github.dockerjava.api.model.Frame frame) {
+                            logs.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+                        }
+                    })
+                    .awaitCompletion(60, TimeUnit.SECONDS);
+
+            String found = logs.toString().lines()
+                    .filter(line -> line.startsWith("setuid_binaries="))
+                    .map(line -> line.substring("setuid_binaries=".length()).trim())
+                    .findFirst()
+                    .orElse("unreported");
+            assertThat(found)
+                    .as("the scan must be able to report a setuid binary; if it cannot, then the mandatory "
+                            + "check that reads an empty result as compliance is passing for a reason "
+                            + "nobody chose")
+                    .contains("/tmp/planted");
+        } finally {
+            docker.removeContainerCmd(id).withForce(true).exec();
+        }
+    }
+
 }

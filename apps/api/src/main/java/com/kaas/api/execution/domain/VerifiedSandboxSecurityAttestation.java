@@ -95,7 +95,18 @@ public final class VerifiedSandboxSecurityAttestation {
         if (!expectedProfileVersion.equals(payload.securityProfileVersion())) {
             return Optional.of(AttestationVerification.PROFILE_MISMATCH);
         }
-        if (!coveredAndPassing(payload.mandatoryControls(), RequiredSecurityControls.MANDATORY)) {
+        if (!RequiredSecurityControls.knownProfileVersions().contains(expectedProfileVersion)) {
+            // A deployment configured to expect a boundary this build has no control set for. Refused rather
+            // than allowed to throw out of the authorization path: an exception here is an error page, and an
+            // error page is not a decision. There is nothing to judge the attestation against, so it cannot
+            // be judged sufficient.
+            return Optional.of(AttestationVerification.PROFILE_MISMATCH);
+        }
+        // Scoped to the profile version, which the check above has just proven equals the one this
+        // deployment expects. Using the expected version rather than the payload's is deliberate even so: the
+        // required set must come from the platform, never from the document being judged.
+        if (!coveredAndPassing(
+                payload.mandatoryControls(), RequiredSecurityControls.mandatoryFor(expectedProfileVersion))) {
             return Optional.of(AttestationVerification.CONTROL_FAILED);
         }
         return Optional.empty();

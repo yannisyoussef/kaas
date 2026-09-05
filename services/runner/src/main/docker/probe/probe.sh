@@ -169,6 +169,33 @@ inspect)
     emit block_device_nodes "$(find /dev -type b 2>/dev/null | sort | tr '\n' ',')"
     emit char_device_nodes "$(find /dev -type c 2>/dev/null | sort | tr '\n' ',')"
 
+    # EVERY setuid and setgid binary reachable in the sandbox.
+    #
+    # This is the escalation path no-new-privileges exists to close, observed directly rather than inferred
+    # from a flag. It reports the same thing under every runtime, which matters because the flag does not:
+    # gVisor's /proc/self/status carries no NoNewPrivs line at all, so on that runtime the flag-based check
+    # can say nothing and this is the control that still can.
+    #
+    # An empty set means there is nothing in the sandbox for a privilege transition to act on, whether or not
+    # the kernel is willing to perform one.
+    emit setuid_binaries "$(find / -xdev \( -perm -4000 -o -perm -2000 \) -type f 2>/dev/null | sort | tr '\n' ',')"
+
+    # Kernel-internal paths, reported as WHICH OF THEM EXIST rather than assumed to be overmounted.
+    #
+    # runc masks these by mounting over them, so they appear in the mount table. gVisor never implemented
+    # them, so they are absent entirely. Absent is at least as strong as masked, but the gate cannot tell
+    # absent from "the probe did not look" unless the probe says what it looked at -- so it emits both the
+    # list it examined and the subset that exists. A path that is present and NOT overmounted is the case this
+    # check exists to catch (a daemon started with systempaths=unconfined), and it is still a failure.
+    emit kernel_paths_checked "/proc/kcore,/proc/keys,/proc/timer_list,/proc/scsi,/sys/firmware,"
+    kernel_paths_present=""
+    for kernel_path in /proc/kcore /proc/keys /proc/timer_list /proc/scsi /sys/firmware; do
+        if [ -e "$kernel_path" ]; then
+            kernel_paths_present="$kernel_paths_present$kernel_path,"
+        fi
+    done
+    emit kernel_paths_present "$kernel_paths_present"
+
     # The environment must be an explicit allowlist, not an inheritance. Names only, never values:
     # a leaked secret must not be copied into the evidence by the check that detects it.
     emit env_names "$(env | cut -d= -f1 | sort | tr '\n' ',')"

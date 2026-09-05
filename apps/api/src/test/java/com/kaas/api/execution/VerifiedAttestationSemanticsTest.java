@@ -186,8 +186,11 @@ class VerifiedAttestationSemanticsTest {
     void theTwoRequiredSetsAreDisjoint() {
         // A control in both would be required unconditionally through one door and conditionally through the
         // other, and which rule applied would depend on which check ran first.
-        assertThat(RequiredSecurityControls.MANDATORY)
-                .doesNotContainAnyElementsOf(RequiredSecurityControls.EGRESS);
+        for (String version : RequiredSecurityControls.knownProfileVersions()) {
+            assertThat(RequiredSecurityControls.mandatoryFor(version))
+                    .as("profile version %s", version)
+                    .doesNotContainAnyElementsOf(RequiredSecurityControls.EGRESS);
+        }
     }
 
     // ---------------------------------------------------------------------------------------------------
