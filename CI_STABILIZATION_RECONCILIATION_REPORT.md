@@ -18,7 +18,7 @@ The fix is one line in one place: the application clock is wrapped at microsecon
 application never holds an instant the database cannot store. No assertion was weakened, no test disabled, no
 sleep or retry added, no environment branch introduced.
 
-Verdict: **READY FOR KAAS-13** — subject to §20, which records the GitHub Actions result.
+Verdict: **READY FOR KAAS-13**. All six GitHub Actions jobs are green on `e2731c8` (§20).
 
 ## 2. Starting Git SHA
 
@@ -254,12 +254,26 @@ Both Docker-dependent suites genuinely executed against a real daemon and a real
 
 ## 20. Final GitHub Actions verification
 
-Recorded in §24 after the push, from the workflow run triggered by the final commit. Local green is not
-sufficient and is not being treated as sufficient.
+Workflow run **`33933791291`**, head `e2731c8`, conclusion **success**. CI Java **Temurin 25.0.4+1**, Gradle
+9.7.1 — the same JVM that produced the failure, so the repair was verified against the environment that
+exposed the defect rather than around it.
+
+| Job | Conclusion | Evidence |
+|---|---|---|
+| backend | **success** | `BUILD SUCCESSFUL`, zero `FAILED` lines (was `269 tests completed, 5 failed`) |
+| hostile-execution-gate | **success** | `executed=72 skipped=0` (floor 40) |
+| synthetic-execution-pipeline | **success** | `executed=24 skipped=0` (floor 20) |
+| web | **success** | |
+| contracts | **success** | |
+| infrastructure | **success** | |
+
+Both Docker-dependent gates genuinely executed and asserted their own evidence — neither was reported as
+validated without running.
 
 ## 21. Final commit SHA
 
-Recorded in §24.
+`e2731c8f81b1e8ef32761fc569f440502451d742` — `fix: make server-generated instants storable at PostgreSQL
+precision`. Starting SHA was `afa82bb`.
 
 ## 22. Deferred work
 
@@ -279,4 +293,14 @@ both the control plane and the runner.
 
 ## 24. Final verdict
 
-Pending the GitHub Actions result recorded here after push.
+**READY FOR KAAS-13**
+
+All six GitHub Actions jobs are green on the final commit, verified on the same JVM that exposed the failure.
+The five failing tests pass unmodified — no assertion was weakened, no test disabled or marked flaky, no sleep
+or retry added, no environment branch introduced, and no JVM pinned to hide the defect. The production code is
+deterministic across host clock precision, and that property is now guarded by tests that mean the same thing
+on every platform rather than only on the one where the symptom was visible.
+
+Idempotency, cancellation, lifecycle, and tenant-scoping semantics are unchanged. Every security control is
+unchanged and both mandatory gates remain fail-closed. Documentation has been reconciled with repository
+reality, and kaas-13 was not begun.
