@@ -376,9 +376,39 @@ jobs:
           docker info --format '{{range $k,$v := .Runtimes}}{{$k}} {{end}}' | tee /tmp/runtimes.txt
           grep -q runsc /tmp/runtimes.txt
 
+          # Registration is not execution. This separates "the daemon knows the name" from "a workload actually
+          # runs under it", so a later suite failure is not ambiguous between the two.
+          docker run --rm --runtime=runsc alpine:3.20 uname -r
+          # And the same shape the sandbox profile uses, so a rejection of THOSE flags is attributed to the
+          # flags rather than to the runtime.
+          docker run --rm --runtime=runsc --network=none --user 65534:65534 --read-only \
+            --cap-drop=ALL --security-opt=no-new-privileges:true --pids-limit 64 --memory 256m \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+            alpine:3.20 sh -c 'id; cat /proc/version'
+
       # cleanTest-equivalent: the task is deleted before it runs, so an UP-TO-DATE result cannot satisfy this
       # gate. A cached pass would report green without having started a single mediated container.
       - run: ./gradlew cleanStrongRuntimeTest :services:runner:strongRuntimeTest --no-daemon
+
+      # A failure here is a statement about the runtime boundary, so it has to be readable from the log alone.
+      # Gradle's console prints only the assertion's line number, and the useful part -- which control blocked,
+      # and what the sandbox actually observed -- lives in the XML.
+      - name: Report what the boundary actually did
+        if: failure()
+        run: |
+          results=services/runner/build/test-results/strongRuntimeTest
+          [ -d "$results" ] || { echo "No results; the suite never started."; exit 0; }
+          python3 - "$results" <<'PYEOF'
+          import glob, sys, xml.etree.ElementTree as ET
+          for path in sorted(glob.glob(sys.argv[1] + "/*.xml")):
+              root = ET.parse(path).getroot()
+              for case in root.iter("testcase"):
+                  for bad in list(case.iter("failure")) + list(case.iter("error")):
+                      print("=" * 78)
+                      print(case.get("name"))
+                      print("-" * 78)
+                      print((bad.get("message") or "").strip()[:4000])
+          PYEOF
 
       - name: Confirm the gate actually produced evidence
         run: |
