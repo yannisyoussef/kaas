@@ -1165,7 +1165,8 @@ class SyntheticExecutionPipelineTests {
                     deployment.dnsTimeout(),
                     deployment.authorizationTimeout(),
                     deployment.revalidationInterval(),
-                    deployment.connectTimeout());
+                    deployment.connectTimeout(),
+                    deployment.sandboxRuntime());
 
             ExecutionLoop.ExecutionReport report =
                     allowlistLoop(topology, broken).execute(runId, attemptId, 1);

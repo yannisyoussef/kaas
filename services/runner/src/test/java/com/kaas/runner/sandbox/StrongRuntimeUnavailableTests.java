@@ -116,6 +116,9 @@ class StrongRuntimeUnavailableTests {
     }
 
     private static final String PINNED = "sha256:" + "a".repeat(64);
+
+    /** A name the profile accepts as a per-execution network; anything else is refused by construction. */
+    private static final String EXECUTION_NETWORK = ExecutionNetwork.NAME_PREFIX + "0123456789abcdef";
     @Test
     void theMediatingRuntimeGetsALongerDeadlineAndTheBaselineDoesNot() {
         // The deadline is a profile value, so a scaling that quietly applied to both would go unnoticed --
@@ -129,6 +132,30 @@ class StrongRuntimeUnavailableTests {
                         + "baseline killed the memory probe before it could report the ceiling that had "
                         + "already bounded it")
                 .isGreaterThan(baseline.wallClockTimeout());
+    }
+
+    @Test
+    @DisplayName("an allowlist sandbox runs behind the deployment's runtime, not a default")
+    void theAllowlistPathCarriesTheDeploymentsRuntime() {
+        // The allowlist path builds its OWN sandbox profile, because the sandbox joins a per-execution network
+        // the deny-all profile knows nothing about. That second construction site defaulted to the baseline
+        // runtime, so a deployment configured for the mediating one could not run an allowlist execution at
+        // all -- the command-versus-profile check refused it, which is fail-closed and still wrong.
+        //
+        // Asserted on the profile rather than by launching anything: the property is that the runtime is
+        // carried through, and that is decided before any container exists.
+        var mediated = SandboxSecurityProfile.version1OnNetwork(
+                PINNED, EXECUTION_NETWORK, java.util.Map.of(), ExecutionRuntimeType.GVISOR);
+        var baseline = SandboxSecurityProfile.version1OnNetwork(
+                PINNED, EXECUTION_NETWORK, java.util.Map.of(), ExecutionRuntimeType.DOCKER);
+
+        assertThat(mediated.runtime()).isEqualTo(ExecutionRuntimeType.GVISOR);
+        assertThat(mediated.version())
+                .as("an allowlist profile must be bound to its runtime's own version, or evidence gathered "
+                        + "behind one boundary would satisfy an execution behind the other")
+                .isNotEqualTo(baseline.version());
+        // And it is still a networked profile rather than the deny-all one.
+        assertThat(mediated.networkMode()).isEqualTo(EXECUTION_NETWORK);
     }
 
 }

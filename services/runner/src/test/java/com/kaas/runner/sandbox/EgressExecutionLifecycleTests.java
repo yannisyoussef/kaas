@@ -294,7 +294,8 @@ class EgressExecutionLifecycleTests {
                 deployment.dnsTimeout(),
                 deployment.authorizationTimeout(),
                 deployment.revalidationInterval(),
-                deployment.connectTimeout());
+                deployment.connectTimeout(),
+                ExecutionRuntimeType.DOCKER);
     }
 
     /** Stops the proxy without removing it. Reaches through the execution because nothing else may. */

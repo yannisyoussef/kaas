@@ -44,7 +44,20 @@ public record EgressDeployment(
         Duration dnsTimeout,
         Duration authorizationTimeout,
         Duration revalidationInterval,
-        Duration connectTimeout) {
+        Duration connectTimeout,
+        /**
+         * The sandbox runtime an allowlist execution runs behind on this deployment.
+         *
+         * <p>Carried here because the allowlist path builds its <em>own</em> sandbox profile — it has to, the
+         * sandbox joins a per-execution network the deny-all profile knows nothing about — and a profile built
+         * without this defaulted to the baseline runtime. A deployment configured for the mediating runtime
+         * would then have run every allowlist execution behind the weaker boundary.
+         *
+         * <p>The command-versus-profile check would have refused it rather than running it, so this was a
+         * fail-closed gap rather than a downgrade: allowlist execution under the mediating runtime was
+         * impossible instead of silently weaker. Both are worth fixing, and only one of them is dangerous.
+         */
+        ExecutionRuntimeType sandboxRuntime) {
 
     public EgressDeployment {
         Objects.requireNonNull(proxyImageReference, "The egress proxy image is resolved before it is run.");
@@ -52,6 +65,7 @@ public record EgressDeployment(
         Objects.requireNonNull(controlPlaneBaseUri, "The proxy must know where to ask.");
         Objects.requireNonNull(serviceAuthorization, "The proxy authenticates when it asks.");
         Objects.requireNonNull(dnsServer, "The proxy resolves target names against a named resolver.");
+        Objects.requireNonNull(sandboxRuntime, "An allowlist sandbox runs behind a named runtime.");
         egressNetworkIds = List.copyOf(egressNetworkIds);
         hostAliases = List.copyOf(hostAliases);
         for (Duration bound : List.of(dnsTimeout, authorizationTimeout, revalidationInterval, connectTimeout)) {

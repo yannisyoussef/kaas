@@ -274,7 +274,8 @@ final class EgressTestTopology implements AutoCloseable {
                 java.time.Duration.ofMillis(5000),
                 java.time.Duration.ofMillis(AUTHORIZATION_TIMEOUT_MS),
                 java.time.Duration.ofMillis(REVALIDATION_INTERVAL_MS),
-                java.time.Duration.ofMillis(3000));
+                java.time.Duration.ofMillis(3000),
+                ExecutionRuntimeType.DOCKER);
     }
 
     @Override

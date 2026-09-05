@@ -86,10 +86,13 @@ public final class DockerEgressExecutions implements EgressExecutions {
                     deployment.egressNetworkIds(),
                     deployment.hostAliases());
 
+            // The deployment's runtime, not the default. An allowlist sandbox is still a sandbox, and it
+            // runs behind the same boundary every other execution on this host does.
             SandboxSecurityProfile profile = SandboxSecurityProfile.version1OnNetwork(
                     deployment.probeImageReference(),
                     network.name(),
-                    sandboxEnvironment(proxy, network, plan));
+                    sandboxEnvironment(proxy, network, plan),
+                    deployment.sandboxRuntime());
             metrics.proxyLaunched();
             return new EgressExecution(
                     network, proxy, profile, new DockerSandboxLauncher(docker, profile, generation));

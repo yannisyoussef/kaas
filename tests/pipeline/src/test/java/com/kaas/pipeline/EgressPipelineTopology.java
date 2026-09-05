@@ -8,6 +8,7 @@ import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Network;
 import com.kaas.egress.TestDnsServer;
 import com.kaas.runner.sandbox.EgressDeployment;
+import com.kaas.runner.sandbox.ExecutionRuntimeType;
 import com.kaas.runner.sandbox.EgressProxyImage;
 import com.kaas.runner.sandbox.ProbeImage;
 import java.io.IOException;
@@ -165,7 +166,8 @@ final class EgressPipelineTopology implements AutoCloseable {
                 Duration.ofSeconds(5),
                 Duration.ofMillis(AUTHORIZATION_TIMEOUT_MS),
                 Duration.ofMillis(REVALIDATION_INTERVAL_MS),
-                Duration.ofSeconds(3));
+                Duration.ofSeconds(3),
+                ExecutionRuntimeType.DOCKER);
     }
 
     private String addressOn(String containerId, String networkId) {

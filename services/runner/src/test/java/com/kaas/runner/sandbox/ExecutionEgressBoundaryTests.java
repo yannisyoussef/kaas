@@ -161,7 +161,8 @@ class ExecutionEgressBoundaryTests {
         EgressDeployment deployment = new EgressDeployment(
                 DIGEST, DIGEST, "http://control-plane", serviceCredential, "10.0.0.1:53",
                 List.of(), List.of(), Duration.ofSeconds(5), Duration.ofSeconds(2),
-                Duration.ofSeconds(2), Duration.ofSeconds(3));
+                Duration.ofSeconds(2), Duration.ofSeconds(3),
+                ExecutionRuntimeType.DOCKER);
 
         // A record's generated toString prints every component, and these are exactly the objects that reach
         // a log by being interpolated into a message about something else entirely.
@@ -233,7 +234,8 @@ class ExecutionEgressBoundaryTests {
         EgressDeployment deployment = new EgressDeployment(
                 DIGEST, DIGEST, "http://control-plane", "Bearer x", "10.0.0.1:53",
                 List.of(), List.of(), Duration.ofSeconds(5), Duration.ofSeconds(2),
-                Duration.ofSeconds(30), Duration.ofSeconds(3));
+                Duration.ofSeconds(30), Duration.ofSeconds(3),
+                ExecutionRuntimeType.DOCKER);
 
         // Derived rather than written down separately, so the number in the documentation cannot drift away
         // from the number the proxy is actually configured with. It is a POLLING bound and is named as one.
