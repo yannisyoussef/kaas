@@ -3,6 +3,7 @@ package com.kaas.runner.sandbox;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.kaas.runner.authority.ExecutionAuthority;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
@@ -328,4 +329,84 @@ class EgressExecutionLifecycleTests {
         }
         throw new AssertionError("The proxy never stopped.");
     }
+    @Test
+    @org.junit.jupiter.api.Timeout(300)
+    @DisplayName("revoking authority terminates an egress sandbox, its proxy and its network together")
+    void revocationStopsAnEgressExecutionEntirely() throws Exception {
+        // CASE F, at the layer where a long-running egress workload can actually be produced.
+        //
+        // The allowlist path already revalidates an established tunnel and closes it once the assignment is
+        // fenced. That is useful and it is NOT workload termination: a sandbox whose egress was cut is still a
+        // sandbox running code, and for hostile content the compute is the problem rather than the
+        // connectivity. So this asserts the three layers converge -- the workload stops, the proxy stops, and
+        // the per-execution network disappears.
+        var authority = new java.util.concurrent.atomic.AtomicReference<
+                com.kaas.runner.authority.AuthorityDecision>();
+        ExecutionAuthority revocable = new ExecutionAuthority() {
+            @Override
+            public com.kaas.runner.authority.AuthorityDecision lostReason() {
+                return authority.get();
+            }
+
+            @Override
+            public java.time.Duration remainingBudget() {
+                return authority.get() == null ? java.time.Duration.ofMinutes(5) : java.time.Duration.ZERO;
+            }
+        };
+
+        String networkName;
+        var outcome = new java.util.concurrent.atomic.AtomicReference<SandboxOutcome>();
+        try (EgressExecution execution = executions().start(UUID.randomUUID(), plan())) {
+            networkName = execution.profileVersion();
+            assertThat(execution.proxyIsRunning()).as("the proxy must be up before it is taken away").isTrue();
+
+            // An hour-long workload ON the egress network, so it is genuinely a live egress execution rather
+            // than one that finished before anything was revoked.
+            Thread workload = new Thread(() -> outcome.set(execution.launcher().run(
+                    new SandboxLaunchRequest(
+                            SyntheticProbe.SLEEP, execution.profileVersion(), UUID.randomUUID()),
+                    revocable)));
+            workload.start();
+            waitForSandbox();
+
+            authority.set(com.kaas.runner.authority.AuthorityDecision.RUN_NOT_OWNED);
+            workload.join(java.time.Duration.ofSeconds(120).toMillis());
+
+            assertThat(workload.isAlive()).as("the workload must stop, not merely lose its network").isFalse();
+            assertThat(outcome.get().failure()).contains(SandboxFailure.SANDBOX_AUTHORITY_LOST);
+        }
+
+        // AND THE REST OF THE EXECUTION WENT WITH IT. Asserted after the close, because the proxy and the
+        // network belong to the execution rather than to the sandbox -- and a test that only checked the
+        // sandbox would pass while an orphaned egress gateway kept running with a service credential.
+        assertThat(SandboxTestSupport.docker()
+                        .listContainersCmd()
+                        .withShowAll(true)
+                        .withLabelFilter(java.util.Map.of(SandboxLabels.GENERATION, generation))
+                        .exec())
+                .as("no sandbox and no proxy survive")
+                .isEmpty();
+        assertThat(SandboxTestSupport.docker()
+                        .listNetworksCmd()
+                        .withNameFilter(networkName)
+                        .exec())
+                .as("no execution network survives")
+                .isEmpty();
+    }
+
+    private void waitForSandbox() throws InterruptedException {
+        long deadline = System.nanoTime() + java.time.Duration.ofSeconds(60).toNanos();
+        while (SandboxTestSupport.docker()
+                .listContainersCmd()
+                .withLabelFilter(java.util.Map.of(SandboxLabels.GENERATION, generation))
+                .exec()
+                .size()
+                < 2) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("the sandbox never joined the proxy on the execution network");
+            }
+            Thread.sleep(100);
+        }
+    }
+
 }

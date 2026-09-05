@@ -134,7 +134,13 @@ val strongRuntimeTest = tasks.register<Test>("strongRuntimeTest") {
     description = "Runs the hostile-execution probe under the mediating runtime. Requires runsc on the daemon."
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath
-    filter { includeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeBoundaryTests") }
+    filter {
+        includeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeBoundaryTests")
+        // Revocation under the real mediating runtime. Named explicitly rather than by a package glob: the
+        // gate's evidence step asserts which suites ran, and a glob would let a renamed class silently drop
+        // out of a mandatory gate while the task still reported success.
+        includeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeAuthorityRevocationTests")
+    }
 }
 
 tasks.named<Test>("test") {
@@ -146,6 +152,7 @@ tasks.named<Test>("test") {
         // Needs a runtime this host may not have. Excluded here rather than made to skip: a suite that skips
         // itself when its subject is absent reports the same green as one that proved something.
         excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeBoundaryTests")
+        excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeAuthorityRevocationTests")
     }
 }
 

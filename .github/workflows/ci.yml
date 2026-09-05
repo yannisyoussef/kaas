@@ -516,14 +516,16 @@ jobs:
           echo "executed=$executed skipped=$skipped"
           # Zero skips is the load-bearing half. A suite that skipped itself because the runtime was absent is
           # exactly the outcome this job exists to make impossible.
-          if [ "$executed" -lt 5 ] || [ "$skipped" -ne 0 ]; then
-            echo "Expected at least 5 executed tests and no skips." >&2
+          if [ "$executed" -lt 7 ] || [ "$skipped" -ne 0 ]; then
+            echo "Expected at least 7 executed tests and no skips." >&2
             exit 1
           fi
-          if ! ls "$results" | grep -q StrongRuntimeBoundaryTests; then
-            echo "StrongRuntimeBoundaryTests did not run." >&2
-            exit 1
-          fi
+          for suite in StrongRuntimeBoundaryTests StrongRuntimeAuthorityRevocationTests; do
+            if ! ls "$results" | grep -q "$suite"; then
+              echo "$suite did not run." >&2
+              exit 1
+            fi
+          done
 
       - name: Confirm nothing outlived the run
         run: |
