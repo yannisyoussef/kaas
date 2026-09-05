@@ -22,6 +22,7 @@ import com.kaas.runner.execution.ExecutionLoop;
 import com.github.dockerjava.api.DockerClient;
 import com.kaas.runner.sandbox.DockerSandboxLauncher;
 import com.kaas.runner.sandbox.ProbeImage;
+import com.kaas.runner.sandbox.ExecutionRuntimeType;
 import com.kaas.runner.sandbox.SandboxSecurityProfile;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
@@ -751,6 +752,69 @@ class SyntheticExecutionPipelineTests {
     // ---------------------------------------------------------------------------------------------------
 
     /** The runner, pointed at the control plane over real HTTP with a real service token. */
+    @Test
+    @DisplayName("a worker that instantiates a different runtime than the command authorizes refuses to run")
+    void aWorkerConfiguredForAnotherRuntimeRefusesTheCommand() throws Exception {
+        // THE THIRD LINK. The signed attestation names a boundary, the command copies it out of that signed
+        // payload, and this is the only place the runtime a worker will ACTUALLY instantiate can be compared
+        // against either -- no other component knows what this process is configured to launch.
+        //
+        // The run is authorized normally, under the baseline runtime, and handed to a worker configured for
+        // the mediating one. That is the dangerous direction inverted for testability: the check is symmetric,
+        // and this side needs no gVisor on the host because the refusal happens before any container exists.
+        UUID runId = claimedRun(List.of("@smoke"));
+        UUID attemptId = attemptId(runId);
+
+        ExecutionLoop.ExecutionReport report = loopUnderRuntime(ExecutionRuntimeType.GVISOR)
+                .execute(runId, attemptId, 1);
+
+        // Reported to the control plane, not merely returned. By this point the run is RUNNING with a phase
+        // deadline against it, and a worker that noticed the mismatch and went quiet would leave the run to
+        // be reclaimed later as a timeout -- a failure observed in milliseconds and then discarded.
+        assertThat(report.status())
+                .as("report was %s at %s: %s", report.status(), report.phase(), report.detail())
+                .isEqualTo("INFRASTRUCTURE_FAILED");
+        assertThat(report.detail())
+                .as("the refusal must name the runtime mismatch rather than an unrecognised profile string")
+                .contains("different sandbox runtime");
+
+        // The DETAIL as well as the status: the status alone is set whether or not the control plane
+        // accepted the report, so asserting it by itself would let a refused report pass as success.
+        assertThat(report.detail())
+                .as("the control plane must have accepted the failure report")
+                .doesNotContain("report refused");
+
+        Map<String, Object> run = jdbc.queryForMap(
+                "select lifecycle_state, stop_reason, test_outcome from test_runs where run_id = ?", runId);
+        assertThat(run.get("lifecycle_state")).isEqualTo("STOPPING");
+        assertThat(run.get("stop_reason")).isEqualTo("INFRASTRUCTURE_FAILURE");
+        // NO test outcome was invented. The tenant's work never started, and recording a verdict for it here
+        // would be the platform blaming a tenant for its own misconfiguration.
+        assertThat(run.get("test_outcome")).isNull();
+
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from execution_results where run_id = ?", Integer.class, runId))
+                .as("nothing ran, so there is nothing to have produced a result")
+                .isZero();
+    }
+
+    private ExecutionLoop loopUnderRuntime(ExecutionRuntimeType runtime) throws Exception {
+        ControlPlaneClient client = new ControlPlaneClient(
+                HttpClient.newHttpClient(),
+                URI.create("http://localhost:" + port),
+                "Bearer " + token(WORKER, null),
+                java.time.Duration.ofSeconds(30),
+                duration -> Thread.sleep(duration.toMillis()));
+        SandboxSecurityProfile profile = SandboxSecurityProfile.version1(probeImage(), runtime);
+        return new ExecutionLoop(
+                client,
+                new CommandValidator(mapper),
+                new DockerSandboxLauncher(docker(), profile, "pipeline"),
+                mapper,
+                Clock.systemUTC(),
+                com.kaas.runner.sandbox.SyntheticProbe.WORKLOAD_PASS);
+    }
+
     private ExecutionLoop loop() throws Exception {
         return loop(com.kaas.runner.sandbox.SyntheticProbe.WORKLOAD_PASS);
     }

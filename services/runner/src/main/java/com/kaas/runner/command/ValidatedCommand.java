@@ -29,4 +29,12 @@ public record ValidatedCommand(
         String networkPolicyType,
         /** The sandbox profile the command was authorized under, which the launcher must run. */
         String sandboxProfileVersion,
+        /**
+         * The runtime the platform authorized this execution to run under.
+         *
+         * <p>Compared by name against the runtime this worker is configured to instantiate, and never turned
+         * into one. A command that could select the runtime would be a command that selects which program the
+         * daemon executes, which is a larger privilege than anything else a command carries.
+         */
+        String sandboxRuntime,
         List<String> tags) {}

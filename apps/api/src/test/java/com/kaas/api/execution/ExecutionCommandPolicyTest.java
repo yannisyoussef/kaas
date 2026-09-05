@@ -141,7 +141,8 @@ class ExecutionCommandPolicyTest {
                         NetworkPolicyType.DENY_ALL,
                         1,
                         "sha256:" + "5".repeat(64)),
-                new ExecutionCommand.SandboxSecurityProfileReference("kaas.sandbox.v1", "sha256:" + "6".repeat(64)),
+                new ExecutionCommand.SandboxSecurityProfileReference(
+                        "kaas.sandbox.v1", "DOCKER", "sha256:" + "6".repeat(64)),
                 List.of(new ConfigurationVariable("BASE_URL", ConfigurationValueType.STRING, "https://example.test")),
                 new RunSelection(List.of("@smoke")),
                 4,

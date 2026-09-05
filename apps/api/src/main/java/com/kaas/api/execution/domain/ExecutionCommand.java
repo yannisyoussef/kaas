@@ -92,5 +92,17 @@ public record ExecutionCommand(
      * controls a particular deployment cannot enforce, what its kernel reported — are exactly what an attacker
      * would want and are deliberately absent from an artifact that travels.
      */
-    public record SandboxSecurityProfileReference(String profileVersion, String assessmentDigest) {}
+    /**
+     * The sandbox boundary this execution was authorized for.
+     *
+     * <p>{@code sandboxRuntime} is implied by {@code profileVersion} and carried anyway. The runner compares
+     * it by name against the runtime it is about to instantiate, so a command authorized for one boundary and
+     * dispatched to a worker configured for the other is refused as a runtime mismatch — rather than as an
+     * unrecognised profile string, which is the same refusal wearing a misleading name.
+     *
+     * <p>It is compared, never resolved: nothing turns this string into a runtime. A command that could name
+     * the runtime a worker instantiates would be a command that chooses which program a daemon executes.
+     */
+    public record SandboxSecurityProfileReference(
+            String profileVersion, String sandboxRuntime, String assessmentDigest) {}
 }

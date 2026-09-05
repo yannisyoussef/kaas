@@ -224,6 +224,29 @@ public final class ExecutionLoop {
         // The SANDBOX profile version, not the engine version. They are different things that happen to be
         // strings, and passing the engine version made the launcher refuse with "Unknown security profile
         // version" — which was the launcher correctly refusing to run under a profile it does not recognise.
+        // THE RUNTIME THIS COMMAND WAS AUTHORIZED FOR MUST BE THE ONE THIS WORKER WILL INSTANTIATE.
+        //
+        // Three things have to name the same boundary: the signed attestation, the command the control plane
+        // issued from it, and the runtime this worker actually runs. The first two are tied together at
+        // authorization, where the command's runtime is copied out of the signed payload. This is the third
+        // link, and it is the one that cannot be checked anywhere else -- only this process knows what it is
+        // configured to launch.
+        //
+        // Compared by NAME. Nothing here resolves the string to a runtime: a command that could select the
+        // runtime would be a command that selects which program the daemon executes.
+        //
+        // The launcher already refuses a profile version it does not hold, and because the profile version is
+        // derived from the runtime that check would catch this case too -- as "Unknown security profile
+        // version", which sends an operator looking for a profile problem. A worker configured for the
+        // baseline runtime receiving work authorized for the mediating one is not a profile problem; it is a
+        // deployment that would have run hostile-code work behind a boundary nobody authorized.
+        String instantiatedRuntime = launcher.profile().runtime().name();
+        if (!instantiatedRuntime.equals(command.sandboxRuntime())) {
+            return infrastructureFailure(
+                    runId, attemptId, assignmentEpoch,
+                    "This worker instantiates a different sandbox runtime than the command authorizes.");
+        }
+
         SandboxOutcome outcome;
         String egressDetail = null;
         if (ALLOWLIST.equals(command.networkPolicyType())) {

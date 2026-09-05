@@ -55,7 +55,8 @@ public final class CommandValidator {
             Set.of("capabilityId", "provider", "referenceId", "bindingKey", "expiresAt");
     private static final Set<String> KNOWN_NETWORK_FIELDS =
             Set.of("policyRevisionId", "type", "version", "digest");
-    private static final Set<String> KNOWN_SANDBOX_FIELDS = Set.of("profileVersion", "assessmentDigest");
+    private static final Set<String> KNOWN_SANDBOX_FIELDS =
+            Set.of("profileVersion", "sandboxRuntime", "assessmentDigest");
     private static final Set<String> KNOWN_SELECTION_FIELDS = Set.of("tags");
     private static final Set<String> KNOWN_RETRY_FIELDS = Set.of("maxAttempts", "delayMilliseconds");
     private static final Set<String> KNOWN_ARTIFACT_FIELDS =
@@ -276,6 +277,7 @@ public final class CommandValidator {
                 text(engine, "version"),
                 networkType,
                 text(sandbox, "profileVersion"),
+                text(sandbox, "sandboxRuntime"),
                 Collections.unmodifiableList(tags));
     }
 
@@ -375,6 +377,7 @@ public final class CommandValidator {
             JsonNode sandbox = root.get("sandboxSecurityProfile");
             update(sha, "SANDBOX_PROFILE");
             update(sha, text(sandbox, "profileVersion"));
+            update(sha, text(sandbox, "sandboxRuntime"));
             update(sha, text(sandbox, "assessmentDigest"));
 
             JsonNode configuration = object(root, "configurationSnapshot");

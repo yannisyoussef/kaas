@@ -553,7 +553,13 @@ public class ExecutionAuthorizationService {
                         // The profile the SIGNED payload names, and the digest of that payload. The command's
                         // shape is unchanged; the digest it binds is now an authenticated evidence identity
                         // rather than a self-consistency check over hand-written text.
-                        attestation.payload().securityProfileVersion(), attestation.payloadDigest()),
+                        // The runtime comes from the SIGNED payload too, not from this deployment's
+                        // configuration: the command must name the boundary the evidence was taken behind,
+                        // and by this point the verifier has already refused any document whose two answers
+                        // about that boundary disagreed.
+                        attestation.payload().securityProfileVersion(),
+                        attestation.payload().sandboxRuntime(),
+                        attestation.payloadDigest()),
                 context.configuration(),
                 context.selection(),
                 context.parallelism(),

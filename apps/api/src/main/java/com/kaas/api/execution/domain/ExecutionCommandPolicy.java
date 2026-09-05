@@ -121,6 +121,7 @@ public final class ExecutionCommandPolicy {
             update(sha, command.networkPolicy().digest());
             update(sha, "SANDBOX_PROFILE");
             update(sha, command.sandboxSecurityProfile().profileVersion());
+            update(sha, command.sandboxSecurityProfile().sandboxRuntime());
             update(sha, command.sandboxSecurityProfile().assessmentDigest());
 
             update(sha, "CONFIGURATION_COUNT");
@@ -226,6 +227,7 @@ public final class ExecutionCommandPolicy {
 
         ObjectNode sandbox = root.putObject("sandboxSecurityProfile");
         sandbox.put("profileVersion", command.sandboxSecurityProfile().profileVersion());
+        sandbox.put("sandboxRuntime", command.sandboxSecurityProfile().sandboxRuntime());
         sandbox.put("assessmentDigest", command.sandboxSecurityProfile().assessmentDigest());
 
         ObjectNode configuration = root.putObject("configurationSnapshot");

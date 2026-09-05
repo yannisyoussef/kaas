@@ -217,6 +217,7 @@ class UnenforceableCommandTests {
 
         ObjectNode sandbox = root.putObject("sandboxSecurityProfile");
         sandbox.put("profileVersion", "kaas.sandbox.v1");
+        sandbox.put("sandboxRuntime", "DOCKER");
         sandbox.put("assessmentDigest", "sha256:" + "e".repeat(64));
 
         root.putObject("configurationSnapshot").put("baseUrl", "https://environment.example");

@@ -362,6 +362,7 @@
       "type": "object",
       "required": [
         "profileVersion",
+        "sandboxRuntime",
         "assessmentDigest"
       ],
       "properties": {
@@ -370,12 +371,20 @@
           "minLength": 1,
           "maxLength": 64
         },
+        "sandboxRuntime": {
+          "type": "string",
+          "enum": [
+            "DOCKER",
+            "GVISOR"
+          ],
+          "description": "Which sandbox runtime the platform authorized this execution to run under, as the platform's own runtime constant rather than a daemon name. Implied by profileVersion and stated anyway: the runner compares it by NAME against the runtime it is about to instantiate, so a mismatch is refused as what it is rather than surfacing as an unrecognised profile string. A closed enum because a runtime name is the name of a program a daemon will execute, and no field carried in a command may widen that set."
+        },
         "assessmentDigest": {
           "$ref": "#/$defs/digest"
         }
       },
       "additionalProperties": false,
-      "description": "Which sandbox boundary the platform expected when it authorized this, and the digest of the assessment presented for it. Host-sensitive diagnostics are deliberately absent: which controls a deployment cannot enforce is exactly what an attacker would want from an artifact that travels."
+      "description": "Which sandbox boundary the platform expected when it authorized this, the runtime that boundary is served by, and the digest of the assessment presented for it. Host-sensitive diagnostics are deliberately absent: which controls a deployment cannot enforce is exactly what an attacker would want from an artifact that travels."
     }
   }
 }
