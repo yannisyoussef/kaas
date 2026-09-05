@@ -148,6 +148,8 @@ The checked-in values are local-development defaults, not production secret mana
 - [Execution egress policy](docs/security/execution-egress-policy.md)
 - [Implemented signed sandbox security attestation](docs/architecture/signed-sandbox-security-attestation.md)
 - [Signed runtime attestation](docs/security/signed-runtime-attestation.md)
+- [Running the sandbox under a mediating runtime](docs/security/mediated-sandbox-runtime.md)
+- [Hostile runtime candidate evaluation](docs/architecture/hostile-runtime-evaluation.md)
 - [Signed security attestation slice report](SIGNED_SECURITY_ATTESTATION_SLICE_REPORT.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Security release requirements](docs/security/threat-model.md)

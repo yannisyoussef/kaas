@@ -54,6 +54,9 @@ class SecurityGateRedPathTests {
         observations.put("cap_inh", "0000000000000000");
         observations.put("cap_amb", "0000000000000000");
         observations.put("no_new_privs", "1");
+        // A host kernel. Under the baseline runtime nothing asserts anything about it -- that is the point of
+        // the baseline claiming no marker -- and the mediating runtime's tests override it deliberately.
+        observations.put("runtime_kernel_release", "6.8.0-77-generic");
         // Nothing in the sandbox for a privilege transition to act on.
         observations.put("setuid_binaries", "");
         // Every required kernel path examined, and every one of them present -- the runc shape, where they
@@ -334,6 +337,48 @@ class SecurityGateRedPathTests {
         };
 
         assertThat(blockers(assess(instant))).contains("WALL_CLOCK_TIMEOUT");
+    }
+
+    @Test
+    void theMediatingRuntimeBlocksWhenTheSandboxReportsAKernelItDoesNotServe() {
+        // THE ANTI-MASQUERADE PROPERTY, as a red path. The daemon reporting `runsc` says what was requested;
+        // this control is the workload reporting what is actually underneath it, and a sandbox served by the
+        // host kernel must fail it however the launch was labelled.
+        assertThat(blockers(assess(new FakeLauncher(ExecutionRuntimeType.GVISOR))))
+                .contains(HostileExecutionSecurityGate.RUNTIME_MEDIATION_CONTROL);
+    }
+
+    @Test
+    void theMediatingRuntimePassesOnlyOnItsOwnKernel() {
+        // And the other direction, so the control is not simply always red under this runtime -- which would
+        // make the test above pass for a reason that has nothing to do with the marker.
+        assertThat(blockers(assess(new FakeLauncher(ExecutionRuntimeType.GVISOR)
+                        .reporting(SyntheticProbe.INSPECT, "runtime_kernel_release", "4.19.0-gvisor"))))
+                .doesNotContain(HostileExecutionSecurityGate.RUNTIME_MEDIATION_CONTROL);
+    }
+
+    @Test
+    void aSandboxThatDidNotReportItsKernelIsNotGivenTheBenefitOfTheDoubt() {
+        // Absent evidence is not a pass. A probe that could not say which kernel served it tells us nothing
+        // about which kernel served it.
+        assertThat(blockers(assess(new FakeLauncher(ExecutionRuntimeType.GVISOR)
+                        .withholding(SyntheticProbe.INSPECT, "runtime_kernel_release"))))
+                .contains(HostileExecutionSecurityGate.RUNTIME_MEDIATION_CONTROL);
+    }
+
+    @Test
+    void theBaselineRuntimeAssertsNothingAboutTheKernelItRanOn() {
+        // Under the baseline this is reported UNSUPPORTED rather than passed: whatever kernel the host runs
+        // is not a property this platform gets to assert, and inventing one would be a control that passes
+        // for reasons nobody chose.
+        assertThat(assess(new FakeLauncher()).checks())
+                .filteredOn(check ->
+                        HostileExecutionSecurityGate.RUNTIME_MEDIATION_CONTROL.equals(check.control()))
+                .singleElement()
+                .satisfies(check -> {
+                    assertThat(check.verdict()).isEqualTo(SecurityCheck.Verdict.UNSUPPORTED);
+                    assertThat(check.enforcement()).isEqualTo(SecurityCheck.Enforcement.DEPLOYMENT_SPECIFIC);
+                });
     }
 
     @Test

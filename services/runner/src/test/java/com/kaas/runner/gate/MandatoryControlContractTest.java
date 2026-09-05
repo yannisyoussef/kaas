@@ -75,6 +75,43 @@ class MandatoryControlContractTest {
     }
 
     @Test
+    void everyRuntimeProducesTheProfileVersionTheContractBindsItTo() throws IOException {
+        // The runner's half of the runtime binding. The control plane asserts the same map from its side; this
+        // asserts that the runtime constants here actually produce those profile versions, so a rename on
+        // either side fails the build instead of producing evidence nobody can judge.
+        java.util.Map<String, String> declared = sharedRuntimeBinding();
+        assertThat(declared).as("the contract must bind a runtime to every profile version").isNotEmpty();
+        for (var binding : declared.entrySet()) {
+            ExecutionRuntimeType runtime = ExecutionRuntimeType.valueOf(binding.getValue());
+            assertThat(runtime.profileVersion())
+                    .as("%s must produce profile version %s", binding.getValue(), binding.getKey())
+                    .isEqualTo(binding.getKey());
+        }
+        // Every runtime this build has, not merely every one the contract happens to mention: a runtime with
+        // no entry could produce evidence the control plane has no rules for.
+        assertThat(declared.values())
+                .containsExactlyInAnyOrderElementsOf(
+                        java.util.Arrays.stream(ExecutionRuntimeType.values())
+                                .map(Enum::name)
+                                .toList());
+    }
+
+    private static java.util.Map<String, String> sharedRuntimeBinding() throws IOException {
+        String json = Files.readString(locate(CONTRACT));
+        int start = json.indexOf("\"runtimeByProfileVersion\"");
+        assertThat(start).as("the contract must declare runtimeByProfileVersion").isNotNegative();
+        int open = json.indexOf('{', start);
+        int close = json.indexOf("\n  }", open);
+        java.util.Map<String, String> binding = new java.util.LinkedHashMap<>();
+        Matcher entries = Pattern.compile("\"(kaas\\.[A-Za-z0-9.\\-]+)\"\\s*:\\s*\"([A-Z_]+)\"")
+                .matcher(json.substring(open, close));
+        while (entries.find()) {
+            binding.put(entries.group(1), entries.group(2));
+        }
+        return binding;
+    }
+
+    @Test
     void theTwoRuntimesDoNotEmitTheSameMandatorySet() throws IOException {
         // Anti-vacuity. Every assertion above holds just as well if the scoping is decorative.
         assertThat(sharedControlsFor("kaas.sandbox.v1"))

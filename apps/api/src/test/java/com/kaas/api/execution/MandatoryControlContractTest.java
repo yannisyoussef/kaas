@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.kaas.api.execution.domain.AttestationPayloadFields;
 import com.kaas.api.execution.domain.RequiredSecurityControls;
+import com.kaas.api.execution.domain.SandboxRuntimeBinding;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Set;
@@ -43,6 +44,39 @@ class MandatoryControlContractTest {
                     .as("required controls for %s must equal the shared contract at %s", version, locate())
                     .isEqualTo(sharedControlsFor(version));
         }
+    }
+
+    @Test
+    void everyProfileVersionsRuntimeMatchesTheSharedContract() throws Exception {
+        // The runtime binding is a second duplicated fact, and duplication that nothing checks is duplication
+        // that drifts. It was added to the contract file without this assertion; the sets agreed by accident
+        // rather than by construction, which is the same as not agreeing.
+        var mapper = JsonMapper.builder().build();
+        var declared = mapper.readTree(Files.readString(locate())).get("runtimeByProfileVersion");
+        Set<String> declaredVersions = StreamSupport.stream(
+                        java.util.Spliterators.spliteratorUnknownSize(declared.propertyNames().iterator(), 0),
+                        false)
+                .collect(Collectors.toUnmodifiableSet());
+
+        assertThat(SandboxRuntimeBinding.knownProfileVersions())
+                .as("the profile versions this build can bind to a runtime must be exactly those in %s",
+                        locate())
+                .isEqualTo(declaredVersions);
+        for (String version : declaredVersions) {
+            assertThat(SandboxRuntimeBinding.runtimeFor(version))
+                    .as("runtime for %s", version)
+                    .isEqualTo(declared.get(version).stringValue());
+        }
+        // And the two contract-backed maps describe the same set of boundaries. A profile version with a
+        // required control set but no runtime -- or the reverse -- is a boundary this build can half judge.
+        assertThat(SandboxRuntimeBinding.knownProfileVersions())
+                .isEqualTo(RequiredSecurityControls.knownProfileVersions());
+    }
+
+    @Test
+    void anUnknownProfileVersionHasNoRuntimeRatherThanADefaultOne() {
+        assertThatThrownBy(() -> SandboxRuntimeBinding.runtimeFor("kaas.sandbox.unheard-of.v1"))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
