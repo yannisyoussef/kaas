@@ -2,7 +2,8 @@ package com.kaas.api.execution;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.kaas.api.execution.domain.SandboxSecurityAttestation;
+import com.kaas.api.execution.domain.AttestationPayloadFields;
+import com.kaas.api.execution.domain.RequiredSecurityControls;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Set;
@@ -28,7 +29,7 @@ class MandatoryControlContractTest {
 
     @Test
     void theRequiredControlSetMatchesTheSharedContract() throws Exception {
-        assertThat(SandboxSecurityAttestation.REQUIRED_MANDATORY_CONTROLS)
+        assertThat(RequiredSecurityControls.MANDATORY)
                 .as("the control plane's required set must equal the shared contract at %s", locate())
                 .isEqualTo(sharedList("controls"));
     }
@@ -39,7 +40,7 @@ class MandatoryControlContractTest {
         // every execution needs the mandatory controls, only an ALLOWLIST execution needs these. A single
         // assertion over the union would stay green if a control moved between the sets, which would silently
         // change whether a DENY_ALL run depends on the egress subsystem being healthy.
-        assertThat(SandboxSecurityAttestation.REQUIRED_EGRESS_CONTROLS)
+        assertThat(RequiredSecurityControls.EGRESS)
                 .as("the control plane's required egress set must equal the shared contract at %s", locate())
                 .isEqualTo(sharedList("egressControls"));
     }
@@ -48,8 +49,8 @@ class MandatoryControlContractTest {
     void theTwoSetsShareNoControl() throws Exception {
         // A control in both sets would be required unconditionally through one door and conditionally through
         // the other, and which rule applied would depend on which check ran first.
-        assertThat(SandboxSecurityAttestation.REQUIRED_MANDATORY_CONTROLS)
-                .doesNotContainAnyElementsOf(SandboxSecurityAttestation.REQUIRED_EGRESS_CONTROLS);
+        assertThat(RequiredSecurityControls.MANDATORY)
+                .doesNotContainAnyElementsOf(RequiredSecurityControls.EGRESS);
     }
 
     @Test
@@ -62,7 +63,7 @@ class MandatoryControlContractTest {
                 .readTree(Files.readString(locate()))
                 .get("schemaVersion")
                 .stringValue();
-        assertThat(declared).isEqualTo(SandboxSecurityAttestation.SCHEMA_VERSION);
+        assertThat(declared).isEqualTo(AttestationPayloadFields.SCHEMA_VERSION);
     }
 
     private static Set<String> sharedList(String field) throws Exception {

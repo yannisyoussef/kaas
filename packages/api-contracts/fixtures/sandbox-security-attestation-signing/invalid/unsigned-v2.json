@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "kaas.sandbox-security-attestation.v2",
+  "securityProfileVersion": "kaas.sandbox.v1",
+  "runtime": "docker",
+  "probeImageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "assessedAt": "2026-09-05T09:12:33Z",
+  "mandatoryControls": {
+    "CAPABILITIES_DROPPED": "PASS",
+    "KERNEL_PATHS_MASKED": "PASS",
+    "MEMORY_LIMIT": "PASS",
+    "MINIMAL_ENVIRONMENT": "PASS",
+    "NETWORK_DENIED": "PASS",
+    "NON_ROOT_GID": "PASS",
+    "NON_ROOT_UID": "PASS",
+    "NO_DOCKER_SOCKET": "PASS",
+    "NO_HOST_DEVICES": "PASS",
+    "NO_HOST_MOUNTS": "PASS",
+    "NO_NEW_PRIVILEGES": "PASS",
+    "OUTPUT_BOUNDED": "PASS",
+    "PID_LIMIT": "PASS",
+    "READ_ONLY_ROOT": "PASS",
+    "WALL_CLOCK_TIMEOUT": "PASS",
+    "WRITABLE_TMPFS": "PASS"
+  },
+  "egressControls": {
+    "EGRESS_NETWORK_INTERNAL": "PASS",
+    "EGRESS_NO_DIRECT_ROUTE": "PASS",
+    "EGRESS_PROXY_FAILS_CLOSED": "PASS",
+    "EGRESS_PROXY_IMAGE_PINNED": "PASS",
+    "EGRESS_PROXY_READY": "PASS"
+  },
+  "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+}

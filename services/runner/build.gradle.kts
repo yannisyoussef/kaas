@@ -73,6 +73,16 @@ tasks.withType<Test>().configureEach {
         .withPropertyName("mandatorySandboxControls")
         .withPathSensitivity(PathSensitivity.RELATIVE)
 
+    // The signing contract and its vectors, for the same reason and with a sharper edge: these files ARE the
+    // agreement between the producer and the verifier, and a change to one of them changes what a signature
+    // means. A vector edited while this task reported UP-TO-DATE would be a contract nobody checked.
+    inputs.file(rootProject.file("packages/api-contracts/sandbox-security-attestation-signing.md"))
+        .withPropertyName("attestationSigningContract")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.dir(rootProject.file("packages/api-contracts/fixtures/sandbox-security-attestation-signing"))
+        .withPropertyName("attestationSigningVectors")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+
     // Everything the proxy image is built from — the Dockerfile, the proxy jar, and every jar on its runtime
     // classpath. Declared as an input so that a change to any of them invalidates the security tests that
     // make claims about how the proxy behaves.
@@ -114,6 +124,53 @@ tasks.named<Test>("test") {
     filter {
         excludeTestsMatching("com.kaas.runner.sandbox.Egress*")
         excludeTestsMatching("com.kaas.runner.gate.EgressEnforcementGateTests")
+    }
+}
+
+/**
+ * Produces a signed sandbox security attestation for the runtime this task runs on.
+ *
+ * <p>The gates run for real: a probe image is built, a sandbox is launched under the hardened profile, and its
+ * observations are signed. There is no input for a control verdict — the whole point of the slice is that an
+ * operator transports the artifact and no longer authors its security claims.
+ *
+ * <p>The signing key is named by a FILE PATH. A key passed as a Gradle property would appear in the daemon's
+ * command line and in build scans; a path does not.
+ *
+ * <p><strong>An attestation produced here describes THIS host.</strong> One produced on a CI runner describes
+ * the CI runner and nothing else, which is why its runtime subject is different and why a control plane must
+ * be configured to accept a subject before evidence for it means anything.
+ */
+val produceSandboxSecurityAttestation = tasks.register<JavaExec>("produceSandboxSecurityAttestation") {
+    group = "verification"
+    description = "Runs the security gates on this host and writes one signed attestation describing them."
+    mainClass.set("com.kaas.runner.attestation.SandboxSecurityAttestationCli")
+    classpath = sourceSets["main"].runtimeClasspath
+
+    // The proxy image context, resolved rather than guessed at, so egress evidence describes the image this
+    // build produced rather than whatever a previous build left in another module's directory. Declared as an
+    // input, which is also what makes Gradle build it before this task runs — without that the path is queried
+    // before the producing task has completed.
+    inputs.files(proxyImageContext)
+        .withPropertyName("egressProxyImageContext")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    val proxyContext = proxyImageContext.elements.map { it.single().asFile.absolutePath }
+    doFirst {
+        systemProperty("kaas.attestation.key-id", providers.gradleProperty("kaasAttestationKeyId").get())
+        systemProperty(
+            "kaas.attestation.private-key-file",
+            providers.gradleProperty("kaasAttestationPrivateKeyFile").get())
+        systemProperty(
+            "kaas.attestation.runtime-subject",
+            providers.gradleProperty("kaasAttestationRuntimeSubject").get())
+        systemProperty(
+            "kaas.attestation.output",
+            providers.gradleProperty("kaasAttestationOutput").getOrElse("build/sandbox-security-attestation.json"))
+        systemProperty(
+            "kaas.attestation.include-egress",
+            providers.gradleProperty("kaasAttestationIncludeEgress").getOrElse("false"))
+        systemProperty("kaas.attestation.probe-context", layout.projectDirectory.dir("src/main/docker/probe").asFile.absolutePath)
+        systemProperty("kaas.attestation.proxy-image-context", proxyContext.get())
     }
 }
 

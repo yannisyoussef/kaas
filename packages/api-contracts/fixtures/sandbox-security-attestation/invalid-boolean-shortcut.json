@@ -1,9 +1,1 @@
-{
-  "schemaVersion": "kaas.sandbox-security-attestation.v2",
-  "securityProfileVersion": "kaas.sandbox.v1",
-  "probeImageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "runtime": "docker",
-  "assessedAt": "2026-08-29T09:00:00Z",
-  "mandatoryControls": true,
-  "digest": "sha256:fd77c19a7e96493f4731c8cd5a563157b56434830fe9049713fbf27ec829731e"
-}
+true

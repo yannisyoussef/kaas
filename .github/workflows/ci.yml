@@ -101,6 +101,71 @@ jobs:
               exit 1
             fi
           done
+      # SIGNING THE ASSESSMENT IS PART OF WHAT THIS GATE MEANS.
+      #
+      # Extending this job rather than adding an eighth one, deliberately. The gate's claim is "this runtime
+      # enforces what the platform requires"; producing a signed statement of that claim is the same claim
+      # made transportable, not a separate concern. A new job would fragment one property across two required
+      # checks and double the container work to prove it.
+      #
+      # THIS ATTESTATION DESCRIBES THE GITHUB RUNNER AND NOTHING ELSE. It is release evidence — the mechanism
+      # works on a real host — and it is emphatically not deployment evidence. Its runtime subject says so,
+      # and a control plane accepts a subject only if an operator configured that subject, so this artifact
+      # cannot authorize anything anywhere.
+      - name: Produce a signed attestation from what the gate just observed
+        run: |
+          set -euo pipefail
+          # The repository's published test key. Its private half is in the tree deliberately: a key anyone
+          # can read can never be mistaken for a production signer, and production has no default trust root
+          # that would admit it. No production key is committed to make CI convenient.
+          python3 - <<'PY' > "$RUNNER_TEMP/ci-signing-key.pk8"
+          import json
+          print(json.load(open("packages/api-contracts/fixtures/sandbox-security-attestation-signing/test-keys.json"))["keys"]["kaas-test-key-1"]["privateKeyPkcs8"], end="")
+          PY
+          chmod 600 "$RUNNER_TEMP/ci-signing-key.pk8"
+          ./gradlew :services:runner:produceSandboxSecurityAttestation --no-daemon \
+            -PkaasAttestationKeyId=kaas-test-key-1 \
+            -PkaasAttestationPrivateKeyFile="$RUNNER_TEMP/ci-signing-key.pk8" \
+            -PkaasAttestationRuntimeSubject=kaas.runtime.github-actions \
+            -PkaasAttestationOutput="$RUNNER_TEMP/ci-attestation.json" \
+            -PkaasAttestationIncludeEgress=false
+          test -s "$RUNNER_TEMP/ci-attestation.json"
+
+      - name: Confirm a strict verifier accepts it, and that tampering breaks it
+        run: |
+          set -euo pipefail
+          public=$(python3 -c 'import json;print(json.load(open("packages/api-contracts/fixtures/sandbox-security-attestation-signing/test-keys.json"))["keys"]["kaas-test-key-1"]["publicKeySpki"])')
+          # The control plane's OWN verifier, not a checker written for CI. A separate implementation would
+          # eventually disagree with the one that matters, and the disagreement would surface as an outage.
+          ./gradlew :apps:api:verifySandboxSecurityAttestation --no-daemon -q \
+            -PkaasAttestationDocument="$RUNNER_TEMP/ci-attestation.json" \
+            -PkaasAttestationTrustedKeys="kaas-test-key-1=$public" \
+            -PkaasAttestationRuntimeSubjects=kaas.runtime.github-actions \
+            -PkaasAttestationProfileVersion=kaas.sandbox.v1 | tee "$RUNNER_TEMP/verification.txt"
+          grep -q '^verification=VALID' "$RUNNER_TEMP/verification.txt"
+          grep -q '^authorizes=true' "$RUNNER_TEMP/verification.txt"
+          # THE CONTROLS IN THE ARTIFACT ARE THE CONTROLS THE GATE REQUIRES. Sixteen is the size of the
+          # contracted mandatory set; an artifact with a different number is one whose coverage check would
+          # refuse it, and finding that here beats finding it at an authorization.
+          grep -q '^mandatoryControls=16' "$RUNNER_TEMP/verification.txt"
+          grep -q '^controlsNotPassing=\[\]' "$RUNNER_TEMP/verification.txt"
+
+          # AND THE NEGATIVE. A green verification proves the verifier says yes; only this proves it can say
+          # no. Without it, a verifier stubbed to return VALID would pass every check above.
+          python3 - <<'PY'
+          import json, os
+          path = os.environ["RUNNER_TEMP"] + "/ci-attestation.json"
+          document = json.load(open(path))
+          document["mandatoryControls"]["NO_DOCKER_SOCKET"] = "FAIL"
+          json.dump(document, open(os.environ["RUNNER_TEMP"] + "/tampered.json", "w"))
+          PY
+          if ./gradlew :apps:api:verifySandboxSecurityAttestation --no-daemon -q \
+              -PkaasAttestationDocument="$RUNNER_TEMP/tampered.json" \
+              -PkaasAttestationTrustedKeys="kaas-test-key-1=$public"; then
+            echo "A tampered attestation verified. The signature is authenticating nothing." >&2
+            exit 1
+          fi
+
       - name: Remove any sandbox left behind by a failed run
         if: always()
         run: docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f

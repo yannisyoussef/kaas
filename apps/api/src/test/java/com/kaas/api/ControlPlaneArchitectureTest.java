@@ -87,7 +87,10 @@ class ControlPlaneArchitectureTest {
         // rule — described in its own comment as the load-bearing claim of the security-gate bridge — passes
         // having checked no dependency at all. No package count can catch that.
         for (String type : java.util.List.of(
-                "SandboxSecurityAttestation", "SandboxSecurityAttestationSource")) {
+                "VerifiedSandboxSecurityAttestation",
+                "SandboxSecurityAttestationSource",
+                "SandboxSecurityAttestationVerifier",
+                "AttestationTrustStore")) {
             assertThat(classes.stream().filter(imported -> imported.getSimpleName().equals(type)).count())
                     .as("the rule targeting %s must have a real type to target", type)
                     .isEqualTo(1L);
@@ -320,20 +323,55 @@ class ControlPlaneArchitectureTest {
     }
 
     @Test
-    void noEndpointCanAcceptASandboxSecurityAttestation() {
+    void noEndpointCanAcceptASandboxSecurityAttestationOrNominateAKey() {
         // The load-bearing claim of the whole security-gate bridge: an attestation arrives as deployment
-        // configuration and there is no API that accepts one, so nothing which authenticates to this service can
-        // assert its own security posture. That claim was previously true only by inspection — one
+        // configuration and there is no API that accepts one, so nothing which authenticates to this service
+        // can assert its own security posture. That claim was previously true only by inspection — one
         // @RequestBody on any controller would have falsified it silently.
+        //
+        // The trust store and the verifier are named here too, and they matter more than the attestation
+        // itself: a surface that could reach either could let a caller nominate WHO IS TRUSTED TO SIGN, which
+        // is strictly worse than being able to submit a document. A document a pinned key did not sign is
+        // worthless; a caller-chosen key makes every document worth something.
         noClasses()
                 .that()
                 .resideOutsideOfPackage("..execution..")
                 .should()
                 .dependOnClassesThat()
-                .haveSimpleName("SandboxSecurityAttestation")
+                .haveSimpleName("VerifiedSandboxSecurityAttestation")
                 .orShould()
                 .dependOnClassesThat()
                 .haveSimpleName("SandboxSecurityAttestationSource")
+                .orShould()
+                .dependOnClassesThat()
+                .haveSimpleName("SandboxSecurityAttestationVerifier")
+                .orShould()
+                .dependOnClassesThat()
+                .haveSimpleName("AttestationTrustStore")
+                .allowEmptyShould(true)
+                .check(classes);
+    }
+
+    @Test
+    void theControlPlaneCannotProduceAnAttestationItWouldThenVerify() {
+        // The control plane holds VERIFICATION authority and must never hold SIGNING authority. If it could
+        // mint an attestation it would be both the party making the claim and the party checking it, and the
+        // signature would authenticate nothing anybody did not already control.
+        //
+        // Asserted structurally rather than by convention: a private key type on this classpath is the shape
+        // that would make it possible, whatever the intention of the code holding it.
+        noClasses()
+                .that()
+                .resideInAPackage("..execution..")
+                .should()
+                .dependOnClassesThat()
+                .haveFullyQualifiedName("java.security.PrivateKey")
+                .orShould()
+                .dependOnClassesThat()
+                .haveFullyQualifiedName("java.security.KeyPairGenerator")
+                .orShould()
+                .dependOnClassesThat()
+                .haveFullyQualifiedName("java.security.spec.PKCS8EncodedKeySpec")
                 .allowEmptyShould(true)
                 .check(classes);
     }

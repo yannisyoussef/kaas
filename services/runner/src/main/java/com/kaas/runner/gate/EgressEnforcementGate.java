@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -57,15 +58,6 @@ public final class EgressEnforcementGate {
     private final String generation;
 
     /**
-     * The proxy image this gate built, or null if it never got that far.
-     *
-     * <p>Held so the caller can run executions against the SAME image the assessment was taken from. Building
-     * it a second time would mean the evidence describes one image and the executions use another, and on a
-     * host where the build is not reproducible those are genuinely different artifacts.
-     */
-    private String proxyImageReference;
-
-    /**
      * @param probeImage the trusted probe image, already built and content-addressed. Passed in rather than
      *     built here because the caller has already built it for the sandbox assessment, and building it twice
      *     would mean two images could differ — the evidence would then describe one of them and not say which.
@@ -86,19 +78,23 @@ public final class EgressEnforcementGate {
      * control plane's fail-closed reading of an absent control does the right thing, but a named failure with
      * evidence is what someone can act on.
      */
-    public List<SecurityCheck> assess() {
+    public EgressEnforcementAssessment assess() {
         List<SecurityCheck> checks = new ArrayList<>();
         UUID correlationId = UUID.randomUUID();
 
         String imageReference;
         try {
             imageReference = EgressProxyImage.build(docker, proxyImageContext);
-            this.proxyImageReference = imageReference;
         } catch (RuntimeException cannotBuild) {
             // Without an image nothing below can be attempted, so every remaining control is reported failed
             // rather than omitted. An omitted control reads as "not covered", and the control plane's exact
             // coverage rule would refuse anyway — but it would refuse without saying why.
-            return allFailed("the egress proxy image could not be built from the repository context");
+            // No image, so nothing below can be attempted and NOTHING was demonstrated with an image.
+            // Reported as an assessment with no image reference rather than one naming an image that does not
+            // exist: the attestation binds the image it observed, and there was none.
+            return new EgressEnforcementAssessment(
+                    Optional.empty(),
+                    allFailed("the egress proxy image could not be built from the repository context"));
         }
         checks.add(check(
                 "EGRESS_PROXY_IMAGE_PINNED",
@@ -118,7 +114,8 @@ public final class EgressEnforcementGate {
                 checks.add(check("EGRESS_NETWORK_INTERNAL", true, "network created and verified internal"));
             } catch (RuntimeException notInternal) {
                 checks.add(check("EGRESS_NETWORK_INTERNAL", false, "an internal network could not be created"));
-                return withRemainingFailed(checks, "no isolated network");
+                return new EgressEnforcementAssessment(
+                        Optional.of(imageReference), withRemainingFailed(checks, "no isolated network"));
             }
 
             try {
@@ -133,12 +130,13 @@ public final class EgressEnforcementGate {
                 checks.add(check("EGRESS_PROXY_READY", true, "proxy started and reported itself serving"));
             } catch (RuntimeException cannotStart) {
                 checks.add(check("EGRESS_PROXY_READY", false, "the proxy did not become ready"));
-                return withRemainingFailed(checks, "no proxy");
+                return new EgressEnforcementAssessment(
+                        Optional.of(imageReference), withRemainingFailed(checks, "no proxy"));
             }
 
             checks.add(noDirectRoute(network));
             checks.add(failsClosed(network, proxy));
-            return List.copyOf(checks);
+            return new EgressEnforcementAssessment(Optional.of(imageReference), List.copyOf(checks));
         } finally {
             if (proxy != null) {
                 proxy.close();
@@ -250,11 +248,6 @@ public final class EgressEnforcementGate {
         environment.put("KAAS_EGRESS_REVALIDATION_INTERVAL_MS", "5000");
         environment.put("KAAS_EGRESS_CONNECT_TIMEOUT_MS", "2000");
         return environment;
-    }
-
-    /** The image {@link #assess()} built, or null if the build failed or the gate has not run. */
-    public String proxyImageReference() {
-        return proxyImageReference;
     }
 
     private List<SecurityCheck> allFailed(String evidence) {

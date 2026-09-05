@@ -1,6 +1,6 @@
 {
   "$comment": "The mandatory sandbox controls the platform requires before it will authorize any execution. This file is the single source of truth for a set that two modules must agree on and that neither may import from the other: services/runner produces the assessment and holds container-runtime access, and apps/api consumes it and is build-guarded against ever depending on that module. Each side has a test asserting its own set equals this file, so adding a control to the gate without teaching the control plane about it, or the reverse, fails the build instead of silently widening or narrowing what 'all mandatory controls passed' means.",
-  "schemaVersion": "kaas.sandbox-security-attestation.v2",
+  "schemaVersion": "kaas.sandbox-security-attestation.v3",
   "controls": [
     "CAPABILITIES_DROPPED",
     "KERNEL_PATHS_MASKED",

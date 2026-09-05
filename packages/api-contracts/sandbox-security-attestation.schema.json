@@ -2,20 +2,28 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.kaas.dev/sandbox-security-attestation.schema.json",
   "title": "SandboxSecurityAttestation",
-  "description": "Evidence that a deployment's sandbox enforces the controls the control plane requires before it will authorize any execution. This is the bridge between two modules that deliberately cannot see each other: the hostile-execution gate holds container-runtime access and lives in services/runner, and the control plane is build-guarded against depending on it. The gate's verdict therefore travels as this document rather than as a method call. It is emphatically NOT a boolean: a passing attestation must enumerate every mandatory control and its verdict, so absence of a control is absence of evidence rather than a silent pass, and adding a control to the runner invalidates every existing attestation until a fresh assessment is produced. It also carries an OPTIONAL egressControls set, required only before an ALLOWLIST execution is authorized. No API accepts one \u2014 it arrives as deployment configuration \u2014 so nothing that authenticates to the control plane can assert its own security posture.",
+  "description": "Evidence that a deployment's sandbox enforces the controls the control plane requires before it will authorize any execution, SIGNED by the gate that made the observations. This is the bridge between two modules that deliberately cannot see each other: the hostile-execution gate holds container-runtime access and lives in services/runner, and the control plane is build-guarded against depending on it, so the gate's verdict travels as this document rather than as a method call. It is emphatically NOT a boolean, and since v3 it is emphatically not a self-consistency check either: a SHA-256 over a document's own content proves only that the document matches its own digest, which an operator recomputing it after typing the verdicts satisfies trivially. The signature is Ed25519 over the canonical preimage defined in sandbox-security-attestation-signing.md \u2014 NOT over this JSON, whose field order and whitespace must never define security semantics \u2014 and the control plane verifies it against a key it has pinned before reading a single verdict. No API accepts one and none registers a verification key: the artifact arrives as deployment configuration, so nothing that authenticates to the control plane can assert its own security posture or nominate who may vouch for it.",
   "type": "object",
   "required": [
     "schemaVersion",
+    "attestationId",
+    "producerVersion",
+    "keyId",
+    "signatureAlgorithm",
     "securityProfileVersion",
-    "probeImageDigest",
     "runtime",
+    "runtimeSubject",
+    "runtimeGeneration",
+    "probeImageDigest",
     "assessedAt",
     "mandatoryControls",
-    "digest"
+    "egressControls",
+    "payloadDigest",
+    "signature"
   ],
   "properties": {
     "schemaVersion": {
-      "const": "kaas.sandbox-security-attestation.v2"
+      "const": "kaas.sandbox-security-attestation.v3"
     },
     "securityProfileVersion": {
       "type": "string",
@@ -52,15 +60,11 @@
           "UNSUPPORTED"
         ]
       },
-      "description": "Every mandatory control and its verdict. The control plane requires EXACT set equality against the controls it independently demands, in both directions: containment would let a truncated assessment pass by omitting the control it failed, and would let a build accept an assessment produced for a weaker control set."
-    },
-    "digest": {
-      "$ref": "#/$defs/digest",
-      "description": "A canonical semantic digest over this document's content, recomputed on load rather than trusted, so a document whose verdicts were edited does not keep the digest that described what it used to say."
+      "description": "Every mandatory control and its verdict. The control plane requires EXACT set equality against the controls it independently demands, in both directions: containment would let a truncated assessment pass by omitting the control it failed, and would let a build accept an assessment produced for a weaker control set. Since v3 this carries ONLY controls whose enforcement is MANDATORY: the gate also observes deployment-specific hardening, which is never required, and including it here made every attestation fail the exact-coverage check while naming a control nothing demands."
     },
     "egressControls": {
       "type": "object",
-      "minProperties": 1,
+      "minProperties": 0,
       "maxProperties": 64,
       "propertyNames": {
         "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
@@ -72,7 +76,53 @@
           "UNSUPPORTED"
         ]
       },
-      "description": "Whether this deployment can enforce a destination allowlist, control by control. OPTIONAL, and its absence is meaningful: an assessment that makes no egress claim is refused for an ALLOWLIST execution and is entirely unaffected for a DENY_ALL one. That is why it is a separate set from mandatoryControls rather than more entries in it \u2014 the two are demanded under different conditions, and requiring these of a run that wants no network would make it depend on a subsystem it does not use. Within its own scope the same exact-set-equality rule applies, and every control must PASS."
+      "description": "Whether this deployment can enforce a destination allowlist, control by control. REQUIRED to be present since v3 and permitted to be EMPTY, which is the shape of an assessment that makes no egress claim: such an assessment is refused for an ALLOWLIST execution and entirely unaffected for a DENY_ALL one. That is why it is a separate set from mandatoryControls rather than more entries in it \u2014 the two are demanded under different conditions, and requiring these of a run that wants no network would make it depend on a subsystem it does not use. Within its own scope the same exact-set-equality rule applies, and every control must PASS."
+    },
+    "attestationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Opaque identifier for this statement, unique per production. Safe to log and to correlate against a control plane's verification outcome; it identifies the statement rather than the evidence, so two attestations of identical evidence differ here."
+    },
+    "producerVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Which producer built this, so a defect in one can be traced to the artifacts it produced."
+    },
+    "keyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Selects ONE key from the verifier's pinned trust map. It is not itself authority: an unknown id is refused, and a verifier must never try its other trusted keys to see whether one happens to work. It is inside the signed preimage, so the signer commits to which key it used."
+    },
+    "signatureAlgorithm": {
+      "const": "ED25519",
+      "description": "Compared for equality and never dispatched on. A verifier that looked up an algorithm the document named would let the document choose how it is checked."
+    },
+    "runtimeSubject": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "An OPAQUE operator-assigned label for the runtime this evidence describes, configured on both sides. Never a hostname, MAC address, machine serial, cloud instance id, or host path \u2014 this artifact travels. The control plane validates it against the set of subjects it accepts; merely displaying it would let one signature authorize every runtime that key ever signed for."
+    },
+    "runtimeGeneration": {
+      "type": "string",
+      "pattern": "^gen:[a-f0-9]{32}$",
+      "description": "An opaque hash of the container runtime's own instance identity, so two attestations from different runtime instances are distinguishable. It is NOT reboot invalidation: a daemon's identity ordinarily survives a host restart, and freshness is bounded by assessedAt and the configured maximum age alone."
+    },
+    "egressProxyImageDigest": {
+      "$ref": "#/$defs/digest",
+      "description": "The content address of the egress proxy image the egress assessment ran. OPTIONAL, and absent exactly when there is no egress evidence \u2014 the preimage distinguishes absent from empty, so an artifact cannot lose its proxy image identity silently. EGRESS_PROXY_IMAGE_PINNED=PASS says an image was pinned; only this says which."
+    },
+    "payloadDigest": {
+      "$ref": "#/$defs/digest",
+      "description": "SHA-256 over the canonical preimage, NOT over this JSON. Recomputed by the verifier from the reconstructed payload and compared, never trusted. It is outside the signed preimage because a payload cannot contain its own digest without circularity, and it is what ExecutionCommand binds as assessmentDigest."
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+/]{86}==$",
+      "description": "Ed25519 signature over the canonical preimage, standard Base64 with padding \u2014 not base64url, not unpadded, not MIME. 64 bytes, so exactly 88 Base64 characters. Verified over the preimage the verifier RECONSTRUCTS from the parsed fields, never over the bytes as received: verifying received bytes would authenticate a serialization, and a field the verifier does not understand would be signed over without ever being read."
     }
   },
   "additionalProperties": false,

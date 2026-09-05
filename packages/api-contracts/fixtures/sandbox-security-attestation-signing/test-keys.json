@@ -1,0 +1,15 @@
+{
+  "$comment": "TEST-ONLY Ed25519 key material. The private key is published here DELIBERATELY: these vectors are worthless without it, and a key whose private half is in a public repository can never be mistaken for a production signer. Production trust configuration must never contain these, and there is no default trust root that would admit them - an absent trust root fails execution authorization closed rather than falling back to anything.",
+  "$format": "PKCS#8 (private) and X.509 SubjectPublicKeyInfo (public), standard Base64 with padding.",
+  "keys": {
+    "kaas-test-key-1": {
+      "privateKeyPkcs8": "MC4CAQAwBQYDK2VwBCIEIMa9j4trb/I3j/gWv7TI5I8zpnii7umsXEI6c/lL49LI",
+      "publicKeySpki": "MCowBQYDK2VwAyEABRL7S5EmD826oxGqlySdnS9211/xgF/9bqIggwkARdY="
+    },
+    "kaas-test-key-2": {
+      "privateKeyPkcs8": "MC4CAQAwBQYDK2VwBCIEIOBVZPDIv9F6oIDF1efL3+BB1uZBJVmTnZdljntXX/kd",
+      "publicKeySpki": "MCowBQYDK2VwAyEAmo6uRUIWCDtfxHIJzT+jMDSCiEgoOObPb3/KpVadWa4=",
+      "$comment": "A second key, for rotation and wrong-key vectors."
+    }
+  }
+}

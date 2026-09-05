@@ -16,7 +16,8 @@ import com.kaas.api.execution.domain.ExecutionCommandPolicy;
 import com.kaas.api.execution.domain.ExecutionDenial;
 import com.kaas.api.execution.domain.NetworkPolicyRevision;
 import com.kaas.api.execution.domain.NetworkPolicyType;
-import com.kaas.api.execution.domain.SandboxSecurityAttestation;
+import com.kaas.api.execution.domain.AttestationVerification;
+import com.kaas.api.execution.domain.VerifiedSandboxSecurityAttestation;
 import com.kaas.api.execution.domain.SecretValueProvider;
 import com.kaas.api.execution.domain.SourceBundlePolicy;
 import io.micrometer.core.instrument.Counter;
@@ -215,18 +216,35 @@ public class ExecutionAuthorizationService {
             return denied(ExecutionDenial.RUN_SNAPSHOT_INVALID);
         }
 
-        Optional<SandboxSecurityAttestation> attestation = attestations.attestation();
+        // AUTHENTICATED EVIDENCE OR NONE. What this returns is a type only the verifier can construct, so an
+        // unsigned document, one signed by a key nobody pinned, or one whose payload was edited after signing
+        // cannot be represented here at all — the refusal happened at startup and nothing downstream can read
+        // a verdict from a document that did not verify.
+        Optional<VerifiedSandboxSecurityAttestation> attestation = attestations.attestation();
         if (attestation.isEmpty()) {
             return denied(ExecutionDenial.SECURITY_GATE_UNAVAILABLE);
         }
-        Optional<String> untrustworthy =
-                attestation.orElseThrow().reasonItCannotBeTrusted(now, attestationMaxAge, expectedProfileVersion);
-        if (untrustworthy.isPresent()) {
+        // Authenticity is not sufficiency. A signature proves origin and integrity; it says nothing about
+        // whether the evidence is recent, describes THIS runtime, was taken under the profile execution would
+        // use, or records controls that passed. Those are properties of this authorization, now.
+        Optional<AttestationVerification> unusable = attestation
+                .orElseThrow()
+                .reasonItCannotAuthorize(
+                        now,
+                        attestationMaxAge,
+                        expectedProfileVersion,
+                        attestations.acceptedRuntimeSubjects());
+        if (unusable.isPresent()) {
             LOGGER.atWarn()
                     .addKeyValue("event", "SANDBOX_ATTESTATION_REJECTED")
                     .addKeyValue("runId", runId)
-                    .addKeyValue("reason", untrustworthy.orElseThrow())
+                    // The category, and — because the signature already proved a pinned key produced this —
+                    // which controls a trusted producer said did not pass. Safe here in a way it never is
+                    // before verification.
+                    .addKeyValue("outcome", unusable.orElseThrow().name())
+                    .addKeyValue("controlsNotPassing", attestation.orElseThrow().controlsNotPassing())
                     .log("Refused execution because the sandbox security assessment cannot be relied on");
+            count("kaas.security.attestation.authorization", unusable.orElseThrow().name());
             return denied(ExecutionDenial.SECURITY_GATE_FAILED);
         }
 
@@ -254,12 +272,13 @@ public class ExecutionAuthorizationService {
             //
             // Asked only for ALLOWLIST. A DENY_ALL run refused because the egress subsystem is unhealthy would
             // be a run refused for a subsystem it does not use.
-            Optional<String> unenforceable = attestation.orElseThrow().reasonEgressCannotBeEnforced();
+            Optional<AttestationVerification> unenforceable =
+                    attestation.orElseThrow().reasonEgressCannotBeEnforced();
             if (unenforceable.isPresent()) {
                 LOGGER.atWarn()
                         .addKeyValue("event", "EGRESS_NOT_ENFORCEABLE")
                         .addKeyValue("runId", runId)
-                        .addKeyValue("reason", unenforceable.orElseThrow())
+                        .addKeyValue("outcome", unenforceable.orElseThrow().name())
                         .log("Refused an allowlist execution because this deployment cannot enforce egress");
                 // A refusal, never a downgrade to DENY_ALL. A run that appeared to have egress control nothing
                 // was applying would be worse than one that has none and says so.
@@ -404,7 +423,7 @@ public class ExecutionAuthorizationService {
             TestRun run,
             ExecutionAttempt attempt,
             ExecutionAuthorizationRepository.SnapshotContext context,
-            SandboxSecurityAttestation attestation,
+            VerifiedSandboxSecurityAttestation attestation,
             NetworkPolicyRevision policy,
             Instant now,
             Instant expiresAt) {
@@ -439,9 +458,12 @@ public class ExecutionAuthorizationService {
                 attempt.assignment().epoch(),
                 attempt.assignment().workerId(),
                 context.runSnapshotSha256(),
-                attestation.securityProfileVersion(),
-                attestation.digest(),
-                attestation.probeImageDigest(),
+                attestation.payload().securityProfileVersion(),
+                // The AUTHENTICATED evidence identity. Same field, same shape, same binding as before — what
+                // changed is that this digest is now over a payload a pinned key signed, rather than over
+                // whatever an operator typed.
+                attestation.payloadDigest(),
+                attestation.payload().probeImageDigest(),
                 policy.policyRevisionId(),
                 now,
                 expiresAt,
@@ -502,7 +524,7 @@ public class ExecutionAuthorizationService {
             ExecutionAuthorizationRepository.SnapshotContext context,
             ExecutionAuthorization authorization,
             NetworkPolicyRevision policy,
-            SandboxSecurityAttestation attestation,
+            VerifiedSandboxSecurityAttestation attestation,
             String bundleDigest,
             Instant now) {
         var draft = new ExecutionCommand(
@@ -528,7 +550,10 @@ public class ExecutionAuthorizationService {
                         policy.policyVersion(),
                         policy.canonicalDigest()),
                 new ExecutionCommand.SandboxSecurityProfileReference(
-                        attestation.securityProfileVersion(), attestation.digest()),
+                        // The profile the SIGNED payload names, and the digest of that payload. The command's
+                        // shape is unchanged; the digest it binds is now an authenticated evidence identity
+                        // rather than a self-consistency check over hand-written text.
+                        attestation.payload().securityProfileVersion(), attestation.payloadDigest()),
                 context.configuration(),
                 context.selection(),
                 context.parallelism(),

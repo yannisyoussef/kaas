@@ -12,7 +12,7 @@ import com.kaas.api.execution.application.SourceCapabilityService;
 import com.kaas.api.execution.domain.CapabilityToken;
 import com.kaas.api.execution.domain.CapabilityType;
 import com.kaas.api.execution.domain.ExecutionDenial;
-import com.kaas.api.execution.domain.SandboxSecurityAttestation;
+import com.kaas.api.execution.SignedAttestationFixture;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
@@ -122,6 +122,15 @@ class ExecutionAuthorizationTests {
     @DynamicPropertySource
     static void attestation(DynamicPropertyRegistry registry) {
         registry.add("kaas.execution.sandbox-attestation", () -> validAttestation(Instant.now()));
+        // The pinned trust root and the runtimes this control plane accepts evidence for. Both are required:
+        // with no key nothing verifies, and with no accepted subject a perfectly valid signature still
+        // authorizes nothing — which is the property that stops evidence from one host authorizing another.
+        registry.add(
+                "kaas.execution.attestation-trusted-keys",
+                () -> SignedAttestationFixture.trustedKeys(SignedAttestationFixture.KEY_ID));
+        registry.add(
+                "kaas.execution.attestation-runtime-subjects",
+                () -> SignedAttestationFixture.RUNTIME_SUBJECT);
     }
 
     private final HttpClient client = HttpClient.newHttpClient();
@@ -1154,43 +1163,18 @@ class ExecutionAuthorizationTests {
     }
 
     private static String validAttestation(Instant assessedAt) {
-        return validAttestation(assessedAt, Map.of());
+        return SignedAttestationFixture.mandatoryOnly("kaas.sandbox.v1", assessedAt);
     }
 
     /**
-     * An attestation document, optionally carrying egress controls.
+     * A signed attestation carrying egress evidence as well.
      *
-     * <p>Egress controls are absent by default, which is what an assessment produced by a deployment that
-     * cannot enforce an allowlist looks like — and what every test that is not about egress should be using,
-     * because it is the state that must keep refusing ALLOWLIST.
+     * <p>Egress evidence is absent by default, which is what an assessment from a deployment that cannot
+     * enforce an allowlist looks like — and what every test that is not about egress should use, because it
+     * is the state that must keep refusing ALLOWLIST.
      */
-    private static String validAttestation(Instant assessedAt, Map<String, String> egress) {
-        Map<String, String> controls = new java.util.TreeMap<>();
-        SandboxSecurityAttestation.REQUIRED_MANDATORY_CONTROLS.forEach(control -> controls.put(control, "PASS"));
-        String probe = "sha256:" + "a".repeat(64);
-        Instant truncated = assessedAt.truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
-        var draft = new SandboxSecurityAttestation(
-                SandboxSecurityAttestation.SCHEMA_VERSION,
-                "kaas.sandbox.v1", probe, "docker", truncated, controls, egress, "");
-        StringBuilder json = new StringBuilder("{\"schemaVersion\":\"")
-                .append(SandboxSecurityAttestation.SCHEMA_VERSION)
-                .append("\",\"securityProfileVersion\":\"kaas.sandbox.v1\",\"probeImageDigest\":\"")
-                .append(probe)
-                .append("\",\"runtime\":\"docker\",\"assessedAt\":\"")
-                .append(truncated)
-                .append("\",\"mandatoryControls\":{");
-        json.append(asJsonBody(controls)).append("}");
-        if (!egress.isEmpty()) {
-            json.append(",\"egressControls\":{").append(asJsonBody(new java.util.TreeMap<>(egress))).append("}");
-        }
-        return json.append(",\"digest\":\"").append(draft.expectedDigest()).append("\"}").toString();
-    }
-
-    private static String asJsonBody(Map<String, String> entries) {
-        return entries.entrySet().stream()
-                .map(entry -> "\"" + entry.getKey() + "\":\"" + entry.getValue() + "\"")
-                .reduce((left, right) -> left + "," + right)
-                .orElseThrow();
+    private static String validAttestationWithEgress(Instant assessedAt) {
+        return SignedAttestationFixture.withEgress("kaas.sandbox.v1", assessedAt);
     }
 
     private HttpResponse<String> postInternal(String path, String bearer, String body) throws Exception {

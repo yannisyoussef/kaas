@@ -1,6 +1,7 @@
 package com.kaas.runner.command;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Instant;
@@ -37,6 +38,41 @@ class UnenforceableCommandTests {
                 // Named specifically. A run that appeared to have egress control nothing was applying would be
                 // worse than one with none, because somebody would rely on it.
                 .hasMessageContaining("cannot enforce the network policy ALLOWLIST");
+    }
+
+    @Test
+    @DisplayName("a command naming another runtime's security evidence is refused here, whatever authorized it")
+    void aCommandBoundToForeignEvidenceIsRefused() throws Exception {
+        // The control plane verified an attestation and bound its digest into this command. That decision was
+        // made about a runtime the control plane cannot see. This one is made by the runtime itself.
+        ObjectNode command = sealed(node -> {});
+        String namedByTheCommand =
+                command.get("sandboxSecurityProfile").get("assessmentDigest").stringValue();
+
+        var boundElsewhere = new CommandValidator(
+                mapper,
+                java.util.Set.of(),
+                java.util.Optional.of("sha256:" + "b".repeat(64)));
+
+        assertThatThrownBy(() -> boundElsewhere.validate(command.toString(), NOW))
+                .isInstanceOf(CommandRejected.class)
+                .hasMessageContaining("does not describe this runtime");
+
+        // ANTI-VACUITY. The same command, on a runner holding the evidence it names, is accepted — so the
+        // refusal above is the binding firing and not the command being unacceptable for some other reason.
+        var boundHere = new CommandValidator(
+                mapper, java.util.Set.of(), java.util.Optional.of(namedByTheCommand));
+        assertThatCode(() -> boundHere.validate(command.toString(), NOW)).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("a runner given no evidence of its own adds no refusal, and says so by construction")
+    void anUnboundRunnerDoesNotRefuse() throws Exception {
+        // Absent binding is not a weakening: until this slice no runner had evidence to compare against at
+        // all, and the control plane's verification still stands. It is stated explicitly rather than
+        // defaulted quietly, so a deployment that meant to bind and did not can be seen to have not bound.
+        assertThatCode(() -> new CommandValidator(mapper).validate(sealed(node -> {}).toString(), NOW))
+                .doesNotThrowAnyException();
     }
 
     @Test

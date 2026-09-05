@@ -37,6 +37,43 @@ tasks.withType<Test>().configureEach {
     inputs.file(rootProject.file("packages/api-contracts/mandatory-sandbox-controls.json"))
         .withPropertyName("mandatorySandboxControls")
         .withPathSensitivity(PathSensitivity.RELATIVE)
+
+    // The signing contract and its vectors, for the same reason and with a sharper edge: these files ARE the
+    // agreement between the producer and the verifier, and a change to one of them changes what a signature
+    // means. A vector edited while this task reported UP-TO-DATE would be a contract nobody checked.
+    inputs.file(rootProject.file("packages/api-contracts/sandbox-security-attestation-signing.md"))
+        .withPropertyName("attestationSigningContract")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.dir(rootProject.file("packages/api-contracts/fixtures/sandbox-security-attestation-signing"))
+        .withPropertyName("attestationSigningVectors")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
+/**
+ * Verifies a signed attestation offline, with the same verifier the control plane uses.
+ *
+ * <p>For an operator checking an artifact before deploying it, and for CI proving that what a producer just
+ * wrote is what a real verifier accepts. It grants nothing: it reads a file and prints a category.
+ */
+val verifySandboxSecurityAttestation = tasks.register<JavaExec>("verifySandboxSecurityAttestation") {
+    group = "verification"
+    description = "Verifies a signed sandbox security attestation against a pinned trust root."
+    mainClass.set("com.kaas.api.execution.application.AttestationVerificationCli")
+    classpath = sourceSets["main"].runtimeClasspath
+    doFirst {
+        systemProperty(
+            "kaas.attestation.verify.document",
+            providers.gradleProperty("kaasAttestationDocument").get())
+        systemProperty(
+            "kaas.attestation.verify.trusted-keys",
+            providers.gradleProperty("kaasAttestationTrustedKeys").get())
+        providers.gradleProperty("kaasAttestationRuntimeSubjects").orNull?.let {
+            systemProperty("kaas.attestation.verify.runtime-subjects", it)
+        }
+        providers.gradleProperty("kaasAttestationProfileVersion").orNull?.let {
+            systemProperty("kaas.attestation.verify.profile-version", it)
+        }
+    }
 }
 
 val verifyNoExecutionDependencies = tasks.register("verifyNoExecutionDependencies") {

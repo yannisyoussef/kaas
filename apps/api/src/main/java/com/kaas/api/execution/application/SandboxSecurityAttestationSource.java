@@ -1,167 +1,116 @@
 package com.kaas.api.execution.application;
 
-import com.kaas.api.execution.domain.SandboxSecurityAttestation;
-import java.time.Instant;
-import java.util.LinkedHashMap;
-import java.util.Map;
+import com.kaas.api.execution.domain.AttestationVerification;
+import com.kaas.api.execution.domain.SandboxSecurityAttestationVerifier;
+import com.kaas.api.execution.domain.VerifiedSandboxSecurityAttestation;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.Optional;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-import tools.jackson.databind.DeserializationFeature;
-import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.ObjectMapper;
-import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Supplies the deployment's sandbox security assessment, or nothing.
+ * Supplies the deployment's <em>verified</em> sandbox security assessment, or nothing.
  *
- * <p>Nothing is the default, and it is the correct production state today. The hostile-execution gate runs in
- * CI against a real daemon and produces an assessment; nothing yet transports that assessment into a running
- * control plane automatically. Until something does, this returns empty and every authorization fails with
- * {@code SECURITY_GATE_UNAVAILABLE}, which is the honest outcome: the platform cannot demonstrate that this
- * host's sandbox enforces what it requires, so it does not pretend to.
+ * <h2>What changed, and why the type did too</h2>
  *
- * <p>The document arrives as deployment configuration. That places it in the same trust domain as the database
- * credentials and the JWT issuer — the operator's — and emphatically not in the tenant's or the worker's. There
- * is deliberately no endpoint that accepts one, so nothing that authenticates to this service can assert its own
- * security posture.
+ * <p>This used to hand back a parsed document whose SHA-256 matched its own contents. That proved the document
+ * had not changed relative to its digest — and nothing else. It did not prove the document came from a security
+ * gate, that the controls were observed by any runtime, or that the deployment authorizing an execution was
+ * consuming evidence from the runtime that was assessed. An operator wrote {@code "NON_ROOT_UID": "PASS"} by
+ * hand and recomputed the digest over what they had written.
  *
- * <p>Parsing is strict. An unknown property is a refusal rather than a silent discard, because an assessment
- * with a misspelled control name would otherwise be an assessment missing that control while looking complete.
+ * <p>Now the document must carry an Ed25519 signature from a key this deployment has pinned, and what escapes
+ * this class is a {@link VerifiedSandboxSecurityAttestation} — a type only the verifier can construct. An
+ * unauthenticated document cannot be represented as one, so it cannot reach the code that reads verdicts.
+ *
+ * <h2>Verified once, evaluated every time</h2>
+ *
+ * <p>Authenticity is a property of the artifact and does not change, so it is established at startup.
+ * Freshness, runtime subject, profile and control coverage are properties of <em>this authorization, now</em>,
+ * so they are evaluated per request. A signature proves origin and integrity; treating it as though it proved
+ * freshness is the most common way this kind of design fails.
+ *
+ * <h2>Still no endpoint</h2>
+ *
+ * <p>The document arrives as deployment configuration, in the same trust domain as the database credentials
+ * and the JWT issuer — the operator's — and emphatically not the tenant's or the worker's. There is
+ * deliberately no API that accepts one and none that registers a verification key, so nothing that
+ * authenticates to this service can assert its own security posture or nominate who may vouch for it.
  */
 @Component
 public class SandboxSecurityAttestationSource {
+
     private static final Logger LOGGER = LoggerFactory.getLogger(SandboxSecurityAttestationSource.class);
 
+    private final Optional<VerifiedSandboxSecurityAttestation> attestation;
+
+    private final AttestationVerification outcome;
+
+    private final Set<String> acceptedRuntimeSubjects;
+
     /**
-     * A private mapper, so a change to a shared one cannot reach the parser whose input decides whether
-     * execution is permitted.
-     *
-     * <p><strong>The strictness that matters is NOT these flags.</strong> This class reads the document into a
-     * {@link tools.jackson.databind.JsonNode} rather than binding it to a type, and
-     * {@code FAIL_ON_UNKNOWN_PROPERTIES} applies only to bean binding — it does nothing here. An earlier
-     * comment claimed otherwise, which was worse than saying nothing: it described a protection that was not
-     * operating, in the one place where an undefined field must never be silently discarded.
-     *
-     * <p>The real enforcement is the explicit property allowlist below, and it is the only enforcement. It is
-     * covered by {@code WhenAnOtherwiseCompleteDocumentCarriesAnUnknownProperty}, which exists because mutation
-     * testing showed nothing else covers it — and which was once deleted without any test going red.
+     * @param document the signed artifact, transported here as configuration
+     * @param runtimeSubjects the runtimes this control plane will accept evidence for. Empty means none, and
+     *     none means no execution: a control plane that accepted evidence for any subject would let a
+     *     signature produced on one host authorize an execution on another
      */
-    private static final ObjectMapper STRICT = JsonMapper.builder()
-            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-            .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
-            .build();
-
-    private final Optional<SandboxSecurityAttestation> attestation;
-    private final String parseFailure;
-
     public SandboxSecurityAttestationSource(
-            @Value("${kaas.execution.sandbox-attestation:}") String document) {
-        if (document == null || document.isBlank()) {
-            this.attestation = Optional.empty();
-            this.parseFailure = null;
+            @Value("${kaas.execution.sandbox-attestation:}") String document,
+            @Value("${kaas.execution.attestation-runtime-subjects:}") String runtimeSubjects,
+            AttestationTrustStore trustStore,
+            MeterRegistry meters) {
+
+        this.acceptedRuntimeSubjects = Set.copyOf(
+                java.util.Arrays.stream(runtimeSubjects == null ? new String[0] : runtimeSubjects.split(","))
+                        .map(String::trim)
+                        .filter(subject -> !subject.isEmpty())
+                        .toList());
+
+        SandboxSecurityAttestationVerifier.Result result =
+                new SandboxSecurityAttestationVerifier(trustStore).verify(document);
+        this.outcome = result.outcome();
+        this.attestation = result.attestation();
+
+        Counter.builder("kaas.security.attestation.verification")
+                .tag("result", outcome.name())
+                .register(meters)
+                .increment();
+
+        if (outcome.accepted()) {
             LOGGER.atInfo()
-                    .addKeyValue("event", "SANDBOX_ATTESTATION_ABSENT")
-                    .log("No sandbox security assessment is configured; execution authorization is unavailable");
-            return;
-        }
-        SandboxSecurityAttestation parsed = null;
-        String failure = null;
-        try {
-            parsed = parse(document);
-        } catch (RuntimeException malformed) {
-            // The message is kept out of the log deliberately: a malformed attestation is operator-supplied
-            // configuration, and echoing it risks putting whatever was in that property into a log line.
-            failure = "the configured sandbox attestation could not be parsed";
-        }
-        this.attestation = Optional.ofNullable(parsed);
-        this.parseFailure = failure;
-        if (failure != null) {
+                    .addKeyValue("event", "SANDBOX_ATTESTATION_VERIFIED")
+                    // Safe to log: an id, a key id, and a digest. Not the controls, not the runtime subject,
+                    // and never the signature — the first two are host-describing and the third is bulk.
+                    .addKeyValue("attestationId", attestation.orElseThrow().payload().attestationId())
+                    .addKeyValue("keyId", attestation.orElseThrow().payload().keyId())
+                    .addKeyValue("payloadDigest", attestation.orElseThrow().payloadDigest())
+                    .log("Sandbox security attestation verified against a pinned key");
+        } else {
             LOGGER.atError()
-                    .addKeyValue("event", "SANDBOX_ATTESTATION_UNPARSEABLE")
-                    .log("A sandbox security assessment is configured but could not be read; execution is refused");
+                    .addKeyValue("event", "SANDBOX_ATTESTATION_REFUSED")
+                    // The CATEGORY only. This document is operator-supplied configuration an attacker may have
+                    // influenced, and a diagnostic that quoted it would repeat attacker-chosen text into a log.
+                    .addKeyValue("outcome", outcome.name())
+                    .log("No usable sandbox security attestation; execution authorization is unavailable");
         }
     }
 
-    /** The attestation, if one is configured and could be read. Never a partially-parsed one. */
-    public Optional<SandboxSecurityAttestation> attestation() {
+    /** The verified attestation, if one is configured and authentic. Never a partially-checked one. */
+    public Optional<VerifiedSandboxSecurityAttestation> attestation() {
         return attestation;
     }
 
-    /** Why there is no usable attestation, when there is none. */
-    public Optional<String> unavailableReason() {
-        if (attestation.isPresent()) {
-            return Optional.empty();
-        }
-        return Optional.of(parseFailure != null ? parseFailure : "no sandbox security assessment is configured");
+    /** Which stage refused, when there is nothing usable. */
+    public AttestationVerification outcome() {
+        return outcome;
     }
 
-    private static SandboxSecurityAttestation parse(String document) {
-        JsonNode root = STRICT.readTree(document);
-        if (!root.isObject()) {
-            throw new IllegalArgumentException("An attestation is a JSON object.");
-        }
-        for (String property : root.propertyNames()) {
-            if (!java.util.Set.of(
-                            "schemaVersion",
-                            "securityProfileVersion",
-                            "probeImageDigest",
-                            "runtime",
-                            "assessedAt",
-                            "mandatoryControls",
-                            "egressControls",
-                            "digest")
-                    .contains(property)) {
-                throw new IllegalArgumentException("An attestation carries no unknown properties.");
-            }
-        }
-        JsonNode controls = root.get("mandatoryControls");
-        if (controls == null || !controls.isObject()) {
-            throw new IllegalArgumentException("An attestation enumerates its mandatory controls.");
-        }
-        Map<String, String> verdicts = verdictsOf(controls);
-        // Absent is legal and means "this deployment makes no claim about egress", which the ALLOWLIST path
-        // reads as a refusal. Present but malformed is an error rather than an absence: a document that tried
-        // to say something about egress and failed must not be read as one that said nothing.
-        JsonNode egress = root.get("egressControls");
-        Map<String, String> egressVerdicts;
-        if (egress == null || egress.isNull()) {
-            egressVerdicts = Map.of();
-        } else if (!egress.isObject()) {
-            throw new IllegalArgumentException("Egress controls are an object when present.");
-        } else {
-            egressVerdicts = verdictsOf(egress);
-        }
-        return new SandboxSecurityAttestation(
-                text(root, "schemaVersion"),
-                text(root, "securityProfileVersion"),
-                text(root, "probeImageDigest"),
-                text(root, "runtime"),
-                Instant.parse(text(root, "assessedAt")),
-                verdicts,
-                egressVerdicts,
-                text(root, "digest"));
-    }
-
-    private static Map<String, String> verdictsOf(JsonNode controls) {
-        Map<String, String> verdicts = new LinkedHashMap<>();
-        for (String control : controls.propertyNames()) {
-            JsonNode verdict = controls.get(control);
-            if (!verdict.isString()) {
-                throw new IllegalArgumentException("Each control carries a textual verdict.");
-            }
-            verdicts.put(control, verdict.stringValue());
-        }
-        return verdicts;
-    }
-
-    private static String text(JsonNode root, String property) {
-        JsonNode value = root.get(property);
-        if (value == null || !value.isString()) {
-            throw new IllegalArgumentException("An attestation property is required and textual.");
-        }
-        return value.stringValue();
+    /** The runtimes this deployment accepts evidence for. Empty refuses everything, by construction. */
+    public Set<String> acceptedRuntimeSubjects() {
+        return acceptedRuntimeSubjects;
     }
 }

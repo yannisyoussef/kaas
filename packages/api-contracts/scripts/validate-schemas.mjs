@@ -38,11 +38,20 @@ const expectedKeywordByName = new Map([
   ["invalid-traversing-logical-path.json", "pattern"],
   ["invalid-bearer-token-present.json", "additionalProperties"],
   ["invalid-unenforceable-network-policy-shape.json", "const"],
-  // Sandbox security attestation.
+  // Sandbox security attestation. Since v3 the document is signed, so several of these name a keyword that
+  // only exists because the envelope does.
   ["invalid-boolean-shortcut.json", "type"],
   ["invalid-unknown-verdict.json", "enum"],
   ["invalid-tagged-probe-image.json", "pattern"],
   ["invalid-missing-digest.json", "required"],
+  ["invalid-missing-signature.json", "required"],
+  ["invalid-wrong-algorithm.json", "const"],
+  // A v2 document. The schema refuses it by version rather than by shape, which is what tells an operator
+  // with an old artifact that it is old rather than malformed.
+  ["invalid-superseded-schema-version.json", "const"],
+  // A runtime generation that names the host instead of hashing its runtime's identity. The pattern is what
+  // stops a hostname reaching an artifact that travels.
+  ["invalid-non-opaque-runtime-generation.json", "pattern"],
 ]);
 
 // Authority that only exists after a worker claim. A queue-time DispatchIntent must never carry it.

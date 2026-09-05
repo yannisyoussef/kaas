@@ -1,6 +1,7 @@
 package com.kaas.runner.sandbox;
 
 import com.github.dockerjava.api.DockerClient;
+import com.kaas.runner.gate.EgressEnforcementAssessment;
 import com.kaas.runner.gate.EgressEnforcementGate;
 import com.kaas.runner.gate.SecurityCheck;
 import java.nio.file.Path;
@@ -52,36 +53,32 @@ public record EgressCapability(boolean available, String unavailableBecause, Str
      */
     public static EgressCapability establish(
             DockerClient docker, Path proxyImageContext, String probeImage, String generation) {
-        EgressEnforcementGate gate =
-                new EgressEnforcementGate(docker, proxyImageContext, probeImage, generation);
-        List<SecurityCheck> checks;
+        EgressEnforcementAssessment assessment;
         try {
-            checks = gate.assess();
+            assessment = new EgressEnforcementGate(docker, proxyImageContext, probeImage, generation).assess();
         } catch (RuntimeException failed) {
             return unavailable("the egress enforcement gate could not run");
         }
-        List<SecurityCheck> blockers = checks.stream().filter(SecurityCheck::blocksRelease).toList();
-        if (!blockers.isEmpty()) {
-            return unavailable("egress controls did not pass: "
-                    + blockers.stream().map(SecurityCheck::control).sorted().toList());
-        }
-        String proxyImageReference = gate.proxyImageReference();
-        if (checks.isEmpty()) {
-            // An empty assessment is not a passing one. Nothing was demonstrated, and "nothing was
-            // demonstrated" must never read as "everything passed" — which is exactly what a filter over an
-            // empty list produces if the emptiness is not checked for.
-            return unavailable("the egress enforcement gate produced no evidence");
+        if (!assessment.passed()) {
+            // `passed()` is false for an EMPTY assessment as well as a failing one, which is the case that
+            // matters: a filter for blockers over an empty list finds nothing, so "nothing was demonstrated"
+            // would otherwise read exactly as "everything passed".
+            List<String> blockers =
+                    assessment.blockers().stream().map(SecurityCheck::control).sorted().toList();
+            return unavailable(blockers.isEmpty()
+                    ? "the egress enforcement gate produced no evidence"
+                    : "egress controls did not pass: " + blockers);
         }
         // The image the GATE built, carried rather than rebuilt. Executions run the same artifact the
         // assessment was taken from; building it again would mean the evidence describes one image and the
         // executions use another, which on a host where the build is not reproducible is a real difference.
-        if (proxyImageReference == null) {
-            // Unreachable while the gate reports a passing IMAGE_PINNED control, and refused rather than
-            // trusted anyway: an available capability with no image is one whose first execution would fail
-            // deep inside provisioning instead of here.
-            return unavailable("the egress enforcement gate reported no proxy image");
-        }
-        return new EgressCapability(true, null, proxyImageReference);
+        return assessment
+                .proxyImageReference()
+                .map(image -> new EgressCapability(true, null, image))
+                // Unreachable while the gate reports a passing IMAGE_PINNED control, and refused rather than
+                // trusted anyway: an available capability with no image is one whose first execution would
+                // fail deep inside provisioning instead of here.
+                .orElseGet(() -> unavailable("the egress enforcement gate reported no proxy image"));
     }
 
     /**

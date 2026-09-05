@@ -85,11 +85,25 @@ public final class CommandValidator {
     private final java.util.Set<String> enforceablePolicies;
 
     /**
-     * A validator that can enforce nothing but DENY_ALL.
+     * The evidence identity this runtime was deployed with, when it has one.
      *
-     * <p>The safe default, and the one every caller gets unless it has positively established otherwise. A
-     * default that included ALLOWLIST would mean forgetting to pass the capability produced a runner that
-     * accepted allowlist commands and applied nothing.
+     * <p>Present means a command must name exactly this digest or be refused — the runner's own, independent
+     * refusal of evidence that does not describe it. Absent means this runner has not been given its own
+     * attestation and the check does not apply; the control plane's verification still stands, and a runner in
+     * that state simply adds nothing to it.
+     *
+     * <p>Absent is not a weakening of anything that existed before: until this slice no runner had evidence to
+     * compare against at all. It is stated explicitly rather than defaulted quietly, so a deployment that
+     * meant to bind and did not can be seen to have not bound.
+     */
+    private final java.util.Optional<String> expectedAssessmentDigest;
+
+    /**
+     * A validator that can enforce nothing but DENY_ALL and is bound to no runtime evidence.
+     *
+     * <p>The safe default for the policy set, and the one every caller gets unless it has positively
+     * established otherwise. A default that included ALLOWLIST would mean forgetting to pass the capability
+     * produced a runner that accepted allowlist commands and applied nothing.
      */
     public CommandValidator(ObjectMapper mapper) {
         this(mapper, java.util.Set.of(ALWAYS_ENFORCEABLE));
@@ -101,9 +115,22 @@ public final class CommandValidator {
      *     empty set gets a runner that can still execute the runs that need no network.
      */
     public CommandValidator(ObjectMapper mapper, java.util.Set<String> enforceablePolicies) {
+        this(mapper, enforceablePolicies, java.util.Optional.empty());
+    }
+
+    /**
+     * @param expectedAssessmentDigest the payload digest of the attestation describing THIS runtime. A command
+     *     naming any other evidence is refused, whatever the control plane concluded — which is what stops a
+     *     command authorized against one runtime's evidence from executing on another
+     */
+    public CommandValidator(
+            ObjectMapper mapper,
+            java.util.Set<String> enforceablePolicies,
+            java.util.Optional<String> expectedAssessmentDigest) {
         java.util.Set<String> policies = new java.util.LinkedHashSet<>(enforceablePolicies);
         policies.add(ALWAYS_ENFORCEABLE);
         this.enforceablePolicies = java.util.Set.copyOf(policies);
+        this.expectedAssessmentDigest = expectedAssessmentDigest;
         initialize(mapper);
     }
 
@@ -184,6 +211,25 @@ public final class CommandValidator {
             throw new CommandRejected(
                     "This runner cannot enforce the network policy " + networkType
                             + "; enforceable here: " + enforceablePolicies + ".");
+        }
+
+        // THE RUNNER'S OWN REFUSAL OF FOREIGN EVIDENCE.
+        //
+        // The control plane verified an attestation and bound its digest into this command. That is one
+        // party's decision, made about a runtime it cannot see. This one is made by the runtime itself: a
+        // command naming evidence other than the evidence describing THIS runner is refused here.
+        //
+        // What it defeats is a command reaching the wrong place — routed to another runner, or issued before
+        // this one was re-assessed. Neither depends on the control plane getting the routing right, and
+        // neither is something control-plane verification can notice.
+        if (expectedAssessmentDigest.isPresent()) {
+            String named = text(sandbox, "assessmentDigest");
+            if (!java.security.MessageDigest.isEqual(
+                    named.getBytes(StandardCharsets.UTF_8),
+                    expectedAssessmentDigest.orElseThrow().getBytes(StandardCharsets.UTF_8))) {
+                throw new CommandRejected(
+                        "This command names security evidence that does not describe this runtime.");
+            }
         }
 
         String engineType = text(engine, "type");

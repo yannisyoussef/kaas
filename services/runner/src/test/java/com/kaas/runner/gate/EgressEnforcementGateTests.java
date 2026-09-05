@@ -43,13 +43,19 @@ class EgressEnforcementGateTests {
                         generation)
                 .assess();
 
-        Set<String> emitted = new LinkedHashSet<>(checks.stream().map(SecurityCheck::control).toList());
+        // The image the gate observed travels WITH its verdicts, so this cannot be an assessment whose
+        // controls came from one run and whose image identity came from another.
+        assertThat(checks.proxyImageReference())
+                .as("an assessment that passed must be able to name the image it demonstrated")
+                .isPresent();
+        Set<String> emitted =
+                new LinkedHashSet<>(checks.checks().stream().map(SecurityCheck::control).toList());
         assertThat(emitted)
                 .as("the control plane refuses an allowlist unless the assessment covers exactly this set, so "
                         + "a control that is computed but never added is a control the platform will demand "
                         + "and never receive")
                 .isEqualTo(contractedEgressControls());
-        assertThat(checks)
+        assertThat(checks.checks())
                 .as("a development host running these tests can enforce an allowlist; if it cannot, the "
                         + "evidence here says which control failed rather than leaving it to be guessed")
                 .allSatisfy(check -> assertThat(check.verdict())

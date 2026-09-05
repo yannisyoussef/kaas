@@ -7,7 +7,6 @@ import com.kaas.api.KaasApiApplication;
 import com.kaas.api.controlplane.application.PendingRunScheduler;
 import com.kaas.api.controlplane.application.RunClaimService;
 import com.kaas.api.controlplane.domain.ExecutionDispatch;
-import com.kaas.api.execution.domain.SandboxSecurityAttestation;
 import com.kaas.runner.command.CommandRejected;
 import com.kaas.runner.command.CommandValidator;
 import com.nimbusds.jose.JWSAlgorithm;
@@ -99,6 +98,9 @@ class CommandValidationPipelineTests {
     @DynamicPropertySource
     static void attestation(DynamicPropertyRegistry registry) {
         registry.add("kaas.execution.sandbox-attestation", () -> validAttestation(Instant.now()));
+        registry.add("kaas.execution.attestation-trusted-keys", ProducedAttestation::trustedKeys);
+        registry.add(
+                "kaas.execution.attestation-runtime-subjects", () -> ProducedAttestation.RUNTIME_SUBJECT);
     }
 
     private final HttpClient http = HttpClient.newHttpClient();
@@ -335,34 +337,13 @@ class CommandValidationPipelineTests {
      * that wants the allowlist path has to say so.
      */
     private static String validAttestation(Instant assessedAt, Map<String, String> egress) {
-        Map<String, String> controls = new TreeMap<>();
-        SandboxSecurityAttestation.REQUIRED_MANDATORY_CONTROLS.forEach(control -> controls.put(control, "PASS"));
-        String probe = "sha256:" + "a".repeat(64);
-        Instant truncated = assessedAt.truncatedTo(ChronoUnit.SECONDS);
-        var draft = new SandboxSecurityAttestation(
-                SandboxSecurityAttestation.SCHEMA_VERSION,
-                "kaas.sandbox.v1", probe, "docker", truncated, controls, egress, "");
-        StringBuilder json = new StringBuilder("{\"schemaVersion\":\"")
-                .append(SandboxSecurityAttestation.SCHEMA_VERSION)
-                .append("\",\"securityProfileVersion\":\"kaas.sandbox.v1\",\"probeImageDigest\":\"")
-                .append(probe)
-                .append("\",\"runtime\":\"docker\",\"assessedAt\":\"")
-                .append(truncated)
-                .append("\",\"mandatoryControls\":{");
-        json.append(asJsonBody(controls)).append("}");
-        if (!egress.isEmpty()) {
-            json.append(",\"egressControls\":{").append(asJsonBody(new TreeMap<>(egress))).append("}");
-        }
-        return json.append(",\"digest\":\"").append(draft.expectedDigest()).append("\"}")
-                .toString();
+        // Produced by the RUNNER's producer and verified by the CONTROL PLANE's verifier. Two independent
+        // implementations of one written contract, meeting for the first time in this module.
+        return egress.isEmpty()
+                ? ProducedAttestation.mandatoryOnly("kaas.sandbox.v1", assessedAt)
+                : ProducedAttestation.withEgress("kaas.sandbox.v1", assessedAt);
     }
 
-    private static String asJsonBody(Map<String, String> entries) {
-        return entries.entrySet().stream()
-                .map(entry -> "\"" + entry.getKey() + "\":\"" + entry.getValue() + "\"")
-                .reduce((left, right) -> left + "," + right)
-                .orElseThrow();
-    }
 
     private static KeyPair keyPair() {
         try {

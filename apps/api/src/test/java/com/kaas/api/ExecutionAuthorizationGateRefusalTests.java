@@ -114,7 +114,20 @@ class ExecutionAuthorizationGateRefusalTests {
                 org.springframework.test.context.DynamicPropertyRegistry registry) {
             registry.add(
                     "kaas.execution.sandbox-attestation",
-                    () -> ExecutionSecurityGateDependencyTests.failingAttestation(java.time.Instant.now()));
+                    () -> com.kaas.api.execution.SignedAttestationFixture.signed(
+                            com.kaas.api.execution.SignedAttestationFixture
+                                    .builder("kaas.sandbox.v1", java.time.Instant.now())
+                                    .withMandatoryControl("NO_DOCKER_SOCKET", "FAIL")));
+            // A SIGNED failure. The document is authentic — a pinned key really did produce it — and it says
+            // the sandbox is broken. Authenticity and sufficiency are different questions, and this class is
+            // about the second one.
+            registry.add(
+                    "kaas.execution.attestation-trusted-keys",
+                    () -> com.kaas.api.execution.SignedAttestationFixture.trustedKeys(
+                            com.kaas.api.execution.SignedAttestationFixture.KEY_ID));
+            registry.add(
+                    "kaas.execution.attestation-runtime-subjects",
+                    () -> com.kaas.api.execution.SignedAttestationFixture.RUNTIME_SUBJECT);
         }
 
         @Test

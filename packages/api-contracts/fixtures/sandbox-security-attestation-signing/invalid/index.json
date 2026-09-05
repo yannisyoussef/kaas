@@ -1,0 +1,24 @@
+{
+  "$comment": "What each negative vector mutates and why it must be refused. The explanations live HERE and not inside the documents: a comment property inside an artifact is an unknown property, which made every negative refuse as MALFORMED and left each one's actual reason untested.",
+  "vectors": {
+    "tampered-mandatory-verdict": "A mandatory verdict changed by one trailing space. Length prefixing means even whitespace changes the preimage.",
+    "dropped-mandatory-control": "A control removed. The count is emitted before the entries, so a shorter list cannot pass as the signed one.",
+    "tampered-egress-verdict": "An egress verdict flipped. Egress controls are inside the signature exactly so this is detectable.",
+    "tampered-assessed-at": "One second later. Freshness cannot be extended by editing the artifact.",
+    "tampered-profile-version": "Evidence taken under the airgapped profile relabelled as the networked one.",
+    "tampered-probe-image-digest": "A different probe image. The whole assessment describes what that image did.",
+    "tampered-proxy-image-digest": "A different proxy image behind an unchanged EGRESS_PROXY_IMAGE_PINNED=PASS.",
+    "tampered-runtime": "A different runtime family claiming the same observations.",
+    "tampered-runtime-subject": "Evidence from one runtime relabelled for another. THE host-A-authorizes-host-B case.",
+    "tampered-runtime-generation": "A different runtime instance.",
+    "tampered-payload-digest": "The digest edited to match nothing. Recomputed, never trusted.",
+    "tampered-signature": "One character of the signature. The payload is untouched, so only signature verification can refuse it.",
+    "key-id-does-not-match-signature": "Claims key 2; signed by key 1. keyId is inside the preimage, so the digest changes too.",
+    "signed-by-a-different-trusted-key": "Claims key 1 and carries key 2's signature over the SAME payload. The digest matches; only resolving exactly one key by id refuses it. A verifier that tried every trusted key would accept this.",
+    "unknown-key-id": "A key id nothing is pinned for. A key id is not authority.",
+    "wrong-algorithm": "A different algorithm identifier. The verifier accepts exactly ED25519 and does not dispatch.",
+    "missing-signature": "No signature at all. Absent evidence is not a pass.",
+    "unknown-property": "An undefined top-level property. FAIL_ON_UNKNOWN_PROPERTIES does not apply to tree parsing, so this needs an explicit allowlist.",
+    "unsigned-v2": "The old unsigned document. Refused outright: no fallback path and no migration window."
+  }
+}
