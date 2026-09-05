@@ -187,6 +187,30 @@ public enum ExecutionRuntimeType {
         return this == GVISOR;
     }
 
+    /**
+     * The wall-clock deadline this runtime needs to do the same work the baseline does in {@code baseline}.
+     *
+     * <p>A mediating runtime interposes on every syscall the workload makes, and that is not free: trivial
+     * container starts measured roughly 3x slower, and the memory probe — which allocates until the ceiling
+     * stops it — ran past a 30-second deadline calibrated for the baseline and was killed at
+     * {@code PT30.2S} with no exit status at all.
+     *
+     * <p>The consequence is worth stating plainly, because it looks like a resource-limit failure and is not
+     * one. The sandbox <em>was</em> bounded — run by hand under this runtime the same probe exits 137 with
+     * the daemon reporting {@code OOMKilled=true}, exactly as under the baseline. What failed was the
+     * observation: the deadline fired first, so the evidence of the memory ceiling never arrived and the
+     * check reported the control unproven. A deadline that truncates the workload turns every slower control
+     * into a timeout, and the gate then reports something other than what it is measuring.
+     *
+     * <p>Scaling the deadline is not a relaxation of {@code WALL_CLOCK_TIMEOUT}: that control asserts the
+     * launcher enforces <em>its own</em> deadline, whatever the deadline is, and it is proven against this
+     * value rather than against a constant. What would be a relaxation is leaving the deadline where it is
+     * and reading the resulting silence as a pass.
+     */
+    public java.time.Duration scaleDeadline(java.time.Duration baseline) {
+        return this == GVISOR ? baseline.multipliedBy(3) : baseline;
+    }
+
     /** Whether this runtime is the one ADR-022 requires before hostile tenant content could be considered. */
     public boolean mediatesHostKernelSyscalls() {
         return this == GVISOR;

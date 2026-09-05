@@ -116,4 +116,19 @@ class StrongRuntimeUnavailableTests {
     }
 
     private static final String PINNED = "sha256:" + "a".repeat(64);
+    @Test
+    void theMediatingRuntimeGetsALongerDeadlineAndTheBaselineDoesNot() {
+        // The deadline is a profile value, so a scaling that quietly applied to both would go unnoticed --
+        // and the baseline's 30 seconds is what several of its own controls are measured against.
+        var baseline = SandboxSecurityProfile.version1(PINNED, ExecutionRuntimeType.DOCKER);
+        var mediated = SandboxSecurityProfile.version1(PINNED, ExecutionRuntimeType.GVISOR);
+
+        assertThat(baseline.wallClockTimeout()).isEqualTo(java.time.Duration.ofSeconds(30));
+        assertThat(mediated.wallClockTimeout())
+                .as("the mediating runtime interposes on every syscall; a deadline calibrated for the "
+                        + "baseline killed the memory probe before it could report the ceiling that had "
+                        + "already bounded it")
+                .isGreaterThan(baseline.wallClockTimeout());
+    }
+
 }

@@ -274,7 +274,10 @@ public record SandboxSecurityProfile(
                 100_000,
                 64,
                 16L * 1024 * 1024,
-                Duration.ofSeconds(30),
+                // Scaled to what the runtime needs, not a constant. See ExecutionRuntimeType#scaleDeadline:
+                // a deadline calibrated for the baseline killed the memory probe under the mediating runtime
+                // before it could report the ceiling that had already bounded it.
+                runtime.scaleDeadline(Duration.ofSeconds(30)),
                 64 * 1024,
                 // What the daemon may write to host disk for this sandbox. Separate from the output ceiling
                 // above, which bounds only what the launcher keeps in memory: the daemon's own copy is written
