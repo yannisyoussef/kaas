@@ -591,17 +591,51 @@ one verdict flipped  →   DIGEST_MISMATCH
 
 ## 39. GitHub Actions verification
 
-*To be recorded once pushed.* This slice modifies `.github/workflows/ci.yml`, and the `gh` credential in this
-environment still lacks the `workflow` scope — the same operational issue kaas-13 hit. The fix is one operator
-command, `gh auth refresh -h github.com -s workflow`; history must not be rewritten, the workflow change must
-not be dropped, and the gate must not be bypassed to get around it.
+**Run [33972994224](https://github.com/yannisyoussef/kaas/actions/runs/33972994224), commit `48f2442`,
+conclusion `success`.** Two commits: `1ee0d17` (mechanism, 85 files) and `48f2442` (documentation, 9 files).
 
-What will be recorded: final commit SHA, workflow run ID, all seven job conclusions, and the executed and
-skipped counts read from **each gate's own evidence-inspection step** rather than from a Gradle summary.
+| Job | Conclusion |
+|---|---|
+| `backend` | **success** |
+| `hostile-execution-gate` | **success** |
+| `synthetic-execution-pipeline` | **success** |
+| `execution-egress-gate` | **success** |
+| `web` | **success** |
+| `contracts` | **success** |
+| `infrastructure` | **success** |
+
+**Evidence read from each gate's own inspection step, not from a Gradle summary:**
+
+```
+hostile-execution-gate         executed=139  skipped=0
+  produced and verified:       verification=VALID
+                               mandatoryControls=16
+                               controlsNotPassing=[]
+                               authorizes=true
+  tampered document:           verification=DIGEST_MISMATCH   ← the negative, on a real runner
+execution-egress-gate          executed=35   skipped=0   containers=0  networks=0
+synthetic-execution-pipeline   executed=33   skipped=0
+```
+
+The hostile gate's count rose from 116 to 139 with this slice's tests, and every one of the 23 new ones ran on
+that runner rather than being satisfied by a cache — `cleanTest` precedes the suite, and the attestation the
+verification step checked was produced by the gate run immediately above it.
+
+**The whole chain ran on a machine that is not this one.** The producer built a probe image, launched a
+sandbox under the hardened profile, signed what it observed, and the control plane's own verifier accepted it
+and then refused the same document with one verdict flipped. That is the slice's central claim, demonstrated
+on a host nobody configured for it.
+
+**The push was not blocked this time.** kaas-13 recorded that the `gh` credential lacked the `workflow` scope
+and that a commit touching `.github/workflows/ci.yml` could not be pushed; that scope is now present, and this
+slice's workflow change pushed normally. No history was rewritten and no gate was bypassed to achieve it.
+
+**The kaas-13 §39 flake did not reproduce.** The `backend` job ran the same suites on a clean Linux runner and
+passed. That observation stands as recorded there — one more data point, not a clearance.
 
 ## 40. Required-check governance
 
-Unchanged at seven: `backend`, `hostile-execution-gate`, `synthetic-execution-pipeline`,
+All seven ran and passed on run 33972994224. Unchanged at seven: `backend`, `hostile-execution-gate`, `synthetic-execution-pipeline`,
 `execution-egress-gate`, `web`, `contracts`, `infrastructure`. No job was added — the attestation evidence
 belongs to `hostile-execution-gate`, which already owns the claim it authenticates.
 
