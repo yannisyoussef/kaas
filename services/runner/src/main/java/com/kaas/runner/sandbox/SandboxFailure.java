@@ -10,6 +10,21 @@ package com.kaas.runner.sandbox;
 public enum SandboxFailure {
     /** The sandbox could not be created. Configuration, image, or daemon refusal. */
     SANDBOX_CREATE_FAILED,
+    /**
+     * The runtime this sandbox was authorized to run under is not available on this host, or the daemon
+     * assigned a different one.
+     *
+     * <p>Distinct from {@link #SANDBOX_CREATE_FAILED} because it is not a launch problem, it is a
+     * <em>security</em> condition: the platform cannot confine this workload the way its authorization
+     * requires. Folding the two together would tell an operator to look at the image or the daemon when the
+     * answer is that the host is missing a runtime.
+     *
+     * <p>It is a refusal in every case and never a downgrade. A workload authorized for a mediating runtime
+     * that ran under the baseline would look identical in every observable respect except the only one that
+     * mattered — every mandatory control would genuinely pass, the result would be submitted, and the run
+     * would complete inside a boundary ADR-022 says is not sufficient.
+     */
+    SANDBOX_RUNTIME_UNAVAILABLE,
     /** Created but could not start. */
     SANDBOX_START_FAILED,
     /** Exceeded its wall-clock deadline and was terminated by the launcher. */

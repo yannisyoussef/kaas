@@ -315,6 +315,113 @@ jobs:
           docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f
           docker network ls -q --filter label=kaas.managed=true | xargs -r docker network rm
 
+  # The security gate, run under the MEDIATING RUNTIME rather than the baseline one.
+  #
+  # A separate mandatory job for the same reasons as the two gates above, plus one specific to it: the runtime
+  # cannot be installed on macOS/Docker Desktop, so this is the ONLY place the stronger boundary is ever
+  # exercised. A green local build proves nothing about it.
+  #
+  #   1. No job-level `if:`, no `continue-on-error`, no path or branch filter. A required check is satisfied by
+  #      success, skipped, OR neutral, so a job that skipped itself when runsc was absent would be
+  #      indistinguishable from one that proved a workload was confined by it.
+  #   2. Missing runtime FAILS. The suite asserts the daemon has it before running anything, so "not installed"
+  #      is a red gate rather than an empty one.
+  #   3. Its name is `strong-runtime-gate` and must stay globally unique, because required-check resolution
+  #      matches on job name alone.
+  strong-runtime-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      # A PINNED release and a digest recorded in this repository, not `latest` and not a piped installer.
+      # The digest is what makes the artifact identity a property of the repository rather than of whatever
+      # the bucket serves today; the publisher's own checksum is not an independent check, because it comes
+      # from the same place as the artifact.
+      - name: Install the pinned mediating runtime
+        env:
+          GVISOR_RELEASE: "20240729"
+          RUNSC_SHA256: "f03d44a443438ac5efec51b7b12b3b6315d94f84529a1e4693b4b573f521306d"
+        run: |
+          set -euo pipefail
+          arch=$(uname -m)
+          if [ "$arch" != "x86_64" ]; then
+            echo "The pinned digest below is for x86_64; this runner is $arch." >&2
+            exit 1
+          fi
+          url="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/${arch}"
+          curl -fsSL "${url}/runsc" -o /tmp/runsc
+          echo "${RUNSC_SHA256}  /tmp/runsc" | sha256sum -c -
+          sudo install -o root -g root -m 0755 /tmp/runsc /usr/local/bin/runsc
+          runsc --version
+
+      - name: Register it with the daemon
+        run: |
+          set -euo pipefail
+          # Registered as a NAMED runtime rather than made the default. The baseline runtime stays available
+          # and stays the default: the trusted probe suites, the egress topology and the synthetic pipeline all
+          # exercise it deliberately, and a host where every container silently became mediated would be a host
+          # where the comparison this slice rests on no longer exists.
+          sudo mkdir -p /etc/docker
+          echo '{"runtimes":{"runsc":{"path":"/usr/local/bin/runsc"}}}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          docker info --format '{{range $k,$v := .Runtimes}}{{$k}} {{end}}' | tee /tmp/runtimes.txt
+          grep -q runsc /tmp/runtimes.txt
+
+      # cleanTest-equivalent: the task is deleted before it runs, so an UP-TO-DATE result cannot satisfy this
+      # gate. A cached pass would report green without having started a single mediated container.
+      - run: ./gradlew cleanStrongRuntimeTest :services:runner:strongRuntimeTest --no-daemon
+
+      - name: Confirm the gate actually produced evidence
+        run: |
+          set -euo pipefail
+          results=services/runner/build/test-results/strongRuntimeTest
+          if [ ! -d "$results" ]; then
+            echo "No test results were produced; the gate did not run." >&2
+            exit 1
+          fi
+          executed=$(cat "$results"/*.xml | grep -o 'tests="[0-9]*"' | grep -o '[0-9]*' | awk '{n+=$1} END {print n+0}')
+          skipped=$(cat "$results"/*.xml | grep -o 'skipped="[0-9]*"' | grep -o '[0-9]*' | awk '{n+=$1} END {print n+0}')
+          echo "executed=$executed skipped=$skipped"
+          # Zero skips is the load-bearing half. A suite that skipped itself because the runtime was absent is
+          # exactly the outcome this job exists to make impossible.
+          if [ "$executed" -lt 5 ] || [ "$skipped" -ne 0 ]; then
+            echo "Expected at least 5 executed tests and no skips." >&2
+            exit 1
+          fi
+          if ! ls "$results" | grep -q StrongRuntimeBoundaryTests; then
+            echo "StrongRuntimeBoundaryTests did not run." >&2
+            exit 1
+          fi
+
+      - name: Confirm nothing outlived the run
+        run: |
+          set -euo pipefail
+          containers=$(docker ps -aq --filter label=kaas.managed=true | wc -l | tr -d ' ')
+          networks=$(docker network ls -q --filter label=kaas.managed=true | wc -l | tr -d ' ')
+          # A mediated sandbox leaves a sentry process behind if the container is not reaped, so this is not
+          # only about Docker objects.
+          sentries=$(pgrep -c runsc || true)
+          echo "containers=$containers networks=$networks runsc_processes=${sentries:-0}"
+          if [ "$containers" -ne 0 ] || [ "$networks" -ne 0 ] || [ "${sentries:-0}" -ne 0 ]; then
+            echo "Resources outlived the suite." >&2
+            exit 1
+          fi
+
+      - name: Remove anything left behind by a failed run
+        if: always()
+        run: |
+          docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f
+          docker network ls -q --filter label=kaas.managed=true | xargs -r docker network rm
+
   web:
     runs-on: ubuntu-latest
     timeout-minutes: 15

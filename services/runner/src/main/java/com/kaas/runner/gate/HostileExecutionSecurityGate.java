@@ -3,6 +3,7 @@ package com.kaas.runner.gate;
 import com.kaas.runner.gate.SecurityCheck.Enforcement;
 import com.kaas.runner.gate.SecurityCheck.Verdict;
 import com.kaas.runner.sandbox.SandboxLaunchRequest;
+import com.kaas.runner.sandbox.ExecutionRuntimeType;
 import com.kaas.runner.sandbox.SandboxLauncher;
 import com.kaas.runner.sandbox.SandboxOutcome;
 import com.kaas.runner.sandbox.SyntheticProbe;
@@ -93,6 +94,7 @@ public final class HostileExecutionSecurityGate {
         checks.add(memoryCheck(run(SyntheticProbe.MEMORY)));
         checks.add(timeoutCheck(run(SyntheticProbe.SLEEP)));
         checks.add(outputCheck(run(SyntheticProbe.OUTPUT)));
+        checks.add(runtimeCheck(inspect));
         return new HostileExecutionAssessment(
                 launcher.profile().version(), runtime, Instant.now(), checks);
     }
@@ -359,6 +361,65 @@ public final class HostileExecutionSecurityGate {
                 "truncated=" + outcome.outputTruncated() + " retained_bytes=" + outcome.retainedBytes()
                         + " ceiling=" + launcher.profile().maximumOutputBytes());
     }
+
+    /**
+     * Whether the sandbox is really running under the runtime the profile demanded.
+     *
+     * <h2>Two observations, from two sides, on purpose</h2>
+     *
+     * <p>The launcher already read back {@code HostConfig.Runtime} from the daemon and refused to start
+     * anything if it disagreed. That is the daemon answering a question about itself: it says which runtime
+     * was <em>assigned</em>. This is the workload reporting what is actually underneath it.
+     *
+     * <p>gVisor serves a fixed synthetic kernel version that no ordinary host reports, and a container cannot
+     * choose what {@code uname -r} says about it. So a {@code runc} container cannot produce this marker
+     * unless the host kernel genuinely is that version — which makes "requested runsc" and "running under
+     * runsc" two separately falsifiable claims rather than the same claim counted twice.
+     *
+     * <p>For the baseline runtime there is no marker to look for: whatever kernel the host runs is not a
+     * property this platform gets to assert, and inventing an assertion about it would be a control that
+     * passes for reasons nobody chose. The check reports {@code UNSUPPORTED} there — not a pass, and not
+     * required of the baseline either, because {@link Enforcement#DEPLOYMENT_SPECIFIC} controls never block.
+     */
+    private SecurityCheck runtimeCheck(SandboxOutcome inspect) {
+        ExecutionRuntimeType expected = launcher.profile().runtime();
+        String observed = inspect.observation("runtime_kernel_release").orElse("");
+        if (!inspect.evidenceIsComplete() || observed.isEmpty()) {
+            // Unusable evidence is not a pass. A probe that could not report its kernel tells us nothing
+            // about which kernel served it.
+            return check(
+                    RUNTIME_MEDIATION_CONTROL,
+                    expected.mediatesHostKernelSyscalls() ? Enforcement.MANDATORY : Enforcement.DEPLOYMENT_SPECIFIC,
+                    Verdict.FAIL,
+                    "the sandbox did not report which kernel served it");
+        }
+        return expected
+                .inSandboxKernelMarker()
+                .map(marker -> check(
+                        RUNTIME_MEDIATION_CONTROL,
+                        Enforcement.MANDATORY,
+                        // Exact prefix on the marker, not a substring search anywhere in the string: a host
+                        // kernel whose version merely CONTAINS the marker somewhere must not satisfy this.
+                        observed.startsWith(marker) ? Verdict.PASS : Verdict.FAIL,
+                        observed.startsWith(marker)
+                                ? "the sandbox reports the mediating runtime's own kernel"
+                                : "the sandbox reports a kernel this runtime does not serve"))
+                .orElseGet(() -> check(
+                        RUNTIME_MEDIATION_CONTROL,
+                        Enforcement.DEPLOYMENT_SPECIFIC,
+                        Verdict.UNSUPPORTED,
+                        "the baseline runtime asserts no kernel identity of its own"));
+    }
+
+    /**
+     * The control naming the property a stronger runtime exists to provide.
+     *
+     * <p>Named for what is observed rather than for the product that provides it. A control called
+     * {@code RUNTIME_GVISOR} would have to be renamed the day a second mediating runtime is supported, and
+     * every attestation in existence would stop satisfying the coverage rule for a reason that has nothing to
+     * do with security.
+     */
+    public static final String RUNTIME_MEDIATION_CONTROL = "HOST_KERNEL_SYSCALL_MEDIATION";
 
     private SecurityCheck check(String control, Enforcement enforcement, Verdict verdict, String evidence) {
         return new SecurityCheck(control, verdict, enforcement, evidence);

@@ -231,7 +231,35 @@ class HostileExecutionBoundaryTests {
         assertThat(assessment.checks())
                 .filteredOn(check -> check.enforcement() == SecurityCheck.Enforcement.DEPLOYMENT_SPECIFIC)
                 .extracting(SecurityCheck::control)
-                .containsExactlyInAnyOrder("SECCOMP_FILTER", "USER_NAMESPACE");
+                .containsExactlyInAnyOrder(
+                        "SECCOMP_FILTER",
+                        "USER_NAMESPACE",
+                        // Deployment-specific UNDER THE BASELINE RUNTIME, and mandatory under a mediating one.
+                        // The baseline asserts no kernel identity of its own — whatever the host runs is not a
+                        // property this platform gets to claim — so there is nothing here to demand. Under
+                        // gVisor the same control is MANDATORY and is what distinguishes "the daemon said
+                        // runsc" from "runsc is actually underneath this workload".
+                        "HOST_KERNEL_SYSCALL_MEDIATION");
+    }
+
+    @Test
+    @Timeout(600)
+    void theBaselineRuntimeClaimsNoMediation() throws Exception {
+        var assessment = new HostileExecutionSecurityGate(launcher, "docker").assess();
+
+        var mediation = assessment.checks().stream()
+                .filter(check -> HostileExecutionSecurityGate.RUNTIME_MEDIATION_CONTROL.equals(check.control()))
+                .findFirst()
+                .orElseThrow();
+
+        // UNSUPPORTED, not PASS and not FAIL. Standard Docker does not mediate host syscalls and this
+        // assessment says so; a PASS here would be the single most misleading verdict this gate could emit,
+        // because every other control would look identical to a genuinely mediated sandbox.
+        assertThat(mediation.verdict()).isEqualTo(SecurityCheck.Verdict.UNSUPPORTED);
+        assertThat(mediation.enforcement()).isEqualTo(SecurityCheck.Enforcement.DEPLOYMENT_SPECIFIC);
+        assertThat(mediation.blocksRelease())
+                .as("the baseline gate must not start failing because a stronger runtime exists")
+                .isFalse();
     }
 
     /** A syntactically valid content address. The profile refuses anything a name could repoint. */
@@ -243,32 +271,32 @@ class HostileExecutionBoundaryTests {
         // validation is something you can forget to call and a constructor is not.
         assertThatThrownBy(() -> new SandboxSecurityProfile(
                         "weak", PINNED, SandboxSecurityProfile.NOBODY, true, true, List.of("ALL"), List.of(),
-                        "bridge", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of()))
+                        "bridge", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("no network");
         assertThatThrownBy(() -> new SandboxSecurityProfile(
                         "weak", PINNED, SandboxSecurityProfile.NOBODY, false, true, List.of("ALL"), List.of(),
-                        "none", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of()))
+                        "none", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new SandboxSecurityProfile(
                         "weak", PINNED, "0:0", true, true, List.of("ALL"), List.of(), "none",
-                        1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of()))
+                        1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new SandboxSecurityProfile(
                         "weak", PINNED, SandboxSecurityProfile.NOBODY, true, true, List.of("ALL"),
-                        List.of("SYS_ADMIN"), "none", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of()))
+                        List.of("SYS_ADMIN"), "none", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER))
                 .isInstanceOf(IllegalArgumentException.class);
         // Swap must be pinned to the memory limit, or a workload evades the ceiling by swapping past it.
         assertThatThrownBy(() -> new SandboxSecurityProfile(
                         "weak", PINNED, SandboxSecurityProfile.NOBODY, true, true, List.of("ALL"), List.of(),
-                        "none", 1024, 4096, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of()))
+                        "none", 1024, 4096, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Swap");
         // A tag is a mutable pointer to executable code. A probe image that can be substituted reports
         // whatever its substitute likes, which would invalidate every behavioural claim the gate makes.
         assertThatThrownBy(() -> new SandboxSecurityProfile(
                         "weak", "busybox:latest", SandboxSecurityProfile.NOBODY, true, true, List.of("ALL"),
-                        List.of(), "none", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of()))
+                        List.of(), "none", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("digest");
     }

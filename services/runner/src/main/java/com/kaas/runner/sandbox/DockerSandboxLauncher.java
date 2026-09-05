@@ -61,6 +61,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
         SandboxOutcome outcome;
         try {
             containerId = create(request);
+            requireRuntimeEnforced(containerId);
             docker.startContainerCmd(containerId).exec();
             outcome = observe(containerId, startedAt);
         } catch (RuntimeException failure) {
@@ -87,6 +88,41 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
             return outcome.withFailure(cleanupFailed.failure());
         }
         return outcome;
+    }
+
+    /**
+     * Reads back which runtime the daemon actually assigned, before the workload starts.
+     *
+     * <p>REQUESTED IS NOT ENFORCED. A daemon with no {@code runsc} runtime registered does not fail the create
+     * call in every configuration, and a misconfigured one can fall through to its default — which is
+     * {@code runc}. That would produce a sandbox that looks identical in every respect except the only one
+     * that mattered, running a workload authorized for a stronger boundary under a weaker one, silently.
+     *
+     * <p>Checked before start rather than after, so a mismatch never runs the workload at all. And it throws
+     * rather than returning a failed outcome: this is not the sandbox misbehaving, it is the platform being
+     * unable to provide the boundary it promised, and there is deliberately no branch here that continues
+     * under the runtime it got.
+     *
+     * <p>This is the launcher's half of the evidence. The other half is observed from <em>inside</em> the
+     * sandbox, because a daemon reporting a runtime name is still the daemon answering a question about
+     * itself.
+     */
+    private void requireRuntimeEnforced(String containerId) {
+        String assigned;
+        try {
+            assigned = docker.inspectContainerCmd(containerId).exec().getHostConfig().getRuntime();
+        } catch (RuntimeException unreadable) {
+            throw new SandboxRuntimeUnavailableException(
+                    "The sandbox runtime could not be read back from the daemon.");
+        }
+        String expected = profile.runtime().daemonRuntimeName();
+        // A null means the daemon reported no explicit runtime, which is the default one. Treated as a
+        // mismatch for anything but the default rather than as "probably fine".
+        if (!expected.equals(assigned)) {
+            throw new SandboxRuntimeUnavailableException(
+                    "The sandbox was assigned runtime " + assigned + " but the profile requires " + expected
+                            + "; refusing rather than running under a boundary that was not authorized.");
+        }
     }
 
     private String create(SandboxLaunchRequest request) {
@@ -129,9 +165,51 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                 // any reason to see, and an empty list cannot be got wrong the way an exclusion list can.
                 .withBinds(List.of())
                 .withPrivileged(false)
+                // WHICH RUNTIME CONFINES THIS. Taken from the profile, never from a caller: the runtime name
+                // is the name of a program the daemon will execute, so a caller who could choose it would be
+                // choosing what runs rather than merely how. Requesting it is not the same as getting it,
+                // which is why requireRuntimeEnforced() reads it back below.
+                .withRuntime(profile.runtime().daemonRuntimeName())
                 .withAutoRemove(false);
 
-        CreateContainerResponse created = docker.createContainerCmd(profile.imageReference())
+        CreateContainerResponse created = createOrRefuse(hostConfig, request);
+        return created.getId();
+    }
+
+    /**
+     * Creates the container, distinguishing "this host has no such runtime" from every other create failure.
+     *
+     * <p>Measured, not assumed: a daemon with no {@code runsc} registered refuses the create outright with
+     * {@code unknown or invalid runtime name}. So an unavailable runtime cannot silently become the default
+     * one — the container is never created at all. This method exists to make that outcome <em>legible</em>
+     * rather than to make it safe; it was already safe.
+     */
+    private CreateContainerResponse createOrRefuse(HostConfig hostConfig, SandboxLaunchRequest request) {
+        try {
+            return createContainer(hostConfig, request);
+        } catch (RuntimeException refused) {
+            if (!runtimeIsRegistered(profile.runtime().daemonRuntimeName())) {
+                throw new SandboxRuntimeUnavailableException(
+                        "This host does not provide the runtime this sandbox was authorized for: "
+                                + profile.runtime().daemonRuntimeName());
+            }
+            throw refused;
+        }
+    }
+
+    /** Whether the daemon knows this runtime at all. Asked only to explain a refusal, never to permit one. */
+    private boolean runtimeIsRegistered(String runtimeName) {
+        try {
+            var registered = docker.infoCmd().exec().getRuntimes();
+            return registered != null && registered.containsKey(runtimeName);
+        } catch (RuntimeException unreachable) {
+            return false;
+        }
+    }
+
+    private CreateContainerResponse createContainer(
+            HostConfig hostConfig, SandboxLaunchRequest request) {
+        return docker.createContainerCmd(profile.imageReference())
                 .withHostConfig(hostConfig)
                 .withUser(profile.runAsUser())
                 .withCmd(request.probe().arguments())
@@ -144,7 +222,6 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                 // would instead have nothing — an allowlist that permits everything and delivers nothing.
                 .withNetworkDisabled("none".equals(profile.networkMode()))
                 .exec();
-        return created.getId();
     }
 
     /**
@@ -274,9 +351,28 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
         if (failure instanceof SandboxCleanupException cleanup) {
             return cleanup.failure();
         }
+        if (failure instanceof SandboxRuntimeUnavailableException) {
+            // Reported as its own category. "This host has no such runtime" and "the image was wrong" send an
+            // operator to entirely different places, and only one of them is a statement about the boundary.
+            return SandboxFailure.SANDBOX_RUNTIME_UNAVAILABLE;
+        }
         // Deliberately coarse. The daemon's own message can carry a socket path, a host directory, or an image
         // reference, none of which belongs in a result a caller or a metric can see.
         return SandboxFailure.SANDBOX_CREATE_FAILED;
+    }
+
+    /**
+     * Signals that the authorized runtime could not be provided, without carrying the daemon's message.
+     *
+     * <p>A distinct type rather than a string match on the daemon's error. Matching on
+     * {@code "unknown or invalid runtime name"} would be matching on another project's user-facing text, which
+     * changes without notice — and the consequence of a missed match here is a security condition reported as
+     * an ordinary launch failure.
+     */
+    public static final class SandboxRuntimeUnavailableException extends RuntimeException {
+        SandboxRuntimeUnavailableException(String message) {
+            super(message);
+        }
     }
 
     /** Signals a cleanup failure without carrying the daemon's message with it. */

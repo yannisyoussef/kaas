@@ -101,6 +101,15 @@ inspect)
     emit gid "$(id -g)"
     emit groups "$(id -G | tr ' ' ',')"
 
+    # WHAT KERNEL IS ACTUALLY SERVING THIS SANDBOX'S SYSCALLS.
+    #
+    # Reported from inside, which is the point. A launcher asking the daemon which runtime it assigned is the
+    # daemon answering a question about itself; this is the workload observing what is underneath it. gVisor
+    # serves a fixed synthetic kernel version that no ordinary host reports, and a container cannot choose
+    # what /proc/version says about it — so "requested runsc" and "actually running under runsc" are
+    # separately observable rather than the same claim twice.
+    emit runtime_kernel_release "$(uname -r 2>/dev/null || echo unknown)"
+
     # Root filesystem must be read-only; the approved tmpfs must not be.
     #
     # The target is a directory this user owns. Writing to "/" would be refused by ordinary permissions even on

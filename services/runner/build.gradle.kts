@@ -118,12 +118,34 @@ val egressSecurityTest = tasks.register<Test>("egressSecurityTest") {
     }
 }
 
+/**
+ * The security gate, run under the mediating runtime.
+ *
+ * <p>Its own task, and deliberately NOT wired into `check`. These need a daemon with `runsc` registered;
+ * Docker Desktop offers no supported way to install a runtime into its embedded VM, so requiring them locally
+ * would break the ordinary build on the primary development platform. The evidence lives in a mandatory CI job
+ * where it cannot be skipped instead.
+ *
+ * <p>The consequence is worth stating rather than leaving to be inferred: **a green local build proves nothing
+ * about the stronger runtime.** Only `strong-runtime-gate` does.
+ */
+val strongRuntimeTest = tasks.register<Test>("strongRuntimeTest") {
+    group = "verification"
+    description = "Runs the hostile-execution probe under the mediating runtime. Requires runsc on the daemon."
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    filter { includeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeBoundaryTests") }
+}
+
 tasks.named<Test>("test") {
     // Excluded here because they run in egressSecurityTest above. Running them in both would double a
     // Docker-heavy suite and put two launchers on one daemon.
     filter {
         excludeTestsMatching("com.kaas.runner.sandbox.Egress*")
         excludeTestsMatching("com.kaas.runner.gate.EgressEnforcementGateTests")
+        // Needs a runtime this host may not have. Excluded here rather than made to skip: a suite that skips
+        // itself when its subject is absent reports the same green as one that proved something.
+        excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeBoundaryTests")
     }
 }
 

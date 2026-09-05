@@ -35,7 +35,16 @@ public record SandboxSecurityProfile(
         Duration wallClockTimeout,
         int maximumOutputBytes,
         long maximumLogBytes,
-        Map<String, String> environment) {
+        Map<String, String> environment,
+        /**
+         * Which container runtime this sandbox runs under.
+         *
+         * <p>Part of the profile rather than a launch argument, for the same reason the image and the network
+         * mode are: a caller that could choose the runtime would be choosing what confines the workload. The
+         * profile version is derived from it, so an attestation gathered under one runtime cannot vouch for a
+         * sandbox under another.
+         */
+        ExecutionRuntimeType runtime) {
 
     /** The only user a sandbox ever runs as: nobody, with no supplementary groups. */
     public static final String NOBODY = "65534:65534";
@@ -164,6 +173,19 @@ public record SandboxSecurityProfile(
         return baseVersion + NETWORKED_SUFFIX;
     }
 
+    /**
+     * The base profile version for one runtime.
+     *
+     * <p>Two runtimes are two boundaries, so they are two profile versions. Several mandatory controls read
+     * identically under both and mean something different — {@code KERNEL_PATHS_MASKED} is a bind mount over
+     * {@code /dev/null} under {@code runc} and an unimplemented path under gVisor — so an assessment gathered
+     * under one must not be able to satisfy an execution under the other. Deriving the version from the
+     * runtime is what makes that impossible rather than merely discouraged.
+     */
+    public static String versionFor(ExecutionRuntimeType runtime) {
+        return runtime.profileVersion();
+    }
+
     /** What distinguishes the networked derivative from its base. One place, so the two cannot drift. */
     private static final String NETWORKED_SUFFIX = "-internal";
 
@@ -182,7 +204,17 @@ public record SandboxSecurityProfile(
      */
     public static SandboxSecurityProfile version1OnNetwork(
             String imageReference, String networkName, Map<String, String> egressEnvironment) {
-        SandboxSecurityProfile base = version1(imageReference);
+        return version1OnNetwork(
+                imageReference, networkName, egressEnvironment, ExecutionRuntimeType.DOCKER);
+    }
+
+    /** The networked profile under a named runtime. Same controls, same peer, different boundary. */
+    public static SandboxSecurityProfile version1OnNetwork(
+            String imageReference,
+            String networkName,
+            Map<String, String> egressEnvironment,
+            ExecutionRuntimeType runtime) {
+        SandboxSecurityProfile base = version1(imageReference, runtime);
         if (networkName == null || !networkName.startsWith(ExecutionNetwork.NAME_PREFIX)) {
             throw new IllegalArgumentException("A networked sandbox joins a per-execution internal network.");
         }
@@ -206,12 +238,29 @@ public record SandboxSecurityProfile(
                 base.wallClockTimeout(),
                 base.maximumOutputBytes(),
                 base.maximumLogBytes(),
-                Map.copyOf(environment));
+                Map.copyOf(environment),
+                // The runtime is carried through unchanged. A networked derivative is the SAME boundary with a
+                // peer added; deriving it from a different runtime would silently be a different boundary.
+                base.runtime());
     }
 
+    /** The baseline profile, under the standard OCI runtime. */
     public static SandboxSecurityProfile version1(String imageReference) {
+        return version1(imageReference, ExecutionRuntimeType.DOCKER);
+    }
+
+    /**
+     * The same controls, under a named runtime.
+     *
+     * <p>Every ceiling, mount, capability and user below is identical whichever runtime is chosen — the
+     * profile describes what the platform demands, and the runtime describes what enforces it. What differs is
+     * the version string, because the same control can be enforced by different mechanisms and observed
+     * through different evidence, and an assessment must not be transferable between them.
+     */
+    public static SandboxSecurityProfile version1(
+            String imageReference, ExecutionRuntimeType runtime) {
         return new SandboxSecurityProfile(
-                "kaas.sandbox.v1",
+                versionFor(runtime),
                 imageReference,
                 NOBODY,
                 true,
@@ -233,6 +282,7 @@ public record SandboxSecurityProfile(
                 8L * 1024 * 1024,
                 // An explicit allowlist built from nothing, never the host environment with secrets removed
                 // afterwards. Subtraction requires knowing every name worth removing, which nobody does.
-                Map.of("KAAS_SANDBOX", "1", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"));
+                Map.of("KAAS_SANDBOX", "1", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+                runtime);
     }
 }
