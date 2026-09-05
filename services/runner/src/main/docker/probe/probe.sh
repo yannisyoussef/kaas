@@ -196,6 +196,22 @@ inspect)
     done
     emit kernel_paths_present "$kernel_paths_present"
 
+    # For a path that exists and is NOT overmounted, whether it actually yields anything.
+    #
+    # gVisor presents a synthetic /sys/firmware that no runtime overmounts, because there is nothing behind it
+    # to hide. An empty directory is not an exposed kernel internal, and failing it would be failing a sandbox
+    # for being stricter. A NON-empty one is the systempaths=unconfined case and must still fail, so the
+    # distinction is emptiness rather than existence.
+    kernel_paths_nonempty=""
+    for kernel_path in /proc/kcore /proc/keys /proc/timer_list /proc/scsi /sys/firmware; do
+        if [ -d "$kernel_path" ]; then
+            [ -n "$(ls -A "$kernel_path" 2>/dev/null)" ] && kernel_paths_nonempty="$kernel_paths_nonempty$kernel_path,"
+        elif [ -f "$kernel_path" ]; then
+            [ -s "$kernel_path" ] && kernel_paths_nonempty="$kernel_paths_nonempty$kernel_path,"
+        fi
+    done
+    emit kernel_paths_nonempty "$kernel_paths_nonempty"
+
     # The environment must be an explicit allowlist, not an inheritance. Names only, never values:
     # a leaked secret must not be copied into the evidence by the check that detects it.
     emit env_names "$(env | cut -d= -f1 | sort | tr '\n' ',')"

@@ -173,6 +173,67 @@ class StrongRuntimeBoundaryTests {
                 .isEqualTo(baselineControls);
     }
 
+    /**
+     * The proof that the process ceiling is what bounds the sandbox, which each assessment can no longer make
+     * on its own under this runtime.
+     *
+     * <p>The baseline gate establishes causation by requiring the fork loop to stop <em>at</em> the ceiling —
+     * a run stopped by the memory cgroup at some unrelated number cannot satisfy that. Under the mediating
+     * runtime the sentry's own threads draw on the same {@code pids.max} budget, so the loop legitimately
+     * stops well short of it, and the per-assessment check has to fall back to "a bound exists at or below
+     * the ceiling". That weaker statement is also satisfied by a sandbox bounded by something else entirely.
+     *
+     * <p>So causation is established here instead, once, by moving the ceiling and requiring the stopping
+     * point to move with it. Two runs at different ceilings and nothing else changed: if the bound came from
+     * memory, from a sentry-internal task limit, or from the loop simply running out, both runs would stop at
+     * the same place.
+     */
+    @Test
+    @Timeout(600)
+    @DisplayName("the process bound tracks the configured ceiling rather than something else")
+    void theProcessBoundTracksTheCeiling() {
+        int atSixtyFour = processesStartedUnderPidsLimit(64);
+        int atSixteen = processesStartedUnderPidsLimit(16);
+
+        assertThat(atSixtyFour)
+                .as("a lower ceiling must permit strictly fewer processes; both runs stopping at the same "
+                        + "place would mean something other than the ceiling is what stops them, and the "
+                        + "per-assessment check under this runtime cannot tell the difference")
+                .isGreaterThan(atSixteen);
+        assertThat(atSixteen).as("the loop must still start something at all").isPositive();
+    }
+
+    private static int processesStartedUnderPidsLimit(long pidsLimit) {
+        SandboxSecurityProfile base = SandboxSecurityProfile.version1(
+                SandboxTestSupport.probeImage(), ExecutionRuntimeType.GVISOR);
+        SandboxSecurityProfile withCeiling = new SandboxSecurityProfile(
+                base.version(),
+                base.imageReference(),
+                base.runAsUser(),
+                base.readOnlyRootFilesystem(),
+                base.noNewPrivileges(),
+                base.droppedCapabilities(),
+                base.addedCapabilities(),
+                base.networkMode(),
+                base.memoryLimitBytes(),
+                base.memorySwapLimitBytes(),
+                base.cpuQuotaMicroseconds(),
+                base.cpuPeriodMicroseconds(),
+                pidsLimit,
+                base.temporaryFilesystemBytes(),
+                base.wallClockTimeout(),
+                base.maximumOutputBytes(),
+                base.maximumLogBytes(),
+                base.environment(),
+                base.runtime());
+
+        SandboxOutcome outcome = SandboxTestSupport.launcher(withCeiling, GENERATION)
+                .run(new SandboxLaunchRequest(
+                        SyntheticProbe.PROCESSES, withCeiling.version(), UUID.randomUUID()));
+        assertThat(outcome.failure()).as("%s", outcome).isEmpty();
+        return Integer.parseInt(outcome.observation("processes_started").orElseThrow());
+    }
+
     private static DockerSandboxLauncher launcher() {
         return SandboxTestSupport.launcher(
                 SandboxSecurityProfile.version1(

@@ -174,10 +174,15 @@ public final class HostileExecutionSecurityGate {
         List<String> unexaminedPaths = REQUIRED_MASKED_PATHS.stream()
                 .filter(path -> !kernelPathsExamined.contains(path))
                 .toList();
-        // Present AND not overmounted: the systempaths=unconfined case, still a failure.
+        // Present, not overmounted, AND carrying something. The third condition is what separates a runtime
+        // that never implemented the path (an empty synthetic directory, exposing nothing) from a daemon
+        // started with systempaths=unconfined (the real thing, readable) -- which is the case this check
+        // exists to catch and still fails.
+        Set<String> kernelPathsNonEmpty = outcome.observedSet("kernel_paths_nonempty");
         List<String> exposedKernelPaths = REQUIRED_MASKED_PATHS.stream()
                 .filter(kernelPathsPresent::contains)
                 .filter(path -> !mounts.contains(path))
+                .filter(kernelPathsNonEmpty::contains)
                 .toList();
         // The baseline list plus whatever THIS runtime emulates. Scoped to the runtime on purpose: see
         // ExecutionRuntimeType#emulatedCharacterDevices.
@@ -326,13 +331,23 @@ public final class HostileExecutionSecurityGate {
         long ceiling = launcher.profile().pidsLimit();
         boolean completed = outcome.observation("processes_loop_completed").isPresent();
         boolean stoppedAtCeiling = started > 0 && started <= ceiling && started >= ceiling - 4;
-        boolean bounded = requested > 0 && started < requested && !completed && stoppedAtCeiling;
+        // Under a runtime whose own threads draw on the same budget, stopping short of the ceiling is the
+        // correct behaviour rather than a symptom, so the ceiling comparison is "at or below" instead of
+        // "at". See ExecutionRuntimeType#sharesProcessBudgetWithTheSandbox for what is given up and what
+        // proves it instead.
+        boolean boundedBelowCeiling = started > 0 && started <= ceiling;
+        boolean ceilingHeld = launcher.profile().runtime().sharesProcessBudgetWithTheSandbox()
+                ? boundedBelowCeiling
+                : stoppedAtCeiling;
+        boolean bounded = requested > 0 && started < requested && !completed && ceilingHeld;
         return mandatory(
                 outcome,
                 "PID_LIMIT",
                 bounded,
                 "processes_started=" + started + " processes_requested=" + requested
-                        + " pids_limit=" + ceiling + " loop_completed=" + completed);
+                        + " pids_limit=" + ceiling + " loop_completed=" + completed
+                        + " runtime_shares_budget="
+                        + launcher.profile().runtime().sharesProcessBudgetWithTheSandbox());
     }
 
     private SecurityCheck memoryCheck(SandboxOutcome outcome) {
@@ -430,7 +445,12 @@ public final class HostileExecutionSecurityGate {
      * escalation path in the meantime.
      */
     private SecurityCheck noNewPrivilegesCheck(SandboxOutcome outcome, String noNewPrivs) {
-        if (!launcher.profile().runtime().exposesNoNewPrivilegesFlag() && noNewPrivs == null) {
+        // Blank counts as not reported. The probe emits the key unconditionally and fills it from an awk over
+        // /proc/self/status, so a runtime with no NoNewPrivs line yields an empty VALUE rather than a missing
+        // key -- and testing for null alone silently put the mediating runtime back on the mandatory path,
+        // where it failed on the empty string it was never going to be able to fill.
+        boolean reported = noNewPrivs != null && !noNewPrivs.isBlank();
+        if (!launcher.profile().runtime().exposesNoNewPrivilegesFlag() && !reported) {
             return check(
                     "NO_NEW_PRIVILEGES",
                     Enforcement.DEPLOYMENT_SPECIFIC,

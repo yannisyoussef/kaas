@@ -64,7 +64,9 @@ final class ProducedAttestation {
     private static String produce(
             String profileVersion, Instant assessedAt, EgressEnforcementAssessment egress) {
         List<SecurityCheck> mandatory = new ArrayList<>();
-        RequiredSecurityControls.MANDATORY.forEach(control -> mandatory.add(passing(control)));
+        // Scoped to the profile version this attestation claims, because the required set now differs by
+        // runtime and an artifact carrying the other runtime's controls is one the verifier must refuse.
+        RequiredSecurityControls.mandatoryFor(profileVersion).forEach(c -> mandatory.add(passing(c)));
         // Real assessment objects, not a verdict map. The producer has no API that takes one, which is the
         // point of the slice: a caller who wants to claim a control passed has to produce an assessment
         // saying so, and only a gate produces those.

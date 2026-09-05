@@ -144,10 +144,16 @@ jobs:
             -PkaasAttestationProfileVersion=kaas.sandbox.v1 | tee "$RUNNER_TEMP/verification.txt"
           grep -q '^verification=VALID' "$RUNNER_TEMP/verification.txt"
           grep -q '^authorizes=true' "$RUNNER_TEMP/verification.txt"
-          # THE CONTROLS IN THE ARTIFACT ARE THE CONTROLS THE GATE REQUIRES. Sixteen is the size of the
-          # contracted mandatory set; an artifact with a different number is one whose coverage check would
-          # refuse it, and finding that here beats finding it at an authorization.
-          grep -q '^mandatoryControls=16' "$RUNNER_TEMP/verification.txt"
+          # THE CONTROLS IN THE ARTIFACT ARE THE CONTROLS THE GATE REQUIRES. An artifact with a different
+          # number is one whose coverage check would refuse it, and finding that here beats finding it at an
+          # authorization.
+          #
+          # Read from the contract rather than written here as a number. It was hardcoded to 16 and broke the
+          # moment the mandatory set grew -- a literal in a shell script is a fourth copy of a set that three
+          # modules already have a contract test to keep in agreement.
+          expected=$(python3 -c "import json;print(len(json.load(open('packages/api-contracts/mandatory-sandbox-controls.json'))['controlsByProfileVersion']['kaas.sandbox.v1']))")
+          echo "the contract requires $expected mandatory controls under kaas.sandbox.v1"
+          grep -q "^mandatoryControls=$expected" "$RUNNER_TEMP/verification.txt"
           grep -q '^controlsNotPassing=\[\]' "$RUNNER_TEMP/verification.txt"
 
           # AND THE NEGATIVE. A green verification proves the verifier says yes; only this proves it can say
@@ -446,6 +452,30 @@ jobs:
             echo "inspect: $(docker inspect --format '{{.State.ExitCode}} OOMKilled={{.State.OOMKilled}}' "$name")"
             docker rm -f "$name" >/dev/null
           done
+
+      # The real probe, under both runtimes, with the daemon's own view of how it ended.
+      #
+      # The synthetic loop above completed under both runtimes, so it does not reproduce what the gate sees:
+      # the gate's MEMORY_LIMIT reported memory_allocated_mb absent, OOMKilled false and NO exit code at all,
+      # which is three different kinds of silence and the check cannot be written until it is known which.
+      - name: Measure the real memory probe under both runtimes
+        run: |
+          probe=$(docker build -q services/runner/src/main/docker/probe)
+          for rt in runc runsc; do
+            echo "===== real memory probe runtime=$rt"
+            name=probe-mem-$rt
+            docker run --name "$name" --runtime=$rt --network=none --user 65534:65534 --read-only \
+              --cap-drop=ALL --security-opt=no-new-privileges:true --pids-limit 64 --memory 256m \
+              --memory-swap 256m --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+              "$probe" memory 256 2>&1 | tail -3 || true
+            docker inspect --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}} status={{.State.Status}} error={{.State.Error}}' "$name"
+            docker rm -f "$name" >/dev/null
+          done
+          echo "===== what the inspect probe reports under runsc"
+          docker run --rm --runtime=runsc --network=none --user 65534:65534 --read-only \
+            --cap-drop=ALL --security-opt=no-new-privileges:true --pids-limit 64 --memory 256m \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m "$probe" inspect 2>&1 \
+            | grep -E "kernel_paths|no_new_privs|setuid_binaries|char_device_nodes|runtime_kernel_release" || true
 
       # cleanTest-equivalent: the task is deleted before it runs, so an UP-TO-DATE result cannot satisfy this
       # gate. A cached pass would report green without having started a single mediated container.

@@ -164,6 +164,29 @@ public enum ExecutionRuntimeType {
         return this == DOCKER;
     }
 
+    /**
+     * Whether the runtime's own processes are counted against the sandbox's process ceiling.
+     *
+     * <p>gVisor's sentry is an ordinary host process living in the container's cgroup, so its threads consume
+     * the same {@code pids.max} budget the workload draws on. A ceiling of 64 therefore does not leave 64
+     * processes for the workload — measured on a GitHub-hosted runner, a fork loop under this runtime stopped
+     * at 16–21 rather than 63, and <strong>raising the memory limit from 256m to 512m did not move it</strong>,
+     * which is what rules out the memory cgroup as the thing that bound it.
+     *
+     * <p>The consequence for evidence: the baseline gate proves the ceiling is what stopped the loop by
+     * requiring it to stop <em>at</em> the ceiling, specifically so that a run stopped by the memory cgroup
+     * cannot satisfy it. That test cannot hold here, because stopping short of the ceiling is the correct
+     * behaviour. What each assessment can still establish is that a bound exists and is at or below the
+     * configured one; that the bound <em>tracks</em> the ceiling is proven separately, once, by
+     * {@code StrongRuntimeBoundaryTests} moving the ceiling and requiring the stopping point to follow.
+     *
+     * <p>Recorded as a finding rather than smoothed over: this is a weaker per-assessment check than the
+     * baseline's, and the sandbox gets fewer processes than its configuration says.
+     */
+    public boolean sharesProcessBudgetWithTheSandbox() {
+        return this == GVISOR;
+    }
+
     /** Whether this runtime is the one ADR-022 requires before hostile tenant content could be considered. */
     public boolean mediatesHostKernelSyscalls() {
         return this == GVISOR;

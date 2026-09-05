@@ -62,6 +62,9 @@ class SecurityGateRedPathTests {
                 "/proc/kcore,/proc/keys,/proc/timer_list,/proc/scsi,/sys/firmware");
         observations.put("kernel_paths_present",
                 "/proc/kcore,/proc/keys,/proc/timer_list,/proc/scsi,/sys/firmware");
+        // Overmounted, so nothing behind them reads back. Emptiness only decides the verdict for a path that
+        // is present AND unmounted.
+        observations.put("kernel_paths_nonempty", "");
         observations.put("seccomp", "2");
         observations.put("uid_map", "0:0:4294967295,");
         observations.put("block_device_nodes", "");
@@ -370,6 +373,30 @@ class SecurityGateRedPathTests {
     }
 
     @Test
+    void aPresentButEmptyKernelPathIsNotTreatedAsExposed() {
+        // gVisor presents a synthetic /sys/firmware that nothing overmounts because there is nothing behind
+        // it. Failing that would be failing a sandbox for exposing an empty directory.
+        HostileExecutionAssessment assessment = assess(new FakeLauncher()
+                .reporting(SyntheticProbe.INSPECT, "mount_points", "/,/dev,/proc,/sys,/tmp,/etc/hosts")
+                .reporting(SyntheticProbe.INSPECT, "kernel_paths_present", "/sys/firmware")
+                .reporting(SyntheticProbe.INSPECT, "kernel_paths_nonempty", ""));
+
+        assertThat(blockers(assessment)).doesNotContain("KERNEL_PATHS_MASKED");
+    }
+
+    @Test
+    void aPresentUnmountedPathThatActuallyReadsBackIsExposed() {
+        // The systempaths=unconfined case in its exact shape: there, /sys/firmware is the real one and has
+        // contents. This is the assertion that stops the emptiness rule from becoming a way through.
+        HostileExecutionAssessment assessment = assess(new FakeLauncher()
+                .reporting(SyntheticProbe.INSPECT, "mount_points", "/,/dev,/proc,/sys,/tmp,/etc/hosts")
+                .reporting(SyntheticProbe.INSPECT, "kernel_paths_present", "/sys/firmware")
+                .reporting(SyntheticProbe.INSPECT, "kernel_paths_nonempty", "/sys/firmware"));
+
+        assertThat(blockers(assessment)).contains("KERNEL_PATHS_MASKED");
+    }
+
+    @Test
     void oneUnexaminedKernelPathIsNotTreatedAsAnAbsentOne() {
         // Anti-vacuity, stated as its own property because it is the failure mode the "absent is fine" rule
         // creates: a probe that examined four of the five paths must not have the fifth counted as absent.
@@ -400,6 +427,8 @@ class SecurityGateRedPathTests {
             case "KERNEL_PATHS_MASKED" ->
                     launcher.reporting(SyntheticProbe.INSPECT, "mount_points", "/,/proc,/tmp")
                             .reporting(SyntheticProbe.INSPECT, "kernel_paths_present",
+                                    "/proc/kcore,/proc/keys,/proc/timer_list,/proc/scsi,/sys/firmware")
+                            .reporting(SyntheticProbe.INSPECT, "kernel_paths_nonempty",
                                     "/proc/kcore,/proc/keys,/proc/timer_list,/proc/scsi,/sys/firmware");
             case "CAPABILITIES_DROPPED" ->
                     launcher.reporting(SyntheticProbe.INSPECT, "cap_prm", "0000003fffffffff");
