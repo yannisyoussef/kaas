@@ -535,11 +535,17 @@ jobs:
           # A mediated sandbox leaves a sentry process behind if the container is not reaped, so this is not
           # only about Docker objects.
           #
-          # Matched on the full command line. `pgrep -c runsc` matches the process NAME, and gVisor re-executes
-          # itself for the sentry so that name is not `runsc` -- measured: the count was zero while a mediated
-          # sandbox was demonstrably running. A leak check that can only ever return zero is worse than none,
-          # because it reads as evidence.
-          sentries=$(ps -eo args= | grep -c runsc || true)
+          # MATCHED ON THE PROCESS'S FIRST TOKEN, not on any mention of the runtime.
+          #
+          # Two wrong versions preceded this one and each failed in the opposite direction. `pgrep -c` on the
+          # runtime name could only ever return zero, because gVisor re-executes its sentry so the process NAME
+          # is not the runtime's -- measured: zero while a mediated sandbox was demonstrably running. Grepping
+          # the whole argument list could only ever return one or more, because this very script mentions the
+          # runtime and its own command line is in the process table -- measured: one, on a clean run.
+          #
+          # The first token is the executable. This script's is bash, grep's is grep, and a sentry's is
+          # runsc-sandbox, so the answer depends on whether anything leaked. That is the entire point of it.
+          sentries=$(ps -eo args= | awk '{print $1}' | grep -cE '(^|/)runsc(-sandbox|-gofer)?$' || true)
           echo "containers=$containers networks=$networks runsc_processes=${sentries:-0}"
           if [ "$containers" -ne 0 ] || [ "$networks" -ne 0 ] || [ "${sentries:-0}" -ne 0 ]; then
             echo "Resources outlived the suite." >&2

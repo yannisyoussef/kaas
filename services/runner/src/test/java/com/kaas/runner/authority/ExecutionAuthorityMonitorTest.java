@@ -40,6 +40,9 @@ class ExecutionAuthorityMonitorTest {
     private static final Duration MARGIN = Duration.ofSeconds(5);
     private static final Duration INTERVAL = Duration.ofMillis(20);
 
+    /** Long enough that a close which waits for the sleep to expire is visibly slow. */
+    private static final Duration SLOW_INTERVAL = Duration.ofSeconds(10);
+
     @Test
     @Timeout(30)
     @DisplayName("a renewed lease refreshes the budget and execution continues")
@@ -235,6 +238,48 @@ class ExecutionAuthorityMonitorTest {
         // Not an error and not an extension. A lease with less time left than the margin cannot safely carry
         // any execution, so the honest budget is zero rather than a negative one that reads as enormous.
         assertThat(reason.get()).isEqualTo(AuthorityDecision.LEASE_EXPIRED);
+    }
+
+    @Test
+    @Timeout(30)
+    @DisplayName("no monitor thread survives the execution it was watching")
+    void closingLeavesNoThreadBehind() throws Exception {
+        // A leaked monitor is a thread per completed execution, still renewing a lease for a run that ended.
+        // On a worker that processes runs continuously that is unbounded growth, and every one of those
+        // threads is holding an authority decision nobody reads.
+        FakeClock clock = new FakeClock();
+        String name = "kaas-authority-leak-probe";
+        var started = new AtomicLong();
+        var monitor = ExecutionAuthorityMonitor.start(
+                () -> {
+                    started.incrementAndGet();
+                    return new Renewal(AuthorityDecision.RENEWED, LEASE);
+                },
+                clock,
+                SLOW_INTERVAL,
+                MARGIN,
+                LEASE,
+                name);
+        waitUntil(() -> started.get() >= 1);
+        assertThat(threadNamed(name)).as("the monitor must actually have a thread to leak").isTrue();
+
+        long closedAt = System.nanoTime();
+        monitor.close();
+        Duration closing = Duration.ofNanos(System.nanoTime() - closedAt);
+
+        waitUntil(() -> !threadNamed(name));
+        assertThat(threadNamed(name)).isFalse();
+        // AND IT CLOSED PROMPTLY. A monitor that merely sets a flag and waits for its own sleep to end takes
+        // up to a full heartbeat interval to stop -- five seconds in production, on every completed execution,
+        // while the execution thread waits to clean up. The interval here is deliberately long so that a
+        // close which relies on the sleep expiring cannot pass this.
+        assertThat(closing)
+                .as("closing took %s against an interval of %s", closing, SLOW_INTERVAL)
+                .isLessThan(SLOW_INTERVAL.dividedBy(2));
+    }
+
+    private static boolean threadNamed(String name) {
+        return Thread.getAllStackTraces().keySet().stream().anyMatch(thread -> name.equals(thread.getName()));
     }
 
     private ExecutionAuthorityMonitor start(

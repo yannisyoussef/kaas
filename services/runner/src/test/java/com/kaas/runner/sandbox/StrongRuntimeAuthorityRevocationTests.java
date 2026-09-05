@@ -34,6 +34,10 @@ class StrongRuntimeAuthorityRevocationTests {
 
     private static final String GENERATION = "strong-revocation-" + UUID.randomUUID();
 
+    /** The runtime's own executables: the launcher, the sentry and the gofer. */
+    private static final java.util.regex.Pattern RUNTIME_EXECUTABLE =
+            java.util.regex.Pattern.compile(".*(^|/)runsc(-sandbox|-gofer)?$");
+
     @BeforeAll
     static void requireTheRuntime() {
         // FAIL, never skip. A revocation suite that skipped itself where the runtime is absent would report
@@ -159,7 +163,12 @@ class StrongRuntimeAuthorityRevocationTests {
             ps.waitFor();
             return output.lines()
                     .map(String::trim)
-                    .filter(line -> line.contains("runsc"))
+                    // The FIRST token, which is the executable. Matching anywhere in the argument list makes
+                    // the count depend on what else happens to mention the runtime -- this test class's own
+                    // name, a gradle command line, the check itself -- rather than on what is running.
+                    .filter(line -> RUNTIME_EXECUTABLE
+                            .matcher(line.split("\\s+", 2)[0])
+                            .matches())
                     .toList();
         } catch (Exception unavailable) {
             throw new AssertionError("the host's process table must be readable for this suite", unavailable);
