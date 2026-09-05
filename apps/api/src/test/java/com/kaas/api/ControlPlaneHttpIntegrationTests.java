@@ -51,7 +51,10 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 @Testcontainers
-@Import(ControlPlaneHttpIntegrationTests.JwtTestConfiguration.class)
+@Import({
+    ControlPlaneHttpIntegrationTests.JwtTestConfiguration.class,
+    NanosecondSourceClockConfiguration.class
+})
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         // These suites assert CREATED-state invariants, so the production timers must not act on them.

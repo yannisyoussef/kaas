@@ -48,7 +48,7 @@ public class JacksonResultDocumentReader implements ResultDocumentReader {
 
     private static String text(JsonNode root, String field) {
         JsonNode node = root.get(field);
-        if (node == null || !node.isTextual()) {
+        if (node == null || !node.isString()) {
             throw new IllegalArgumentException("A result document carries a textual " + field + ".");
         }
         return node.asString();

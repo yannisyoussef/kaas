@@ -77,7 +77,10 @@ import tools.jackson.databind.ObjectMapper;
  * <p>Every test mints a fresh organization, so per-organization counts stay isolated despite the shared context.
  */
 @Testcontainers
-@Import(EarlyTerminalLifecycleTests.JwtTestConfiguration.class)
+@Import({
+    EarlyTerminalLifecycleTests.JwtTestConfiguration.class,
+    NanosecondSourceClockConfiguration.class
+})
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {

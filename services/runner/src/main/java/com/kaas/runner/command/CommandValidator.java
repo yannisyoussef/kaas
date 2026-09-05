@@ -315,7 +315,7 @@ public final class CommandValidator {
                 // sharing a representation with an existing one would make this ambiguous, and the else-branch
                 // below refuses rather than guessing.
                 update(sha, configurationType(value, key));
-                update(sha, value.isTextual() ? value.asString() : value.toString());
+                update(sha, value.isString() ? value.asString() : value.toString());
             }
 
             JsonNode selection = root.get("selection");
@@ -362,7 +362,7 @@ public final class CommandValidator {
     }
 
     private static String configurationType(JsonNode value, String key) throws CommandRejected {
-        if (value.isTextual()) {
+        if (value.isString()) {
             return "STRING";
         }
         if (value.isBoolean()) {
@@ -404,7 +404,7 @@ public final class CommandValidator {
 
     private static String text(JsonNode root, String field) throws CommandRejected {
         JsonNode node = root.get(field);
-        if (node == null || !node.isTextual()) {
+        if (node == null || !node.isString()) {
             throw new CommandRejected("A command carries a textual " + field + ".");
         }
         return node.asString();

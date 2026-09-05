@@ -57,13 +57,15 @@ flowchart LR
   User["User / CI client"] --> API["Spring Boot control plane"]
   Web["Next.js web"] -. no product integration .-> API
   API --> DB[(PostgreSQL)]
-  API -. proposed .-> Queue[(RabbitMQ)]
-  Worker["Runner worker"] -. proposed .-> Queue
-  Worker -. proposed .-> Sandbox["Ephemeral isolated runtime"]
+  API --> Queue[(RabbitMQ)]
+  Worker["Runner worker"] --> Queue
+  Worker --> Sandbox["Ephemeral isolated runtime"]
   Sandbox -. proposed .-> Objects[(Object storage)]
 ```
 
-The diagram is a target, not a deployment claim. The control plane must never execute user-controlled test content. Execution remains disabled until a separate security architecture review approves and verifies the launcher, runtime, network, secret, resource, and artifact controls.
+Solid edges are implemented and covered by tests; the dotted edge is not built. Publication, consumption, claim, lease, execution authorization, and the synthetic execution lifecycle all exist — see [ADR-021](docs/adr/021-durable-dispatch-consumption-fencing-and-worker-lease.md), [ADR-023](docs/adr/023-execution-authorization-and-assignment-scoped-capabilities.md), and [ADR-024](docs/adr/024-synthetic-execution-lifecycle.md).
+
+**What the sandbox runs is a platform-owned synthetic workload, not tenant content.** The control plane never executes user-controlled test content, and execution of user content remains disabled until the ADR-022 runtime prerequisite is met and the ADR-025 egress requirements are satisfied. Egress is deny-all; there is no proxy.
 
 ## Repository layout
 

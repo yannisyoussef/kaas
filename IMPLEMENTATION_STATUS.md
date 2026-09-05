@@ -2,14 +2,14 @@
 
 Status date: 2026-08-28
 
-This document describes repository reality after the dispatch consumption, claim, and lease slice. Product vision and execution architecture do not imply runtime capability.
+This document describes repository reality after the synthetic execution lifecycle slice (ADR-024) and the CI stabilization pass that followed it. Product vision and execution architecture do not imply runtime capability: the repository executes a platform-owned synthetic workload and no tenant content.
 
 ## Implemented and validated
 
 - Java 25 multi-module build using the pinned Gradle 9.7.1 wrapper and distribution checksum.
 - Spring Boot 4.1.1 API bootstrap.
 - Real Actuator health, liveness, and readiness endpoints, verified over HTTP in an application test.
-- Non-executing runner bootstrap with a behavioral test of its disabled-execution message.
+- A runner that drives the full synthetic execution lifecycle: independent command validation and digest recomputation, assignment acquisition, lease renewal for the duration of a run, phase reporting, and result submission. It executes a platform-owned workload only — it holds no path to FeatureRevision source and refuses any engine other than `SYNTHETIC`.
 - Next.js 16.3.3 / React 19.2.8 scaffold with deterministic ESLint, TypeScript checking, a server-rendered page test, production build, lockfile, and production audit.
 - Strict Draft 2020-12 compilation for execution command/result, artifact manifest, and live-event schemas, with canonical/minimal/negative fixtures and named semantic contract checks.
 - Zero-warning linting of the mixed implemented/proposed OpenAPI contract using pinned Redocly tooling.
@@ -38,7 +38,7 @@ This document describes repository reality after the dispatch consumption, claim
 - Generalized, explicitly typed PostgreSQL outbox owning its own immutable payload, with a controlled message-type enum, an optional dispatch reference, and a V5 delivery-scheduling model the database rather than the relay process owns.
 - Outbox relay publishing to RabbitMQ with correlated publisher confirms, persistent messages, mandatory routing, bounded deterministic backoff, terminal dispositions retained as evidence, and fail-closed digest verification before publication.
 - Relay claim protocol using FOR UPDATE SKIP LOCKED with lease expiry, so multiple relays take disjoint work, a crashed relay strands nothing, and a revived relay cannot overwrite a newer disposition. No database transaction is held across broker I/O.
-- At-least-once publication with an explicit, tested crash-after-confirm duplicate window; stable message identity and semantic digest make duplicates safe for a future consumer.
+- At-least-once publication with an explicit, tested crash-after-confirm duplicate window; stable message identity and semantic digest make duplicates safe for the consumer, which is implemented and shipped disabled by default.
 - Production run scheduler moving CREATED to QUEUED in bounded, deterministically ordered batches through the established use case, safe across replicas.
 - Idempotent run-create replay now returns the run's current canonical representation and ETag rather than a reconstructed CREATED view, so one resource never advertises two strong validators.
 - Per-organization admission control: ceilings on active (CREATED or QUEUED) and queued runs, enforced under an organization-scoped PostgreSQL advisory lock so concurrent creates cannot overshoot, answered by a partial index rather than a full scan.
