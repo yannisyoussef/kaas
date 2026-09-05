@@ -32,6 +32,20 @@ public enum SyntheticProbe {
     /** Emits far more output than the collector is allowed to keep. */
     OUTPUT(List.of("output", "200000")),
 
+    /**
+     * Emits output shaped like an attack on whoever reads it.
+     *
+     * <p>Terminal escape sequences, a right-to-left override, a zero-width joiner, and a value that looks
+     * like a path traversal. None of it is dangerous to the sandbox; all of it is dangerous to the log
+     * viewer, the terminal, and any code that might mistake an observation for a filename.
+     *
+     * <p>It exists because the collector's sanitiser was claimed in a comment and verified by nothing —
+     * removing it broke no test. Under a workload this repository writes, that gap costs little. Under
+     * tenant-authored input influencing output, it is the difference between a bounded string and an
+     * instruction to a terminal.
+     */
+    HOSTILE_OUTPUT(List.of("hostileoutput")),
+
     // The two below are not security probes. Every value above exists to attack the sandbox's own
     // confinement and prove it holds; these two are the platform's synthetic WORKLOAD, and they are what a
     // run actually executes in this slice. They live in the same enumeration because they run through the

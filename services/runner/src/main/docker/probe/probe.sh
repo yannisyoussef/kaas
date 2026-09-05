@@ -306,6 +306,25 @@ sleep)
     sleep "${2:-3600}"
     emit sleep_completed true
     ;;
+hostileoutput)
+    # OUTPUT SHAPED LIKE AN ATTACK ON THE READER, not on the sandbox.
+    #
+    # Everything here is legal for a workload to print and none of it threatens the boundary. What it
+    # threatens is whoever renders it: an escape sequence can rewrite a terminal, a right-to-left override can
+    # reorder how a whole evidence line reads without changing its bytes, and a value that looks like a path
+    # is only inert for as long as nothing treats an observation as a filename.
+    emit_tooling
+    printf 'hostile_escape=\033[31mred\033[0m\n'
+    printf 'hostile_bell=ding\007\n'
+    printf 'hostile_rtlo=\342\200\256reversed\n'
+    printf 'hostile_zwj=a\342\200\215b\n'
+    printf 'hostile_traversal=../../etc/passwd\n'
+    printf 'hostile_absolute=/etc/shadow\n'
+    # A key carrying control characters, because sanitising only values would leave the map's own keys
+    # attacker-shaped.
+    printf 'hostile\033[1mkey=value\n'
+    emit hostile_output_completed true
+    ;;
 output)
     # printf is a shell builtin, so this mode depends on no applet at all; the marker is emitted anyway so
     # that every mode's evidence is qualified the same way and the gate needs no per-mode exception.

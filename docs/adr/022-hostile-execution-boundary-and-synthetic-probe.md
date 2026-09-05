@@ -1,6 +1,9 @@
 # ADR-022: Prove the sandbox boundary with a trusted synthetic probe before any user content exists
 
 - **Status:** IMPLEMENTED (supersedes [ADR-006](006-docker-runner.md))
+- **Amended 2026-09-05:** the runtime prerequisite is **SATISFIED FOR THE MEDIATED RUNTIME**, for inert
+  tenant-byte delivery only. See "Adjudication" at the end of this document. **The original rationale below
+  is unchanged and is still the reason ordinary Docker was refused.**
 - **Date:** 2026-08-28
 - **Decision owners:** KaaS security architecture
 - **Scope:** The hostile-execution trust boundary, a hardened container sandbox, a repository-controlled synthetic security probe, and an executable release gate. No feature source, no secrets, no execution command, no production execution path.
@@ -91,6 +94,50 @@ Kernel-shared isolation is the primary one and is the reason this is not a user-
 5. Artifact and output handling for genuinely untrusted content.
 
 Each is its own slice with its own adversarial review. None of them is unlocked by this ADR.
+
+## Adjudication (2026-09-05, ADR-029 slice)
+
+This section is an amendment. Nothing above it has been rewritten, because the reason ordinary Docker was
+refused for user content is still the reason, and an ADR that reads as though gVisor existed from the start
+would be a worse record than one that shows the prerequisite being met.
+
+### What the five prerequisites became
+
+| # | Prerequisite | Status | Where |
+| --- | --- | --- | --- |
+| 1 | A stronger kernel boundary, **with this gate re-run against it** | **SATISFIED** | ADR-028. The same probe and the same control contract, under gVisor, in a mandatory CI job |
+| 2 | Source capability issuance | **SATISFIED for the model; unredeemed** | ADR-023. It binds organization, project, run, attempt, epoch and expiry, and dies with its assignment |
+| 3 | Secret capability issuance | **NOT APPLICABLE to first byte delivery** | ADR-023 models it; no provider exists and no secret is resolved. Inert source bytes need none |
+| 4 | An egress policy model replacing deny-all | **SATISFIED** | ADR-026. `ALLOWLIST` through a proxy that is the sandbox's only peer, refused rather than downgraded |
+| 5 | Artifact and output handling for genuinely untrusted content | **SATISFIED for output; OPEN for input** | Output is bounded, sanitised at the collector and reduced to a boolean. Input handling is what the source-delivery slice must establish |
+
+Prerequisite 5 is the one that had no slice of its own, and it splits. What leaves the sandbox is handled:
+the ceiling is corroborated against bytes actually retained, control and Unicode format characters are
+stripped where they are collected, and the only sandbox-authored value that reaches a result is a comparison
+against the literal `PASSED`. What *enters* the sandbox is not handled, because nothing tenant-authored
+enters it yet — and that is precisely the next slice's job.
+
+### What this amendment permits
+
+Exactly one thing: a future slice may deliver **inert tenant-authored source bytes** into the mediated
+sandbox, read-only, to be hashed and inspected by a platform-owned verifier.
+
+### What it does not permit
+
+Karate. Tenant source execution. Arbitrary commands, images, entrypoints or mounts. Production secret
+resolution. Unrestricted network access. None of these is unlocked by this amendment, and none becomes easier
+to unlock because of it.
+
+### What is accepted rather than solved
+
+The mediated runtime reduces direct host-kernel exposure; it is not a virtual machine, and the sentry remains
+a host process. `NO_NEW_PRIVILEGES` is not observable under it — reported `UNSUPPORTED`, never passed — and
+the two escalation paths it would block are closed instead by `NO_SETUID_BINARIES` and by an empty capability
+bounding set, both observed. Runtime evidence can outlive the runtime it describes for up to the freshness
+window, because the attestation binds the runtime family rather than the binary.
+
+These are stated in full, with their consequences, in
+[docs/security/hostile-content-readiness.md](../security/hostile-content-readiness.md).
 
 ## Validation
 

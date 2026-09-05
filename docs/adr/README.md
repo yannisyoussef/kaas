@@ -26,6 +26,7 @@
 | [026](026-enforceable-assignment-scoped-execution-egress.md) | Enforceable assignment-scoped egress through a purpose-built trusted proxy the sandbox cannot route around | ACCEPTED; allowlist enforceable for synthetic execution |
 | [027](027-signed-runtime-security-attestations.md) | Sandbox security evidence is signed by the gate that observed it and verified against a pinned key, replacing a self-consistency digest an operator wrote | ACCEPTED; v3 required, v2 refused |
 | [028](028-mediated-sandbox-runtime.md) | The sandbox runs under a mediating runtime with no fallback to the baseline, and the mandatory control set is scoped to the runtime that produced the evidence | ACCEPTED; v4 required, v3 refused; ADR-022 stays open |
+| [022](022-hostile-execution-boundary-and-synthetic-probe.md) *(amended)* | The hostile-content runtime prerequisite is satisfied **for the mediated runtime**, permitting inert tenant-byte delivery only | AMENDED 2026-09-05; execution still not approved |
 | [029](029-continuous-execution-authority.md) | The lease bounds how long a worker may keep executing, not only what it may write: revocation stops a running sandbox, and an unrenewable lease stops it fail-closed | ACCEPTED; ADR-022 stays open |
 
 Deferred topics without active decisions remain: concrete object-storage/upload adapter, secret **delivery**
@@ -79,5 +80,13 @@ database's own clock; the runner converts that to a **monotonic** budget, stops 
 refusal, and stops fail-closed when the budget is exhausted. A transient outage inside the budget still does
 not end a healthy run. **ADR-022 stays open**: bounding a stale worker's execution is a prerequisite for
 hostile tenant code, not permission to run it.
+
+**ADR-022 was amended rather than closed.** Its runtime prerequisite is satisfied by the mediated runtime, and
+the amendment permits exactly one thing: a future slice may deliver *inert* tenant-authored source bytes into
+the sandbox to be hashed and inspected. Execution of tenant content is not approved, and the original
+rationale for refusing ordinary Docker is preserved unchanged — an ADR is decision history, not a description
+of the present. Of its five prerequisites, four are satisfied or not applicable to byte delivery; the fifth
+splits, with output handling satisfied and *input* handling being what the source-delivery slice must
+establish.
 
 `IMPLEMENTED` means verified by repository code or tooling. `PROPOSED` means design intent only. `DEFERRED` means no decision is active and implementation must not assume one.
