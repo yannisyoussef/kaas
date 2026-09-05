@@ -371,10 +371,10 @@ public final class HostileExecutionSecurityGate {
      * anything if it disagreed. That is the daemon answering a question about itself: it says which runtime
      * was <em>assigned</em>. This is the workload reporting what is actually underneath it.
      *
-     * <p>gVisor serves a fixed synthetic kernel version that no ordinary host reports, and a container cannot
-     * choose what {@code uname -r} says about it. So a {@code runc} container cannot produce this marker
-     * unless the host kernel genuinely is that version — which makes "requested runsc" and "running under
-     * runsc" two separately falsifiable claims rather than the same claim counted twice.
+     * <p>A mediating runtime's guest kernel names itself, and a container cannot choose what {@code uname -r}
+     * says about it. So a {@code runc} container cannot produce this marker unless the host kernel is
+     * literally named after the runtime — which makes "requested runsc" and "running under runsc" two
+     * separately falsifiable claims rather than the same claim counted twice.
      *
      * <p>For the baseline runtime there is no marker to look for: whatever kernel the host runs is not a
      * property this platform gets to assert, and inventing an assertion about it would be a control that
@@ -398,12 +398,12 @@ public final class HostileExecutionSecurityGate {
                 .map(marker -> check(
                         RUNTIME_MEDIATION_CONTROL,
                         Enforcement.MANDATORY,
-                        // Exact prefix on the marker, not a substring search anywhere in the string: a host
-                        // kernel whose version merely CONTAINS the marker somewhere must not satisfy this.
-                        observed.startsWith(marker) ? Verdict.PASS : Verdict.FAIL,
-                        observed.startsWith(marker)
-                                ? "the sandbox reports the mediating runtime's own kernel"
-                                : "the sandbox reports a kernel this runtime does not serve"))
+                        // The runtime owns the comparison. Doing it here would put a second, drifting copy of
+                        // "what counts as mediation" in the one place that must not disagree with the first.
+                        expected.servesKernelRelease(observed) ? Verdict.PASS : Verdict.FAIL,
+                        expected.servesKernelRelease(observed)
+                                ? "the sandbox reports the mediating runtime's own kernel: " + observed
+                                : "the sandbox reports a kernel this runtime does not serve: " + observed))
                 .orElseGet(() -> check(
                         RUNTIME_MEDIATION_CONTROL,
                         Enforcement.DEPLOYMENT_SPECIFIC,

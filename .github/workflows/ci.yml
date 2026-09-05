@@ -347,8 +347,17 @@ jobs:
       # from the same place as the artifact.
       - name: Install the pinned mediating runtime
         env:
-          GVISOR_RELEASE: "20240729"
-          RUNSC_SHA256: "f03d44a443438ac5efec51b7b12b3b6315d94f84529a1e4693b4b573f521306d"
+          # Pinned to a release MEASURED to work on this runner's kernel, not to the newest one and not to
+          # `latest`. release-20240729 refused every network mode here with "cannot run with network enabled in
+          # root network namespace" -- on the runner kernel, not only under nested Docker -- and this release
+          # runs the sandbox profile unchanged. Moving the pin is therefore a measurement, and re-pinning later
+          # means re-measuring.
+          #
+          # The digest was taken from two independent hosts and networks and matched the publisher's own
+          # sha512. That is what makes the artifact identity a property of this repository rather than of
+          # whatever the bucket serves today.
+          GVISOR_RELEASE: "20260817"
+          RUNSC_SHA256: "048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c"
         run: |
           set -euo pipefail
           arch=$(uname -m)
@@ -406,34 +415,9 @@ jobs:
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
             alpine:3.20 sh -c 'id; cat /proc/version' || { echo "RESULT profile: unsupported"; status=1; }
           docker network rm kaas-runtime-probe >/dev/null
-          echo "MATRIX STATUS $status"
-
-      # TEMPORARY INVESTIGATION STEP -- removed once the cause is known.
-      #
-      # The pinned release refuses every network mode on this host, including --network=none, which worked on
-      # a different host. That points at the runtime rather than at the profile, so this compares the pinned
-      # release against the current one on the SAME host and captures the runtime's own debug log. It records
-      # the version and digest of whatever it downloads so the outcome can be pinned rather than tracked.
-      - name: Compare against the current release
-        run: |
-          arch=$(uname -m)
-          curl -fsSL "https://storage.googleapis.com/gvisor/releases/release/latest/${arch}/runsc" -o /tmp/runsc-latest
-          echo "LATEST DIGEST: $(sha256sum /tmp/runsc-latest)"
-          sudo install -m 0755 /tmp/runsc-latest /usr/local/bin/runsc-latest
-          echo "LATEST VERSION: $(runsc-latest --version | tr '\n' ' ')"
-          sudo mkdir -p /var/log/runsc
-          printf '%s' '{"runtimes":{"runsc":{"path":"/usr/local/bin/runsc"},"runsc-latest":{"path":"/usr/local/bin/runsc-latest"},"runsc-debug":{"path":"/usr/local/bin/runsc","runtimeArgs":["--debug","--debug-log=/var/log/runsc/","--strace"]}}}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
-          until docker info >/dev/null 2>&1; do sleep 1; done
-          for rt in runsc-latest runsc-debug; do
-            echo "===== $rt --network=none"
-            docker run --rm --runtime=$rt --network=none alpine:3.20 cat /proc/version && echo "RESULT $rt: ok" || echo "RESULT $rt: unsupported"
-          done
-          echo "===== what the runtime itself logged"
-          sudo grep -rhiE "netns|namespace|network" /var/log/runsc/ 2>/dev/null | tail -25 || echo "(no debug log)"
-          echo "===== netns identity, runc control"
-          docker run --rm --network=none alpine:3.20 readlink /proc/self/ns/net
-          docker run --rm --network=bridge alpine:3.20 readlink /proc/self/ns/net
+          # Only the shape the sandbox actually uses is fatal here. Bridge compatibility is the open question
+          # this slice exists to answer, and the suite -- not this step -- is what makes a claim about it.
+          exit $status
 
       # cleanTest-equivalent: the task is deleted before it runs, so an UP-TO-DATE result cannot satisfy this
       # gate. A cached pass would report green without having started a single mediated container.

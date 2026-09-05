@@ -72,9 +72,36 @@ the hundreds of milliseconds, not the tens of seconds — nothing more.
 ### What could not be measured, and is therefore not claimed
 
 **Bridge networking under `runsc`.** The nested attempt failed with `cannot run with network enabled in root
-network namespace`, which is an artifact of running a daemon inside a privileged container, **not** a gVisor
-limitation. The `ALLOWLIST` path — sandbox on a per-execution internal network, reaching a proxy — is
-therefore **unproven** and must be demonstrated on a real Linux host before any claim is made about it.
+network namespace`. This document originally attributed that to running a daemon inside a privileged
+container. **That attribution was wrong**, and CI disproved it — see below. The `ALLOWLIST` path — sandbox on
+a per-execution internal network, reaching a proxy — remains **unproven** and must be demonstrated on a real
+Linux host before any claim is made about it.
+
+### Correction: the release, not the nesting
+
+The first CI run installed the release measured above onto a GitHub-hosted Ubuntu runner
+(`6.17.0-1022-azure`, cgroups v2) and it refused **every** network mode — `none`, the default bridge, and a
+user-defined internal network — with the identical error. `--network=none` had worked under nesting, so the
+error was not about bridges and not about nesting:
+
+```
+release-20240729  --network=none              cannot run with network enabled in root network namespace
+release-20240729  --network=bridge            cannot run with network enabled in root network namespace
+release-20240729  --network=<internal>        cannot run with network enabled in root network namespace
+release-20260817  --network=none              Linux version 4.19.0-gvisor
+```
+
+The runtime is two years older than the kernel it was asked to run on. The current release runs the full
+sandbox profile unchanged on the same host, in the same job, minutes apart.
+
+Two things follow, and both are load-bearing:
+
+1. **The pinned release is a measurement, not a preference.** Pinning a digest gives a stable identity; it
+   does not give a working runtime. Re-pinning means re-measuring on the kernel that will run it.
+2. **The emulated kernel version is not a stable identity.** release-20240729 reported `4.4.0`;
+   release-20260817 reports `4.19.0-gvisor`. Evidence bound to the version number would have started failing
+   for a reason with nothing to do with the boundary. The runtime identity check binds the `-gvisor` suffix —
+   what the runtime calls itself — rather than the version it happens to emulate.
 
 ## Candidate comparison
 
@@ -95,7 +122,7 @@ Scored against the criteria this platform actually has, not against a generic th
 | 11 | Filesystem semantics | Host VFS | Gofer-mediated; some `/proc` and `/sys` differences (see below) | Guest kernel VFS |
 | 12 | Syscall compatibility | Complete | High but not total; unimplemented syscalls return `ENOSYS` | Complete inside the guest |
 | 13 | Signal / termination | Standard | Standard through the OCI lifecycle | VMM shutdown, guest agent needed |
-| 14 | **Observable runtime identity** | `/proc/version` is the host kernel | **`/proc/version` = `Linux version 4.4.0`, gVisor's fixed synthetic kernel — measured, and not forgeable by container configuration** | Guest kernel identity, chosen by the operator |
+| 14 | **Observable runtime identity** | `/proc/version` is the host kernel | **`uname -r` ends in `-gvisor` — measured, and not forgeable by container configuration; the version part varies by release and is deliberately not matched on** | Guest kernel identity, chosen by the operator |
 | 15 | Orphan cleanup | Existing reconciler | Same Docker objects, same labels; sentry dies with the container | Extra state: VMM processes, tap devices, jailer directories |
 | 16 | Multi-tenant isolation | Namespace-level | Per-sandbox userspace kernel | Per-tenant VM |
 | 17 | Operational complexity | None added | One pinned binary plus a `daemon.json` entry | A new execution architecture |
@@ -154,11 +181,13 @@ be worse than not having one — it would be a false claim with a gate behind it
 Two independent observations, deliberately from different sides:
 
 1. **Launcher side.** `docker inspect` reports `HostConfig.Runtime`. This is what was *requested*.
-2. **Inside the sandbox.** `/proc/version` reports `Linux version 4.4.0 #1 SMP Sun Jan 10 15:06:54 PST 2016` —
-   gVisor's fixed synthetic kernel. This is what was *enforced*.
+2. **Inside the sandbox.** `uname -r` reports a release ending in `-gvisor` — `4.19.0-gvisor` on the pinned
+   release. This is what was *enforced*.
 
-The second cannot be produced by a `runc` container unless the host kernel is literally 4.4.0 from January
-2016, and a container cannot choose what `/proc/version` says about it. Requested and enforced are therefore
+The second cannot be produced by a `runc` container unless the host kernel is literally named after the
+runtime, and a container cannot choose what `uname` says about it. It does not defend against an operator who
+names their own host kernel to satisfy their own gate; the adversary here is the workload, which can influence
+neither value. Requested and enforced are therefore
 separately observable, which is the same discipline every previous slice applied to image digests, network
 isolation, and attestation signatures.
 
@@ -199,11 +228,15 @@ Stated precisely, because "gVisor means no shared kernel" is wrong and worth ref
 
 ## Open items before implementation can claim anything
 
-1. **Prove `ALLOWLIST` under `runsc` on a real Linux host.** Unproven here, and the matrix says so.
-2. **Prove `runsc` on GitHub-hosted Ubuntu**, or define the self-hosted runner requirement instead of mocking
-   a gate green.
+1. **Prove `ALLOWLIST` under `runsc` on a real Linux host.** Still unproven. The correction above removes the
+   reason it was *assumed* to work, without supplying evidence that it does.
+2. ~~**Prove `runsc` on GitHub-hosted Ubuntu**~~ — **answered.** It runs there on the pinned release; no
+   self-hosted runner is required. The mandatory `strong-runtime-gate` job is the standing proof.
 3. **Replace the `NO_NEW_PRIVILEGES` evidence mechanism**, or report it truthfully as unsupported under gVisor.
-4. **Pin the runtime.** Version, source, and binary digest — `runsc found on PATH` is not an identity. The
-   aarch64 `release-20240729.0` artifact measured here has SHA-256
-   `f2c5f96fd9e60910c6b7c2d7ce9741ce40131250f93a866302ef081c66179279`; the CI architecture will need its own.
+4. ~~**Pin the runtime.**~~ — **done.** `strong-runtime-gate` installs x86_64 `release-20260817.0`, verified
+   against SHA-256 `048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c` before it is made
+   executable. The digest was taken from two independent hosts and networks and matched the publisher's
+   sha512. The aarch64 `release-20240729.0` artifact measured locally has SHA-256
+   `f2c5f96fd9e60910c6b7c2d7ce9741ce40131250f93a866302ef081c66179279` and is recorded only because the local
+   measurements in this document were taken with it — it is **not** a supported pin.
 5. **Re-prove resource limits**, rather than assuming cgroup semantics carry over.

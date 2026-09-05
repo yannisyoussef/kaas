@@ -95,8 +95,12 @@ class StrongRuntimeBoundaryTests {
         assertThat(baseline.observation("runtime_kernel_release"))
                 .as("the baseline runtime must report the host kernel, or this comparison proves nothing")
                 .isPresent();
-        assertThat(baseline.observation("runtime_kernel_release").orElseThrow())
-                .doesNotStartWith(ExecutionRuntimeType.GVISOR.inSandboxKernelMarker().orElseThrow());
+        assertThat(ExecutionRuntimeType.GVISOR.servesKernelRelease(
+                        baseline.observation("runtime_kernel_release").orElseThrow()))
+                .as("the baseline runtime reported %s, which the mediating runtime claims to serve — the "
+                        + "marker is then satisfied by coincidence and proves nothing",
+                        baseline.observation("runtime_kernel_release").orElseThrow())
+                .isFalse();
     }
 
     @Test

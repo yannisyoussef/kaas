@@ -77,20 +77,47 @@ public enum ExecutionRuntimeType {
     }
 
     /**
-     * What {@code /proc/version} says inside a sandbox under this runtime, or empty when nothing distinctive
-     * can be observed from inside.
+     * The suffix {@code uname -r} carries inside a sandbox under this runtime, or empty when nothing
+     * distinctive can be observed from inside.
      *
      * <p>This is the difference between <em>requested</em> and <em>enforced</em>. The daemon reporting
-     * {@code runsc} says the launcher asked for it. gVisor's guest kernel identifies itself as a fixed
-     * synthetic {@code 4.4.0} — measured, and not something a container can choose about itself — so a
-     * {@code runc} container cannot produce it unless the host kernel really is that version.
+     * {@code runsc} says the launcher asked for it. This says what is actually serving the workload's
+     * syscalls: gVisor's guest kernel names itself, and a container cannot choose what {@code uname} says
+     * about it.
+     *
+     * <h2>Why an identity suffix and not the emulated version number</h2>
+     *
+     * <p>This was originally the version prefix {@code 4.4.0}, measured from release-20240729. The release
+     * this repository pins now reports {@code 4.19.0-gvisor}, so that marker would have silently stopped
+     * matching — and a marker that stops matching is a mandatory control that starts failing for a reason
+     * that has nothing to do with the boundary.
+     *
+     * <p>The emulated version is a number gVisor is free to bump; {@code -gvisor} is what the runtime calls
+     * itself. Binding evidence to the identity rather than to the version is the difference between a control
+     * that tracks the property and one that tracks a release note.
      *
      * <p>{@link #DOCKER} has no marker, and deliberately reports empty rather than something like
      * "not gVisor": the baseline runtime's identity is whatever kernel the host happens to run, which is not a
      * property this platform gets to assert.
      */
     public java.util.Optional<String> inSandboxKernelMarker() {
-        return this == GVISOR ? java.util.Optional.of("4.4.0") : java.util.Optional.empty();
+        return this == GVISOR ? java.util.Optional.of("-gvisor") : java.util.Optional.empty();
+    }
+
+    /**
+     * Whether a kernel release observed from inside a sandbox is one this runtime serves.
+     *
+     * <p>The matching rule lives here rather than at the call site so that there is exactly one answer to
+     * "does this evidence show mediation", and so a second mediating runtime cannot arrive with a subtly
+     * different comparison.
+     *
+     * <p>A suffix, not a substring: {@code 6.1.0-gvisor-patched} is a host kernel someone named after the
+     * runtime, not a kernel the runtime served. This cannot defend against an operator who names their own
+     * host kernel to satisfy their own gate, and it is not meant to — the adversary here is the workload,
+     * which cannot influence either value.
+     */
+    public boolean servesKernelRelease(String observedRelease) {
+        return inSandboxKernelMarker().map(observedRelease::endsWith).orElse(false);
     }
 
     /** Whether this runtime is the one ADR-022 requires before hostile tenant content could be considered. */
