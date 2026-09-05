@@ -38,6 +38,7 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | PostgreSQL persistence | IMPLEMENTED | Flyway schema, JPA validation, tenant composite FKs, immutable-revision trigger, query indexes |
 | SSE and object storage integration | PLANNED | No stream or storage adapter exists. RabbitMQ publication and consumption are implemented, as the two rows above record |
 | Hostile-execution sandbox | EVIDENCED FOR A TRUSTED PROBE, NOT APPROVED FOR USER CONTENT | ADR-022 supersedes ADR-006 and **remains open**. A container launcher and a probe image now exist and hold daemon access; the launcher runs one repository-controlled probe under a fixed profile, and no source, secret, or caller-supplied command can enter it |
+| Hostile-content boundary | **ADJUDICATED — READY FOR INERT BYTE DELIVERY** | ADR-022's runtime prerequisite is satisfied for the mediated runtime, permitting a future slice to deliver *inert* tenant-authored source bytes to be hashed and inspected. **Tenant code execution is not approved**, and Karate, source execution, secret provision and secret injection all remain absent. Residual risks and the requirements binding on that slice are in [the readiness document](docs/security/hostile-content-readiness.md) |
 | Continuous execution authority | IMPLEMENTED + VALIDATED | A worker maintains evidence it still owns its assignment for every phase it owns, and acts on the answer (ADR-029). Cancellation, fencing or an expired lease **stops the running sandbox** — measured at 10.2 seconds end to end — and an unreachable control plane consumes the remaining lease budget and then stops it fail-closed. Database fencing stops a stale worker writing; this stops it running, and both are required |
 | Mediating sandbox runtime | IMPLEMENTED + VALIDATED IN CI | The sandbox runs under gVisor with **no fallback to the baseline** — not a flag, not a catch block (ADR-028). Requested and enforced are separately observable: the daemon's assigned runtime is read back before the workload starts, and the guest kernel names itself from inside. The mandatory control set is scoped to the runtime, and the mediating one carries **one fewer demonstrable control** than the baseline because gVisor exposes no `NoNewPrivs` flag. Evidence exists only in the mandatory `strong-runtime-gate` job: the runtime cannot be installed on macOS, so a green local build proves nothing about it |
 | Authentication and product APIs | IMPLEMENTED FOR CURRENT SLICES | External OIDC-compatible bearer JWT; trusted tenant claims only; full-parent scoping and cross-tenant concealment |
@@ -151,6 +152,8 @@ The checked-in values are local-development defaults, not production secret mana
 - [Signed runtime attestation](docs/security/signed-runtime-attestation.md)
 - [Running the sandbox under a mediating runtime](docs/security/mediated-sandbox-runtime.md)
 - [Continuous execution authority](docs/architecture/continuous-execution-authority.md)
+- [Hostile-content readiness](docs/security/hostile-content-readiness.md)
+- [The hostile-content boundary, composed](docs/architecture/hostile-content-boundary.md)
 - [Hostile runtime candidate evaluation](docs/architecture/hostile-runtime-evaluation.md)
 - [Signed security attestation slice report](SIGNED_SECURITY_ATTESTATION_SLICE_REPORT.md)
 - [Architecture decisions](docs/adr/README.md)
