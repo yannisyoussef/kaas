@@ -62,7 +62,7 @@ public class WorkerLeaseService {
         if (locked.isEmpty()) {
             // Either the run never existed, or it is no longer owned. Both are the same answer to a worker: the
             // assignment you are heartbeating is not the active one.
-            return new HeartbeatOutcome(false, "NO_ACTIVE_ASSIGNMENT", null);
+            return HeartbeatOutcome.refused("NO_ACTIVE_ASSIGNMENT", null);
         }
         TestRun run = locked.orElseThrow().run();
         ExecutionAttempt attempt = locked.orElseThrow().attempt();
@@ -70,24 +70,24 @@ public class WorkerLeaseService {
             // A stopping or completed run has already had its assignment taken away. A late heartbeat cannot
             // bring it back — that is the entire point of fencing. An EXECUTING run, by contrast, is precisely
             // the case a heartbeat exists for.
-            return new HeartbeatOutcome(false, "RUN_NOT_OWNED", run);
+            return HeartbeatOutcome.refused("RUN_NOT_OWNED", run);
         }
         if (!attempt.attemptId().equals(attemptId)
                 || attempt.state() != ExecutionAttemptState.CLAIMED
                 || attempt.assignment().epoch() != epoch
                 || attempt.assignment().fenced()) {
             count("kaas.worker.heartbeat.rejected", "STALE_ASSIGNMENT");
-            return new HeartbeatOutcome(false, "STALE_ASSIGNMENT", run);
+            return HeartbeatOutcome.refused("STALE_ASSIGNMENT", run);
         }
         if (workerId == null || !workerId.startsWith(WORKER_NAMESPACE)) {
             count("kaas.worker.heartbeat.rejected", "STALE_ASSIGNMENT");
-            return new HeartbeatOutcome(false, "STALE_ASSIGNMENT", run);
+            return HeartbeatOutcome.refused("STALE_ASSIGNMENT", run);
         }
         if (attempt.assignment().acquired() && !attempt.assignment().workerId().equals(workerId)) {
             // Another worker holds it. Before acquisition existed, this comparison could not be made at all:
             // the stored worker id was one constant for the whole deployment, so every worker matched.
             count("kaas.worker.heartbeat.rejected", "STALE_ASSIGNMENT");
-            return new HeartbeatOutcome(false, "STALE_ASSIGNMENT", run);
+            return HeartbeatOutcome.refused("STALE_ASSIGNMENT", run);
         }
 
         Instant at = leases.currentDatabaseTime();
@@ -98,7 +98,7 @@ public class WorkerLeaseService {
             ExecutionAttempt acquiring = attempt.acquiredBy(workerId, at);
             if (!leases.acquire(locked.orElseThrow().organizationId(), acquiring)) {
                 count("kaas.worker.heartbeat.rejected", "STALE_ASSIGNMENT");
-                return new HeartbeatOutcome(false, "STALE_ASSIGNMENT", run);
+                return HeartbeatOutcome.refused("STALE_ASSIGNMENT", run);
             }
             attempt = acquiring;
         }
@@ -106,24 +106,33 @@ public class WorkerLeaseService {
             // The lease is already gone. Renewing it here would let a worker take ownership back by being late
             // rather than by being correct, and would undo the reconciler's basis for fencing it.
             count("kaas.worker.heartbeat.rejected", "LEASE_EXPIRED");
-            return new HeartbeatOutcome(false, "LEASE_EXPIRED", run);
+            // The window is returned here too, and it is in the past. Saying so is more useful than silence:
+            // a worker can see that its authority ended rather than inferring it from a bare refusal.
+            return new HeartbeatOutcome(
+                    false, "LEASE_EXPIRED", run, at, attempt.assignment().leaseExpiresAt());
         }
         if (!at.isAfter(attempt.assignment().lastHeartbeatAt())) {
             // A backwards NTP step, a failover to a standby whose clock trails, or two heartbeats inside one
             // microsecond. None of those is the caller's fault, and none should surface as a 500 — the honest
             // answer is that this renewal did not take, which the caller already knows how to handle.
             count("kaas.worker.heartbeat.rejected", "CLOCK_NOT_ADVANCED");
-            return new HeartbeatOutcome(false, "CLOCK_NOT_ADVANCED", run);
+            // The window is still returned, and deliberately. This renewal did not take, but the lease it
+            // failed to extend is STILL VALID -- the cause is a clock that moved backwards, not an assignment
+            // that was lost. A worker told only "refused" would have to treat this like fencing; told the
+            // window, it knows exactly how much budget it still has to try again inside.
+            return new HeartbeatOutcome(
+                    false, "CLOCK_NOT_ADVANCED", run, at, attempt.assignment().leaseExpiresAt());
         }
         ExecutionAttempt renewed = attempt.heartbeat(at, leaseDuration);
         if (!leases.renewLease(locked.orElseThrow().organizationId(), renewed)) {
             // The compare-and-set found the assignment already changed underneath the read. Losing that race is
             // not an error; it means somebody fenced this assignment between the lock and the write.
             count("kaas.worker.heartbeat.rejected", "STALE_ASSIGNMENT");
-            return new HeartbeatOutcome(false, "STALE_ASSIGNMENT", run);
+            return HeartbeatOutcome.refused("STALE_ASSIGNMENT", run);
         }
         count("kaas.worker.heartbeat.accepted", "RENEWED");
-        return new HeartbeatOutcome(true, "RENEWED", run);
+        // The window this renewal just established, both instants from the database's own clock.
+        return new HeartbeatOutcome(true, "RENEWED", run, at, renewed.assignment().leaseExpiresAt());
     }
 
     /**
@@ -233,5 +242,23 @@ public class WorkerLeaseService {
     }
 
     /** Whether the lease was renewed, and a bounded reason when it was not. */
-    public record HeartbeatOutcome(boolean renewed, String reason, TestRun run) {}
+    /**
+     * What the control plane decided about one renewal, and the lease window it decided it in.
+     *
+     * <p>{@code serverNow} and {@code leaseExpiresAt} are both read in the <strong>database's</strong> clock
+     * domain and are meaningless apart from each other. They are returned as a pair so a worker can derive
+     * {@code leaseExpiresAt - serverNow} — a duration — and never has to compare its own wall clock against a
+     * database instant. Two hosts' wall clocks differ by whatever NTP has not corrected yet; a duration
+     * computed inside one clock domain does not.
+     *
+     * <p>Both are null when the renewal was refused before any lease was read. A refusal is not a window.
+     */
+    public record HeartbeatOutcome(
+            boolean renewed, String reason, TestRun run, Instant serverNow, Instant leaseExpiresAt) {
+
+        /** A refusal that names no lease window, for the cases decided before one was read. */
+        public static HeartbeatOutcome refused(String reason, TestRun run) {
+            return new HeartbeatOutcome(false, reason, run, null, null);
+        }
+    }
 }

@@ -5,6 +5,8 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;
@@ -47,15 +49,39 @@ class WorkerLeaseController {
      * platform.
      */
     @PostMapping("/runs/{runId}/attempts/{attemptId}/heartbeat")
-    ResponseEntity<Void> heartbeat(
+    ResponseEntity<Map<String, Object>> heartbeat(
             Authentication authentication,
             @PathVariable UUID runId,
             @PathVariable UUID attemptId,
             @Valid @RequestBody HeartbeatRequest request) {
         var outcome = leases.heartbeat(runId, attemptId, request.assignmentEpoch(), authentication.getName());
-        return outcome.renewed()
-                ? ResponseEntity.noContent().cacheControl(CacheControl.noStore()).build()
-                : ResponseEntity.status(409).cacheControl(CacheControl.noStore()).build();
+
+        // THE DECISION, NOT A BOOLEAN.
+        //
+        // This used to answer 204 or 409 with an empty body, which threw away everything the service had just
+        // worked out. The consequence was not cosmetic: a worker could not tell "you have been fenced" from
+        // "the database clock stepped backwards", so it could not safely act on either -- and the design
+        // conclusion drawn from that was that a worker should not act on heartbeats at all. A workload could
+        // then keep running after its authority ended, until some later phase transition happened to notice.
+        //
+        // The reason is a closed vocabulary the service already produced. It is safe to disclose here: the
+        // caller is the platform's own worker, authenticated as a service principal, and this surface is not
+        // in the public OpenAPI document.
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("decision", outcome.reason());
+        // THE LEASE WINDOW, BOTH INSTANTS FROM THE DATABASE'S CLOCK.
+        //
+        // Returned as a pair on purpose. A worker must never compare its own wall clock against a database
+        // instant -- two hosts differ by whatever NTP has not corrected -- so what it takes from here is the
+        // DURATION between these two, computed inside one clock domain, which it then holds against its own
+        // monotonic clock. Absent when the renewal was refused before any lease was read.
+        if (outcome.serverNow() != null) {
+            body.put("serverNow", outcome.serverNow().toString());
+            body.put("leaseExpiresAt", outcome.leaseExpiresAt().toString());
+        }
+        return ResponseEntity.status(outcome.renewed() ? 200 : 409)
+                .cacheControl(CacheControl.noStore())
+                .body(body);
     }
 
     /** The fencing token the caller believes it holds. Everything else about its identity comes from the token. */

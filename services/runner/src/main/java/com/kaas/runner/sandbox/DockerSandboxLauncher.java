@@ -1,5 +1,7 @@
 package com.kaas.runner.sandbox;
 
+import com.kaas.runner.authority.ExecutionAuthority;
+
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CreateContainerResponse;
@@ -50,7 +52,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
     }
 
     @Override
-    public SandboxOutcome run(SandboxLaunchRequest request) {
+    public SandboxOutcome run(SandboxLaunchRequest request, ExecutionAuthority authority) {
         if (!profile.version().equals(request.profileVersion())) {
             // A request naming a profile this launcher does not hold is refused rather than silently run under
             // whatever profile happens to be configured. Evidence has to say which policy produced it.
@@ -62,8 +64,14 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
         try {
             containerId = create(request);
             requireRuntimeEnforced(containerId);
+            // CHECKED AFTER CREATION AND BEFORE START. Authority can be lost while a sandbox is being built,
+            // and a container that is created but never started leaves nothing running to terminate. The
+            // creation is undone by the ordinary cleanup below, so this costs a container and no execution.
+            if (authority.lost()) {
+                throw new AuthorityLostException(authority.lostReason());
+            }
             docker.startContainerCmd(containerId).exec();
-            outcome = observe(containerId, startedAt);
+            outcome = observe(containerId, startedAt, authority);
         } catch (RuntimeException failure) {
             outcome = new SandboxOutcome(
                     Optional.empty(),
@@ -243,7 +251,109 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
      * <p>The deadline is enforced by the launcher, not by the workload: a sandbox that has to cooperate in its
      * own termination is not bounded at all.
      */
-    private SandboxOutcome observe(String containerId, Instant startedAt) {
+    /**
+     * How long a sandbox is given to stop on its own before it is killed.
+     *
+     * <p>Short, and bounded by construction. The workload being asked to stop is the workload whose authority
+     * has just been revoked; waiting politely for it to agree would make the stopping time a property of the
+     * code being contained rather than of the platform containing it. Hostile code that ignores the signal
+     * simply reaches the forced kill.
+     */
+    private static final Duration GRACEFUL_STOP = Duration.ofSeconds(5);
+
+    /**
+     * How often the authority is re-read while a workload runs.
+     *
+     * <p>This is the resolution of the whole mechanism: a revocation cannot be acted on sooner than the next
+     * check. Short enough that termination is prompt, long enough that it is not a spin loop — and it costs
+     * nothing per tick, because the wait it interrupts is already blocked on a latch.
+     */
+    private static final Duration AUTHORITY_POLL = Duration.ofMillis(250);
+
+    /**
+     * Waits for the workload to exit, while a sentinel terminates it if its authority ends.
+     *
+     * <h2>Why a second thread rather than a sliced wait</h2>
+     *
+     * <p>The obvious implementation is to await the exit in short slices and re-read the authority between
+     * them. It does not work, and the failure is silent: docker-java's
+     * {@code awaitCompletion(timeout, unit)} <strong>closes the underlying stream when it times out</strong>,
+     * so the first slice that expires destroys the wait and every later call returns "completed" immediately.
+     * Measured against a container sleeping for sixty seconds: slice one returned false at 257ms, and slice
+     * two returned <em>true</em> at 261ms with the container still running. A sliced wait would therefore have
+     * reported every long workload as finished a quarter of a second after it started.
+     *
+     * <p>So the wait stays exactly as it was — one blocking call with the profile deadline — and a small
+     * sentinel watches the authority alongside it. When authority ends the sentinel terminates the container,
+     * and the blocking wait returns on its own because the thing it was waiting for died. The interruption is
+     * real rather than cooperative: nothing depends on the workload noticing anything.
+     */
+    private Integer awaitExit(String containerId, ExecutionAuthority authority) throws InterruptedException {
+        WaitCallback exit = docker.waitContainerCmd(containerId).exec(new WaitCallback());
+        Thread sentinel = startAuthoritySentinel(containerId, authority);
+        try {
+            return exit.awaitStatusCode(profile.wallClockTimeout().toMillis(), TimeUnit.MILLISECONDS);
+        } finally {
+            // Always, including when the workload finished on its own. A sentinel left running would keep
+            // polling an authority for a sandbox that no longer exists, and on a busy runner that is a thread
+            // per completed execution.
+            sentinel.interrupt();
+        }
+    }
+
+    /**
+     * Watches the authority for as long as one sandbox runs.
+     *
+     * <p>Deliberately does nothing but observe and terminate. It records no outcome, touches no lifecycle
+     * state and reports nothing: the execution thread owns all of that, and a second thread writing outcomes
+     * is how two threads come to disagree about what happened.
+     */
+    private Thread startAuthoritySentinel(String containerId, ExecutionAuthority authority) {
+        Thread sentinel = new Thread(
+                () -> {
+                    try {
+                        while (!Thread.currentThread().isInterrupted()) {
+                            if (authority.lost()) {
+                                terminate(containerId);
+                                return;
+                            }
+                            Thread.sleep(AUTHORITY_POLL.toMillis());
+                        }
+                    } catch (InterruptedException stopped) {
+                        Thread.currentThread().interrupt();
+                    } catch (RuntimeException failure) {
+                        // Never propagated. This runs on its own thread, so a throw here would be swallowed by
+                        // the JVM's default handler and the only visible effect would be a sandbox that failed
+                        // to stop -- which is the one outcome this code exists to prevent. The execution
+                        // thread's own deadline remains as the backstop.
+                    }
+                },
+                "kaas-authority-sentinel-" + containerId.substring(0, Math.min(12, containerId.length())));
+        sentinel.setDaemon(true);
+        sentinel.start();
+        return sentinel;
+    }
+
+    /**
+     * Stops a sandbox, politely and then not.
+     *
+     * <p>Docker's own stop is used for the graceful half because it already implements the bound: it signals
+     * the workload, waits the timeout, and kills it itself. The explicit kill afterwards covers the cases
+     * where that call fails or returns while something is still alive, because "the stop command returned" is
+     * not the same claim as "nothing is running".
+     */
+    private void terminate(String containerId) {
+        try {
+            docker.stopContainerCmd(containerId)
+                    .withTimeout((int) GRACEFUL_STOP.toSeconds())
+                    .exec();
+        } catch (RuntimeException alreadyStopping) {
+            // A container that has already exited, or is already being stopped, is not a failure here.
+        }
+        kill(containerId);
+    }
+
+    private SandboxOutcome observe(String containerId, Instant startedAt, ExecutionAuthority authority) {
         BoundedOutput output = new BoundedOutput(profile.maximumOutputBytes());
         try {
             docker.logContainerCmd(containerId)
@@ -251,9 +361,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                     .withStdErr(true)
                     .withFollowStream(true)
                     .exec(output);
-            Integer exitCode = docker.waitContainerCmd(containerId)
-                    .exec(new WaitCallback())
-                    .awaitStatusCode(profile.wallClockTimeout().toMillis(), TimeUnit.MILLISECONDS);
+            Integer exitCode = awaitExit(containerId, authority);
             // The container exiting does not mean its output has arrived. Reading the observations at this
             // point without waiting for the stream to drain makes every conclusion drawn from them racy — and
             // a security check that intermittently sees nothing is a security check that intermittently
@@ -261,6 +369,25 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
             boolean drained = output.awaitCompletion(
                     OUTPUT_DRAIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
             Duration elapsed = Duration.between(startedAt, Instant.now());
+            // WHY THE SANDBOX ENDED, AND NOT MERELY THAT IT DID.
+            //
+            // A terminated container exits with a status like any other, so without this a sandbox the
+            // platform killed is indistinguishable from a workload that finished on its own -- and a killed
+            // one would be read as a completed one. The observations it managed to produce are kept, because
+            // what a workload said before it was stopped is still evidence; what changes is that the outcome
+            // names the authority loss as the reason.
+            //
+            // Checked ahead of the drain, because an authority loss explains an incomplete drain rather than
+            // being explained by it.
+            Optional<SandboxFailure> failure = authority.lost()
+                    ? Optional.of(SandboxFailure.SANDBOX_AUTHORITY_LOST)
+                    : drained
+                            // An incomplete drain means the observations are a partial view, and a partial
+                            // view must not be read as evidence. Saying so here is what stops a check
+                            // concluding a control was enforced from the absence of a line that simply had
+                            // not arrived yet.
+                            ? Optional.empty()
+                            : Optional.of(SandboxFailure.SANDBOX_OBSERVE_FAILED);
             return new SandboxOutcome(
                     Optional.ofNullable(exitCode),
                     output.observations(),
@@ -268,10 +395,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                     output.retainedBytes(),
                     elapsed,
                     outOfMemory(containerId),
-                    // An incomplete drain means the observations are a partial view, and a partial view must
-                    // not be read as evidence. Saying so here is what stops a check concluding a control was
-                    // enforced from the absence of a line that simply had not arrived yet.
-                    drained ? Optional.empty() : Optional.of(SandboxFailure.SANDBOX_OBSERVE_FAILED));
+                    failure);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             kill(containerId);
@@ -351,6 +475,9 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
         if (failure instanceof SandboxCleanupException cleanup) {
             return cleanup.failure();
         }
+        if (failure instanceof AuthorityLostException) {
+            return SandboxFailure.SANDBOX_AUTHORITY_LOST;
+        }
         if (failure instanceof SandboxRuntimeMismatchException) {
             return SandboxFailure.SANDBOX_RUNTIME_MISMATCH;
         }
@@ -387,6 +514,25 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
     public static final class SandboxRuntimeMismatchException extends RuntimeException {
         SandboxRuntimeMismatchException(String message) {
             super(message);
+        }
+    }
+
+    /**
+     * Signals that authority ended while the sandbox was being created.
+     *
+     * <p>Carries the decision so the outcome can name it. A generic launch failure here would report a
+     * cancelled run as a broken host.
+     */
+    public static final class AuthorityLostException extends RuntimeException {
+        private final com.kaas.runner.authority.AuthorityDecision decision;
+
+        AuthorityLostException(com.kaas.runner.authority.AuthorityDecision decision) {
+            super("Execution authority ended before the sandbox started.");
+            this.decision = decision;
+        }
+
+        public com.kaas.runner.authority.AuthorityDecision decision() {
+            return decision;
         }
     }
 

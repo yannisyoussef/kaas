@@ -1,5 +1,6 @@
 package com.kaas.runner.gate;
 
+import com.kaas.runner.authority.ExecutionAuthority;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.kaas.runner.sandbox.ExecutionRuntimeType;
@@ -173,7 +174,7 @@ class SecurityGateRedPathTests {
         }
 
         @Override
-        public SandboxOutcome run(SandboxLaunchRequest request) {
+        public SandboxOutcome run(SandboxLaunchRequest request, ExecutionAuthority authority) {
             SyntheticProbe probe = request.probe();
             boolean timedOut = probe == SyntheticProbe.SLEEP;
             return new SandboxOutcome(

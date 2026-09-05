@@ -41,6 +41,15 @@ public enum SandboxFailure {
      * nothing would be able to prove it was the defence that held.
      */
     SANDBOX_RUNTIME_MISMATCH,
+
+    /**
+     * Execution authority ended while the sandbox was running, or before it started.
+     *
+     * <p>Its own category because it is not a fault. The host was healthy, the image was right and the
+     * boundary held; what ended was this worker's right to keep executing. Reporting it as a launch or
+     * observation failure would send an operator to look for a broken daemon after an ordinary cancellation.
+     */
+    SANDBOX_AUTHORITY_LOST,
     /** Created but could not start. */
     SANDBOX_START_FAILED,
     /** Exceeded its wall-clock deadline and was terminated by the launcher. */

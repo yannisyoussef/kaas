@@ -1,5 +1,7 @@
 package com.kaas.runner.sandbox;
 
+import com.kaas.runner.authority.ExecutionAuthority;
+
 /**
  * The trusted boundary between a container runtime and everything else.
  *
@@ -18,11 +20,29 @@ public interface SandboxLauncher {
     /**
      * Runs one synthetic probe to completion, termination, or deadline, and cleans up afterwards.
      *
+     * <p><strong>The authority is checked while the workload runs, not only before it starts.</strong> A
+     * sandbox whose assignment is cancelled, fenced, or whose lease can no longer be assumed valid is
+     * terminated where it stands — gracefully if it cooperates, forcibly if it does not. Before this existed,
+     * a workload already inside a sandbox kept running until it finished on its own or hit the profile
+     * deadline, whatever the control plane had decided in the meantime.
+     *
      * <p>Never throws for a workload's behaviour. A probe that is killed by a memory ceiling, terminated at
      * its deadline, or truncated for talking too much has behaved exactly as the boundary intends, and the
      * outcome reports that rather than raising. Exceptions are reserved for the launcher failing.
      */
-    SandboxOutcome run(SandboxLaunchRequest request);
+    SandboxOutcome run(SandboxLaunchRequest request, ExecutionAuthority authority);
+
+    /**
+     * Runs a probe whose execution no assignment authorizes.
+     *
+     * <p>For the security gate and the contract suites, which launch sandboxes outside any run. It delegates
+     * to the interruptible path with an authority that is never lost, rather than being a second way to start
+     * a container — one path means the interruption machinery is exercised by every sandbox the repository
+     * starts, instead of only by the tests written for it.
+     */
+    default SandboxOutcome run(SandboxLaunchRequest request) {
+        return run(request, ExecutionAuthority.retained());
+    }
 
     /** The profile every sandbox this launcher creates is bound to. */
     SandboxSecurityProfile profile();

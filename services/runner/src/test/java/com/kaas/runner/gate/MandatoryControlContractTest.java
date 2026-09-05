@@ -1,5 +1,6 @@
 package com.kaas.runner.gate;
 
+import com.kaas.runner.authority.ExecutionAuthority;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.kaas.runner.sandbox.ExecutionRuntimeType;
@@ -142,7 +143,7 @@ class MandatoryControlContractTest {
         }
 
         @Override
-        public SandboxOutcome run(SandboxLaunchRequest request) {
+        public SandboxOutcome run(SandboxLaunchRequest request, ExecutionAuthority authority) {
             return new SandboxOutcome(
                     java.util.Optional.empty(),
                     java.util.Map.of(),
