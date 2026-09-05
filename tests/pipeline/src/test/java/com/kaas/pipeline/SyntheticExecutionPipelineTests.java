@@ -798,6 +798,222 @@ class SyntheticExecutionPipelineTests {
                 .isZero();
     }
 
+    @Test
+    @DisplayName("cancelling a run stops the workload that is already inside the sandbox")
+    void cancellationStopsARunningWorkload() throws Exception {
+        try {
+            // THE PROPERTY THIS SLICE EXISTS FOR, end to end through the real control plane.
+            //
+            // Database fencing already refused a stale worker's writes, and there are tests for that. None of them
+            // says anything about the workload: before this, a cancelled run's sandbox kept running until it
+            // finished on its own or hit the profile deadline. The workload here sleeps for an hour, so it will
+            // not finish on its own, and the deadline is far beyond what this test waits for.
+            Tenant tenant = tenant(List.of("@smoke"));
+            UUID runId = claimedRunFor(tenant);
+            UUID attemptId = attemptId(runId);
+    
+            var report = new java.util.concurrent.atomic.AtomicReference<ExecutionLoop.ExecutionReport>();
+            var thrown = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+            Thread worker = new Thread(() -> {
+                try {
+                    report.set(loop(com.kaas.runner.sandbox.SyntheticProbe.SLEEP).execute(runId, attemptId, 1));
+                } catch (Throwable failure) {
+                    // Kept, never discarded. A racer that died is a result, and swallowing it here would turn a
+                    // broken worker into a test that simply waits for a report that never arrives.
+                    thrown.set(failure);
+                }
+            });
+            worker.start();
+    
+            // Wait until the workload is genuinely inside a sandbox. Cancelling earlier would exercise the
+            // provisioning path, which is a different property.
+            waitUntil(() -> "RUNNING".equals(jdbc.queryForObject(
+                    "select lifecycle_state from test_runs where run_id = ?", String.class, runId)));
+    
+            Instant cancelledAt = Instant.now();
+            assertThat(post("/api/v1/runs/" + runId + "/cancellations", tenant.bearer(),
+                            json(Map.of("reason", "USER_REQUESTED"))).statusCode())
+                    .isBetween(200, 299);
+    
+            worker.join(Duration.ofSeconds(90).toMillis());
+            Duration stoppedIn = Duration.between(cancelledAt, Instant.now());
+    
+            assertThat(thrown.get()).isNull();
+            assertThat(worker.isAlive()).as("the worker must return, not hang").isFalse();
+            // It stopped because its authority ended, and it says so -- rather than reporting a timeout, which is
+            // what a worker that merely ran into the profile deadline would report.
+            assertThat(report.get()).isNotNull();
+            assertThat(report.get().status())
+                    .as("report was %s / %s", report.get().status(), report.get().detail())
+                    .isEqualTo("AUTHORITY_LOST");
+            assertThat(report.get().detail()).isEqualTo("RUN_NOT_OWNED");
+            // Bounded by the platform: one heartbeat interval to notice, one graceful window to stop.
+            assertThat(stoppedIn).as("stopped in %s", stoppedIn).isLessThan(Duration.ofSeconds(45));
+    
+            // NO STALE SUCCESS. The run is cancelled, and no result was submitted by a worker that had already
+            // lost the right to submit one.
+            Map<String, Object> run = jdbc.queryForMap(
+                    "select lifecycle_state, test_outcome from test_runs where run_id = ?", runId);
+            assertThat(run.get("test_outcome")).isNull();
+            assertThat(jdbc.queryForObject(
+                            "select count(*) from execution_results where run_id = ?", Integer.class, runId))
+                    .isZero();
+            assertThat(managedContainers()).as("no sandbox outlives the cancellation").isEmpty();
+        } finally {
+            // Always, including when an assertion above failed. See removeAnyManagedContainers.
+            removeAnyManagedContainers();
+        }
+    }
+
+    @Test
+    @DisplayName("a prolonged control-plane outage stops the workload once the lease budget is gone")
+    void aProlongedOutageStopsTheWorkload() throws Exception {
+        // CASE E. The control plane is reachable for everything except renewals, so the worker authorizes and
+        // starts normally and then cannot prove it still owns the assignment. Nothing tells it to stop; it
+        // stops itself, because the lease it is relying on can no longer be assumed valid.
+        //
+        // This is the case that distinguishes a bounded authority from an unbounded one. A worker that
+        // continued on "last known good" would keep the workload running indefinitely, and every database
+        // fencing test in this repository would still pass.
+        UUID runId = claimedRun(List.of("@smoke"));
+        UUID attemptId = attemptId(runId);
+
+        try (ControlPlaneFaultProxy proxy = new ControlPlaneFaultProxy(port)) {
+            proxy.failRenewals();
+            var report = new java.util.concurrent.atomic.AtomicReference<ExecutionLoop.ExecutionReport>();
+            var thrown = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+            Thread worker = new Thread(() -> {
+                try {
+                    report.set(loopThrough(proxy.baseUri(), com.kaas.runner.sandbox.SyntheticProbe.SLEEP)
+                            .execute(runId, attemptId, 1));
+                } catch (Throwable failure) {
+                    thrown.set(failure);
+                }
+            });
+            Instant startedAt = Instant.now();
+            worker.start();
+            worker.join(Duration.ofSeconds(120).toMillis());
+            Duration stoppedIn = Duration.between(startedAt, Instant.now());
+
+            assertThat(thrown.get()).isNull();
+            assertThat(worker.isAlive()).as("the worker must stop itself").isFalse();
+            assertThat(proxy.renewalsSeen()).as("it did try to renew").isPositive();
+            assertThat(report.get().status())
+                    .as("report was %s / %s", report.get().status(), report.get().detail())
+                    .isEqualTo("AUTHORITY_LOST");
+            // Named as the lease expiring rather than as a network fault. What ended is the authority; the
+            // outage is only why it could not be renewed.
+            assertThat(report.get().detail()).isEqualTo("LEASE_EXPIRED");
+            // Bounded by the budget the runner starts with, not by the sandbox's own deadline.
+            assertThat(stoppedIn).as("stopped in %s", stoppedIn).isLessThan(Duration.ofSeconds(60));
+
+            // NO SUCCESSFUL RESULT from a worker that could not prove it still had authority.
+            assertThat(jdbc.queryForObject(
+                            "select count(*) from execution_results where run_id = ?", Integer.class, runId))
+                    .isZero();
+            assertThat(managedContainers()).isEmpty();
+        } finally {
+            removeAnyManagedContainers();
+        }
+    }
+
+    @Test
+    @DisplayName("a transient outage inside the lease budget does not stop a healthy run")
+    void aTransientOutageIsSurvived() throws Exception {
+        // CASE B, and the counterweight to everything above. A mechanism that stops workloads is only useful
+        // if it does not stop healthy ones: killing a run on one missed renewal would turn ordinary network
+        // latency into lost work, which is precisely why the previous design swallowed failures entirely.
+        UUID runId = claimedRun(List.of("@smoke"));
+        UUID attemptId = attemptId(runId);
+
+        try (ControlPlaneFaultProxy proxy = new ControlPlaneFaultProxy(port)) {
+            var report = new java.util.concurrent.atomic.AtomicReference<ExecutionLoop.ExecutionReport>();
+            var thrown = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+            Thread worker = new Thread(() -> {
+                try {
+                    report.set(loopThrough(proxy.baseUri(), com.kaas.runner.sandbox.SyntheticProbe.WORKLOAD_PASS)
+                            .execute(runId, attemptId, 1));
+                } catch (Throwable failure) {
+                    thrown.set(failure);
+                }
+            });
+            // Renewals fail for one interval and then recover, well inside the budget.
+            proxy.failRenewals();
+            worker.start();
+            Thread.sleep(Duration.ofSeconds(6).toMillis());
+            proxy.restoreRenewals();
+
+            worker.join(Duration.ofSeconds(120).toMillis());
+
+            assertThat(thrown.get()).isNull();
+            assertThat(report.get()).isNotNull();
+            assertThat(report.get().status())
+                    .as("report was %s / %s", report.get().status(), report.get().detail())
+                    .isEqualTo("COMPLETED");
+            assertThat(report.get().detail()).isEqualTo("PASSED");
+            assertThat(jdbc.queryForObject(
+                            "select lifecycle_state from test_runs where run_id = ?", String.class, runId))
+                    .isEqualTo("COMPLETED");
+        } finally {
+            removeAnyManagedContainers();
+        }
+    }
+
+    /** A loop whose control plane is reached through the given base URI. */
+    private ExecutionLoop loopThrough(java.net.URI baseUri, com.kaas.runner.sandbox.SyntheticProbe workload)
+            throws Exception {
+        ControlPlaneClient client = new ControlPlaneClient(
+                HttpClient.newHttpClient(),
+                baseUri,
+                "Bearer " + token(WORKER, null),
+                java.time.Duration.ofSeconds(30),
+                duration -> Thread.sleep(duration.toMillis()));
+        SandboxSecurityProfile profile = SandboxSecurityProfile.version1(probeImage());
+        return new ExecutionLoop(
+                client,
+                new CommandValidator(mapper),
+                new DockerSandboxLauncher(docker(), profile, "pipeline"),
+                mapper,
+                Clock.systemUTC(),
+                workload);
+    }
+
+    /**
+     * Removes anything a revocation test left behind, whatever happened to it.
+     *
+     * <p>Not politeness. The workload these tests use sleeps for an hour, so a test that fails before its
+     * worker thread finishes leaves that sandbox running — and the next test, which asserts that no managed
+     * container exists, then fails for a reason that has nothing to do with what it was testing. That happened:
+     * one broken SQL statement produced three red tests, two of them innocent.
+     */
+    private void removeAnyManagedContainers() {
+        for (var container : managedContainers()) {
+            try {
+                docker().removeContainerCmd(container.getId()).withForce(true).exec();
+            } catch (RuntimeException alreadyGone) {
+                // Removing something that is already gone is exactly the outcome wanted.
+            }
+        }
+    }
+
+    /** Every container this pipeline's launcher generation created and did not remove. */
+    private java.util.List<com.github.dockerjava.api.model.Container> managedContainers() {
+        return docker().listContainersCmd()
+                .withShowAll(true)
+                .withLabelFilter(Map.of("kaas.launcher.generation", "pipeline"))
+                .exec();
+    }
+
+    private static void waitUntil(java.util.function.BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+        while (!condition.getAsBoolean()) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("condition never became true");
+            }
+            Thread.sleep(100);
+        }
+    }
+
     private ExecutionLoop loopUnderRuntime(ExecutionRuntimeType runtime) throws Exception {
         ControlPlaneClient client = new ControlPlaneClient(
                 HttpClient.newHttpClient(),
