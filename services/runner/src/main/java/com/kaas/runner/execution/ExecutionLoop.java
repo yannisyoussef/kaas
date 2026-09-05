@@ -14,6 +14,10 @@ import com.kaas.runner.sandbox.EgressTarget;
 import com.kaas.runner.sandbox.SandboxLaunchRequest;
 import com.kaas.runner.sandbox.SandboxLauncher;
 import com.kaas.runner.sandbox.SandboxOutcome;
+import com.kaas.runner.authority.ExecutionAuthority;
+import com.kaas.runner.authority.ExecutionAuthorityMonitor;
+import com.kaas.runner.authority.HeartbeatRenewal;
+import com.kaas.runner.authority.MonotonicClock;
 import com.kaas.runner.sandbox.SandboxSecurityProfile;
 import com.kaas.runner.sandbox.SyntheticProbe;
 import java.time.Clock;
@@ -146,16 +150,30 @@ public final class ExecutionLoop {
             return ExecutionReport.rejected("The command describes a different assignment.");
         }
 
-        // 3. THE LEASE, kept alive for the whole of what follows.
+        // 3. CONTINUOUS EXECUTION AUTHORITY, maintained for the whole of what follows.
         //
-        // Started before provisioning and closed after the final transition, because every step from here on is
-        // refused if the lease has lapsed. The interval is a fraction of the shortest lease the platform is
-        // likely to grant; this process cannot see the lease duration, so it renews often rather than cleverly.
-        try (LeaseHeartbeat ignored = LeaseHeartbeat.start(
-                controlPlane, runId, attemptId, assignmentEpoch,
-                mapper.createObjectNode().put("assignmentEpoch", assignmentEpoch).toString(),
-                HEARTBEAT_INTERVAL)) {
-            return execute(runId, attemptId, assignmentEpoch, command, plan);
+        // Started before provisioning and closed after the final transition, so every worker-owned phase is
+        // inside its lifetime. It renews the lease exactly as the old heartbeat did, and unlike the old
+        // heartbeat it acts on the answer: a definitive refusal stops the sandbox where it stands, and an
+        // unreachable control plane consumes the remaining lease budget and then stops it anyway.
+        //
+        // The initial budget is the lease the platform granted at claim time, which is already running. A
+        // monitor that began unbounded would leave a window before the first renewal in which nothing bounded
+        // execution at all — the exact gap this slice exists to close, reintroduced at its own start.
+        try (ExecutionAuthorityMonitor authority = ExecutionAuthorityMonitor.start(
+                new HeartbeatRenewal(
+                        controlPlane,
+                        mapper,
+                        runId,
+                        attemptId,
+                        mapper.createObjectNode().put("assignmentEpoch", assignmentEpoch).toString(),
+                        RENEWAL_TIMEOUT),
+                MonotonicClock.system(),
+                HEARTBEAT_INTERVAL,
+                SAFETY_MARGIN,
+                INITIAL_AUTHORITY_BUDGET,
+                "kaas-authority-" + runId)) {
+            return execute(runId, attemptId, assignmentEpoch, command, plan, authority);
         }
     }
 
@@ -187,8 +205,43 @@ public final class ExecutionLoop {
     /** How often the lease is renewed while a run executes. */
     private static final Duration HEARTBEAT_INTERVAL = Duration.ofSeconds(5);
 
+    /**
+     * How long one renewal attempt may take.
+     *
+     * <p>Bounded, and deliberately far below any lease. The ordinary control-plane call retries three times
+     * with backoff, which can exceed ninety seconds — longer than the lease it would be renewing — so the
+     * monitor uses a single bounded attempt and does its own retrying on the interval above.
+     */
+    private static final Duration RENEWAL_TIMEOUT = Duration.ofSeconds(5);
+
+    /**
+     * How much of the lease is given up so the worker stops before its authority can have ended.
+     *
+     * <p>Derived rather than chosen. The worker must be able to make at least one complete renewal attempt
+     * inside the margin — otherwise the deadline could fall in the middle of the very request that would have
+     * extended it — so the floor is one interval plus one renewal timeout. That is what this is.
+     *
+     * <p>Stopping early costs a run that might have continued. Stopping late means code ran with no authority
+     * behind it, which is the failure that matters, so the margin errs toward stopping early.
+     */
+    private static final Duration SAFETY_MARGIN = HEARTBEAT_INTERVAL.plus(RENEWAL_TIMEOUT);
+
+    /**
+     * How long execution may continue before the first successful renewal.
+     *
+     * <p>Conservative on purpose: the runner cannot see the lease the platform granted until a renewal tells
+     * it, and assuming a generous one would be assuming authority it has not been given. One margin's worth is
+     * enough to reach the first renewal and no more.
+     */
+    private static final Duration INITIAL_AUTHORITY_BUDGET = SAFETY_MARGIN.plus(HEARTBEAT_INTERVAL);
+
     private ExecutionReport execute(
-            UUID runId, UUID attemptId, int assignmentEpoch, ValidatedCommand command, EgressPlan plan)
+            UUID runId,
+            UUID attemptId,
+            int assignmentEpoch,
+            ValidatedCommand command,
+            EgressPlan plan,
+            ExecutionAuthority authority)
             throws ControlPlaneUnavailable {
 
         // 3. PROVISIONING, announced before the sandbox exists. Announcing afterwards would leave a window in
@@ -286,7 +339,7 @@ public final class ExecutionLoop {
                 // a property of the policy rather than of this runner's configuration: an allowlist run whose
                 // workload never touched the network would complete successfully having demonstrated nothing.
                 outcome = egress.launcher().run(
-                        new SandboxLaunchRequest(SyntheticProbe.WORKLOAD_EGRESS, expected, runId));
+                        new SandboxLaunchRequest(SyntheticProbe.WORKLOAD_EGRESS, expected, runId), authority);
                 if (!egress.proxyIsRunning()) {
                     // CONSERVATIVE, and deliberately unconditional. The sandbox may have produced a
                     // perfectly well-formed result before the proxy died, and that result is still evidence
@@ -307,8 +360,8 @@ public final class ExecutionLoop {
                         "The egress mechanism could not be started (" + cannotStart.failure() + ").");
             }
         } else {
-            outcome = launcher.run(new SandboxLaunchRequest(
-                    workload, command.sandboxProfileVersion(), runId));
+            outcome = launcher.run(
+                    new SandboxLaunchRequest(workload, command.sandboxProfileVersion(), runId), authority);
         }
         // ABSENT OR INCOMPLETE EVIDENCE IS AN INFRASTRUCTURE FAILURE, NOT A TEST RESULT.
         //
@@ -318,6 +371,19 @@ public final class ExecutionLoop {
         // submitted a perfectly well-formed document saying the infrastructure succeeded and the tenant's test
         // failed. Every constraint in the system accepts that document, because it is internally consistent.
         // It is simply false, and it is false in the direction that blames the tenant for the platform.
+        // AUTHORITY FIRST, BEFORE ANY SUBMISSION.
+        //
+        // Checked here, ahead of every other reading of the outcome, because a workload that was stopped may
+        // still have produced a perfectly well-formed result a moment earlier — and that result is not
+        // evidence about anything. It was produced by a worker that no longer had the right to produce it.
+        //
+        // Nothing is reported to the control plane. Whatever revoked the authority already knows what the run
+        // is; a stale worker adding to that is exactly the writing that fencing exists to refuse, and
+        // attempting it would produce a confusing refusal rather than a clean stop.
+        if (authority.lost()) {
+            return ExecutionReport.authorityLost(authority.lostReason().name());
+        }
+
         // The egress verdict takes precedence. An outcome gathered while the execution's enforcement point
         // was disappearing is not evidence about anything, whatever shape it happens to have.
         String detail = egressDetail != null ? egressDetail : infrastructureFailureDetail(outcome);
@@ -537,6 +603,22 @@ public final class ExecutionLoop {
 
         public static ExecutionReport infrastructureFailure(String detail) {
             return new ExecutionReport("INFRASTRUCTURE_FAILED", "EXECUTION", detail);
+        }
+
+        /**
+         * This worker stopped because it no longer had the authority to continue.
+         *
+         * <p>Its own status because it is neither a refusal nor an infrastructure failure. A refusal is the
+         * control plane declining a transition this worker attempted; this worker attempts none. An
+         * infrastructure failure says something is wrong with the host, and nothing is — the platform decided
+         * this assignment was over, and the worker complied.
+         *
+         * <p>Nothing is submitted alongside it. Whatever decided the authority was gone — a cancellation, a
+         * fence, an expired lease — already knows what the run is, and a stale worker reporting on top of that
+         * would be a stale worker writing.
+         */
+        public static ExecutionReport authorityLost(String reason) {
+            return new ExecutionReport("AUTHORITY_LOST", "EXECUTION", reason);
         }
     }
 }

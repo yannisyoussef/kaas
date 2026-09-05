@@ -118,7 +118,7 @@ class LeaseRenewalPipelineTests {
         while (Instant.now().isBefore(deadline)) {
             assertThat(heartbeat(runId, attemptId).statusCode())
                     .as("a heartbeat during PROVISIONING must be accepted")
-                    .isEqualTo(204);
+                    .isEqualTo(200);
             Thread.sleep(500);
         }
 
@@ -263,7 +263,7 @@ class LeaseRenewalPipelineTests {
         // worker binds it, the attempt is held by nobody and no phase may be driven.
         assertThat(heartbeat(runId, attemptId(runId)).statusCode())
                 .as("the first heartbeat must acquire the assignment")
-                .isEqualTo(204);
+                .isEqualTo(200);
         return runId;
     }
 

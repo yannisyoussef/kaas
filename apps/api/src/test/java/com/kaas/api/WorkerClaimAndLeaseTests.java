@@ -319,7 +319,7 @@ class WorkerClaimAndLeaseTests {
         UUID attemptId = attemptOf(runId);
         Instant firstExpiry = leaseExpiry(runId);
 
-        assertThat(heartbeat(runId, attemptId, 1, serviceToken(WORKER)).statusCode()).isEqualTo(204);
+        assertThat(heartbeat(runId, attemptId, 1, serviceToken(WORKER)).statusCode()).isEqualTo(200);
 
         assertThat(leaseExpiry(runId)).isAfter(firstExpiry);
         // A heartbeat is not a transition: no version, no event, no lifecycle change.
@@ -355,7 +355,7 @@ class WorkerClaimAndLeaseTests {
         // simultaneously a service and a tenant is a confusion waiting to be exploited.
         assertThat(heartbeat(runId, attemptId, 1, hybridToken(WORKER, tenant.organizationId())).statusCode())
                 .isEqualTo(401);
-        assertThat(heartbeat(runId, attemptId, 1, serviceToken(WORKER)).statusCode()).isEqualTo(204);
+        assertThat(heartbeat(runId, attemptId, 1, serviceToken(WORKER)).statusCode()).isEqualTo(200);
     }
 
     // ---------------------------------------------------------------- lease loss
@@ -439,7 +439,7 @@ class WorkerClaimAndLeaseTests {
                         "select lease_expires_at - interval '400 milliseconds' <= now()"
                                 + " from execution_attempts where run_id = ?",
                         Boolean.class, runId)));
-        assertThat(heartbeat(runId, attemptId, 1, serviceToken(WORKER)).statusCode()).isEqualTo(204);
+        assertThat(heartbeat(runId, attemptId, 1, serviceToken(WORKER)).statusCode()).isEqualTo(200);
 
         // Past the instant the lease would have died without that heartbeat, and past the recovery window too.
         Awaitility.await()

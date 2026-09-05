@@ -69,6 +69,47 @@ public final class ControlPlaneClient {
         return post("/internal/v1/runs/" + runId + "/attempts/" + attemptId + "/heartbeat", body);
     }
 
+    /**
+     * Renews this assignment's lease with exactly one attempt, bounded by {@code timeout}.
+     *
+     * <h2>Why not {@link #heartbeat}</h2>
+     *
+     * <p>The ordinary path retries three times with exponential backoff, so a single call can take three
+     * request timeouts plus the backoff between them — around ninety seconds against a thirty-second request
+     * timeout. A renewal that can block for longer than the lease it is renewing is not a renewal mechanism:
+     * by the time it returns, the answer is about a lease that has already expired.
+     *
+     * <p>So this attempts once and reports failure immediately. The retrying happens in the authority
+     * monitor's own loop instead, where each attempt is bounded and the remaining budget is what decides
+     * whether there is time for another — rather than in a client that knows nothing about the lease.
+     */
+    public Response renewLease(UUID runId, UUID attemptId, String body, Duration timeout)
+            throws ControlPlaneUnavailable {
+        String path = "/internal/v1/runs/" + runId + "/attempts/" + attemptId + "/heartbeat";
+        HttpRequest request = HttpRequest.newBuilder(baseUri.resolve(path))
+                .timeout(timeout)
+                .header("Content-Type", "application/json")
+                .header("Authorization", authorization)
+                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                .build();
+        try {
+            HttpResponse<String> response =
+                    http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() >= 500) {
+                // A server fault decides nothing about this assignment. Reported as unavailable so it
+                // consumes the lease budget rather than being read as a refusal.
+                throw new ControlPlaneUnavailable(
+                        "The control plane returned " + response.statusCode() + " for a renewal.", null);
+            }
+            return new Response(response.statusCode(), response.body());
+        } catch (IOException transport) {
+            throw new ControlPlaneUnavailable("The control plane could not be reached for a renewal.", transport);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new ControlPlaneUnavailable("Interrupted while renewing.", interrupted);
+        }
+    }
+
     /** Revalidates this assignment's authority and returns a fresh command. */
     public Response authorize(UUID runId, UUID attemptId, String body) throws ControlPlaneUnavailable {
         return post(
