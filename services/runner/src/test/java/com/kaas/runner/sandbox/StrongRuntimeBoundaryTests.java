@@ -2,6 +2,7 @@ package com.kaas.runner.sandbox;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.kaas.runner.gate.HostileExecutionAssessment;
 import com.kaas.runner.gate.HostileExecutionSecurityGate;
 import com.kaas.runner.gate.SecurityCheck;
 import java.util.List;
@@ -36,6 +37,35 @@ class StrongRuntimeBoundaryTests {
 
     private static final String GENERATION = "strong-runtime-" + UUID.randomUUID();
 
+    /**
+     * One assessment per runtime, computed once for the whole suite.
+     *
+     * <p>Every probe costs roughly three times what it costs under the baseline, and the deadline the sleep
+     * probe waits out is scaled with it — so a full assessment is minutes rather than seconds, and running
+     * one per test spent most of the job repeating an identical measurement. Nothing is lost by sharing it:
+     * an assessment is a single observation of one host, and the tests below ask different questions of the
+     * same observation rather than needing independent ones.
+     */
+    private static HostileExecutionAssessment mediated;
+
+    private static HostileExecutionAssessment baseline;
+
+    private static synchronized HostileExecutionAssessment mediatedAssessment() {
+        if (mediated == null) {
+            mediated = new HostileExecutionSecurityGate(launcher(), "docker").assess();
+        }
+        return mediated;
+    }
+
+    private static synchronized HostileExecutionAssessment baselineAssessment() {
+        if (baseline == null) {
+            baseline = new HostileExecutionSecurityGate(
+                            SandboxTestSupport.launcher(SandboxTestSupport.profile(), GENERATION), "docker")
+                    .assess();
+        }
+        return baseline;
+    }
+
     @BeforeAll
     static void requireTheRuntime() {
         // FAIL, never skip. A gate that quietly passes when the runtime is absent is indistinguishable from
@@ -52,7 +82,7 @@ class StrongRuntimeBoundaryTests {
     @Timeout(900)
     @DisplayName("every mandatory control still holds under the mediating runtime")
     void everyMandatoryControlHoldsUnderTheMediatingRuntime() {
-        var assessment = new HostileExecutionSecurityGate(launcher(), "docker").assess();
+        var assessment = mediatedAssessment();
 
         // The SAME contract the baseline gate is held to. Not a relaxed set, and not a different set: if a
         // control cannot be demonstrated under this runtime that is a finding, not a reason to drop it.
@@ -70,7 +100,7 @@ class StrongRuntimeBoundaryTests {
     @Timeout(600)
     @DisplayName("the sandbox reports the mediating runtime's kernel, not the host's")
     void theSandboxReportsTheMediatingRuntimesOwnKernel() {
-        var assessment = new HostileExecutionSecurityGate(launcher(), "docker").assess();
+        var assessment = mediatedAssessment();
 
         var mediation = assessment.checks().stream()
                 .filter(check -> HostileExecutionSecurityGate.RUNTIME_MEDIATION_CONTROL.equals(check.control()))
@@ -159,15 +189,18 @@ class StrongRuntimeBoundaryTests {
         // If a baseline assessment and a mediated one were interchangeable, the whole runtime binding would be
         // decoration. They differ in the profile version they are bound to and in the kernel observed, and
         // both differences are inside what an attestation signs.
-        var mediated = new HostileExecutionSecurityGate(launcher(), "docker").assess();
-        var baseline = new HostileExecutionSecurityGate(
-                        SandboxTestSupport.launcher(SandboxTestSupport.profile(), GENERATION), "docker")
-                .assess();
+        var underMediation = mediatedAssessment();
+        var underBaseline = baselineAssessment();
 
-        assertThat(mediated.profileVersion()).isNotEqualTo(baseline.profileVersion());
+        assertThat(underMediation.profileVersion()).isNotEqualTo(underBaseline.profileVersion());
 
-        List<String> mediatedControls = mediated.checks().stream().map(SecurityCheck::control).sorted().toList();
-        List<String> baselineControls = baseline.checks().stream().map(SecurityCheck::control).sorted().toList();
+        List<String> mediatedControls =
+                underMediation.checks().stream().map(SecurityCheck::control).sorted().toList();
+        List<String> baselineControls =
+                underBaseline.checks().stream().map(SecurityCheck::control).sorted().toList();
+        // The same control NAMES under both, even where the verdicts and the enforcement levels differ:
+        // NO_NEW_PRIVILEGES is reported under each, mandatory on one and unsupported on the other, and a gate
+        // that simply stopped emitting a control it could not observe would leave nothing to notice.
         assertThat(mediatedControls)
                 .as("the same contract, so the same control names — only the verdicts and the boundary differ")
                 .isEqualTo(baselineControls);
