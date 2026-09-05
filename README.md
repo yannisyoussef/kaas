@@ -42,6 +42,7 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | SSE and artifact semantics | DESIGNED + VALIDATED | Proposed ADRs, canonical docs, strict schemas, fixtures, and OpenAPI; no runtime adapters |
 | Synthetic execution lifecycle | IMPLEMENTED + VALIDATED | CLAIMED through PROVISIONING, RUNNING, COLLECTING_RESULTS, and PROCESSING_RESULTS to COMPLETED, driven by a real worker over the internal API, with per-phase deadlines, a reconciler that stops and fences overdue runs, and result provenance checked against authoritative state (ADR-024). A worker renews its lease for the whole of execution, so a run may outlive one lease period. Proven end to end on a real database, a real container runtime, and a real sandbox |
 | Karate execution | PLANNED + DISABLED | No engine dependency and no path that executes tenant content. What runs is a platform-owned synthetic workload (`KAAS_SYNTHETIC_V1`); the declared engine is `SYNTHETIC` and the runner refuses any engine it does not have |
+| Sandbox security attestation | **IMPLEMENTED + VALIDATED** | Signed by the gate that made the observations and verified against a deployment-pinned Ed25519 key (ADR-027). An operator transports the artifact and no longer authors its verdicts; the control plane holds verification authority and structurally cannot sign. `v3` required, unsigned `v2` refused with no fallback |
 | Execution egress | IMPLEMENTED + VALIDATED | `DENY_ALL` keeps the proven network-disabled path. `ALLOWLIST` is enforceable for trusted synthetic execution (ADR-026): the sandbox joins one per-execution `--internal` network whose only other member is a trusted proxy, so the no-bypass property is topological rather than configured. `ALLOWLIST` is still refused — never downgraded — unless the deployment's own assessment demonstrates it can enforce it |
 | Execution authorization | IMPLEMENTED | Owning an attempt is not permission to execute it: a separate assignment-scoped decision, bounded by the lease, revalidated on every capability redemption |
 | Source capability | IMPLEMENTED | Short-lived assignment-scoped bearer token for the snapshot-pinned feature sources; plaintext never stored |
@@ -144,6 +145,9 @@ The checked-in values are local-development defaults, not production secret mana
 - [Implemented enforceable execution egress](docs/architecture/enforceable-execution-egress.md)
 - [Execution egress slice report](EXECUTION_EGRESS_SLICE_REPORT.md)
 - [Execution egress policy](docs/security/execution-egress-policy.md)
+- [Implemented signed sandbox security attestation](docs/architecture/signed-sandbox-security-attestation.md)
+- [Signed runtime attestation](docs/security/signed-runtime-attestation.md)
+- [Signed security attestation slice report](SIGNED_SECURITY_ATTESTATION_SLICE_REPORT.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Security release requirements](docs/security/threat-model.md)
 

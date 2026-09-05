@@ -24,6 +24,7 @@
 | [024](024-synthetic-execution-lifecycle.md) | The four execution phases, bounded phase deadlines, orthogonal outcomes, result provenance, and a truthfully named synthetic engine | IMPLEMENTED; what executes is a platform-owned synthetic workload, not a test engine |
 | [025](025-execution-egress-remains-deny-all.md) | Egress stays deny-all until it can be enforced, with the eight requirements an allowlist must satisfy | ACCEPTED; PARTIALLY SUPERSEDED by 026 |
 | [026](026-enforceable-assignment-scoped-execution-egress.md) | Enforceable assignment-scoped egress through a purpose-built trusted proxy the sandbox cannot route around | ACCEPTED; allowlist enforceable for synthetic execution |
+| [027](027-signed-runtime-security-attestations.md) | Sandbox security evidence is signed by the gate that observed it and verified against a pinned key, replacing a self-consistency digest an operator wrote | ACCEPTED; v3 required, v2 refused |
 
 Deferred topics without active decisions remain: concrete object-storage/upload adapter, secret **delivery**
 mechanism and a real secret provider, outbox and CREATED-run retention policy, self-service quarantine
@@ -43,8 +44,17 @@ refused until they were met; ADR-026 meets them and makes `ALLOWLIST` enforceabl
 execution. Two of ADR-025's eight were technically incorrect as written — an internal Docker network does
 present a default route to a gateway that cannot forward, and a correct one-resolution-per-connection algorithm
 cannot detect a DNS answer it never queried — and ADR-026 corrects both wordings while preserving the
-properties they were reaching for. What remains deferred is IPv6 egress, tenant self-service authorship of a
-policy, and a signed attestation, which ADR-026 records as residual risks rather than as decisions. Worker heartbeating during execution is a new
+properties they were reaching for. What remains deferred from that slice is IPv6 egress and tenant
+self-service authorship of a policy.
+
+The signed attestation ADR-026 recorded as its largest residual risk is no longer deferred. ADR-027 replaces
+the self-consistency digest an operator wrote with an Ed25519 signature produced by the gate that made the
+observations and verified against a deployment-pinned public key. The control plane holds verification
+authority and structurally cannot hold signing authority. `kaas.sandbox-security-attestation.v3` is required
+and v2 is refused outright — no migration window, and the v2 model is deleted rather than left dormant. What
+it does **not** do is strengthen the sandbox boundary: a perfectly signed attestation describing a
+shared-kernel container is a trustworthy statement about a boundary ADR-022 still does not approve for
+hostile tenant code. Worker heartbeating during execution is a new
 deferral created by ADR-024 and a prerequisite for any run longer than a lease.
 
 `IMPLEMENTED` means verified by repository code or tooling. `PROPOSED` means design intent only. `DEFERRED` means no decision is active and implementation must not assume one.

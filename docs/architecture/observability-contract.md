@@ -59,6 +59,19 @@ read across tenants and retained far longer than a log, and the resolved address
 value this whole subsystem is careful never to emit into shared logs. A test asserts, against a real
 execution with a real capability and a real destination in play, that none of them appears in a series name.
 
+### Sandbox security attestation (implemented)
+
+`kaas.security.attestation.verification{result}` is emitted once at startup with the verification outcome, and
+`kaas.security.attestation.authorization{result}` when an authentic attestation is nonetheless refused at
+authorization. Both dimensions are the `AttestationVerification` enum — `VALID`, `MALFORMED`,
+`UNSUPPORTED_SCHEMA`, `UNKNOWN_KEY`, `DIGEST_MISMATCH`, `INVALID_SIGNATURE`, `TRUST_ROOT_UNAVAILABLE`,
+`WRONG_SUBJECT`, `STALE`, `PROFILE_MISMATCH`, `CONTROL_FAILED` — and nothing else is ever a label.
+
+Never a dimension: attestation id, key id, runtime subject, payload digest, host, or IP. The first three are
+the values that would let a metrics store answer "which runtime is failing verification", which is a question
+about a host and is exactly what an attacker would like answered. Logs carry the attestation id, key id and
+payload digest for correlation; a metrics store is read across tenants and retained far longer.
+
 ## Initial measurements
 
 - run acceptance and idempotency replay/conflict latency;
