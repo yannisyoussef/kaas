@@ -104,6 +104,22 @@ public final class ExecutionAuthorityMonitor implements ExecutionAuthority, Auto
     }
 
     private void loop() {
+        try {
+            watch();
+        } catch (RuntimeException | Error unexpected) {
+            // A MONITOR THAT DIED IS A WORKLOAD WITH NOTHING WATCHING IT.
+            //
+            // Without this the thread would end silently, the terminal reason would stay null forever, and the
+            // budget would freeze at whatever it last held -- so the sandbox would run to its own deadline
+            // with no authority behind it, which is the exact failure this class exists to prevent. The
+            // failure mode is worse than the bug that caused it, so an unexpected throw ends execution rather
+            // than ending the monitor.
+            lost.compareAndSet(null, AuthorityDecision.UNRECOGNIZED);
+            throw unexpected;
+        }
+    }
+
+    private void watch() {
         while (!stopping && lost.get() == null) {
             // AT MOST ONE RENEWAL IN FLIGHT, ALWAYS.
             //

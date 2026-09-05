@@ -282,6 +282,24 @@ class ExecutionAuthorityMonitorTest {
         return Thread.getAllStackTraces().keySet().stream().anyMatch(thread -> name.equals(thread.getName()));
     }
 
+    @Test
+    @Timeout(30)
+    @DisplayName("a monitor that dies unexpectedly stops execution rather than abandoning it")
+    void aDeadMonitorIsALostAuthority() throws Exception {
+        // The renewal source is documented as never throwing, and this is what happens when that contract is
+        // broken anyway. A thread that ended silently would leave the terminal reason null and the budget
+        // frozen, so the sandbox would run to its own deadline with nothing watching it -- strictly worse
+        // than the bug that caused it.
+        FakeClock clock = new FakeClock();
+        try (var monitor = start(clock, () -> {
+            throw new IllegalStateException("the renewal source broke its contract");
+        })) {
+            waitUntil(monitor::lost);
+            assertThat(monitor.lostReason()).isEqualTo(AuthorityDecision.UNRECOGNIZED);
+            assertThat(monitor.remainingBudget()).isEqualTo(Duration.ZERO);
+        }
+    }
+
     private ExecutionAuthorityMonitor start(
             MonotonicClock clock, ExecutionAuthorityMonitor.RenewalSource source) {
         return ExecutionAuthorityMonitor.start(source, clock, INTERVAL, MARGIN, LEASE, "test-authority-monitor");
