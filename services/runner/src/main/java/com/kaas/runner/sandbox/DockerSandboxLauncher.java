@@ -119,7 +119,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
         // A null means the daemon reported no explicit runtime, which is the default one. Treated as a
         // mismatch for anything but the default rather than as "probably fine".
         if (!expected.equals(assigned)) {
-            throw new SandboxRuntimeUnavailableException(
+            throw new SandboxRuntimeMismatchException(
                     "The sandbox was assigned runtime " + assigned + " but the profile requires " + expected
                             + "; refusing rather than running under a boundary that was not authorized.");
         }
@@ -351,6 +351,9 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
         if (failure instanceof SandboxCleanupException cleanup) {
             return cleanup.failure();
         }
+        if (failure instanceof SandboxRuntimeMismatchException) {
+            return SandboxFailure.SANDBOX_RUNTIME_MISMATCH;
+        }
         if (failure instanceof SandboxRuntimeUnavailableException) {
             // Reported as its own category. "This host has no such runtime" and "the image was wrong" send an
             // operator to entirely different places, and only one of them is a statement about the boundary.
@@ -371,6 +374,18 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
      */
     public static final class SandboxRuntimeUnavailableException extends RuntimeException {
         SandboxRuntimeUnavailableException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Signals that the daemon assigned a runtime other than the one the profile requires.
+     *
+     * <p>Separate from {@link SandboxRuntimeUnavailableException} so the two reach an operator as the
+     * different findings they are — see {@link SandboxFailure#SANDBOX_RUNTIME_MISMATCH}.
+     */
+    public static final class SandboxRuntimeMismatchException extends RuntimeException {
+        SandboxRuntimeMismatchException(String message) {
             super(message);
         }
     }

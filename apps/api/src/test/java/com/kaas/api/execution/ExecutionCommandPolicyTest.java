@@ -110,6 +110,30 @@ class ExecutionCommandPolicyTest {
         return java.util.stream.Stream.concat(values.stream(), java.util.stream.Stream.of(extra)).toList();
     }
 
+    @Test
+    void theSandboxRuntimeChangesTheDigest() {
+        // The runtime is redundant with the profile version by construction, which is exactly why it needs
+        // its own assertion: a field that carries no new information is the easiest one to leave out of the
+        // digest, and leaving it out makes it editable in flight. A command whose runtime could be rewritten
+        // between issuance and execution is a command that names a boundary nobody authorized.
+        assertThat(digestOf(draft -> withSandboxRuntime(draft, "GVISOR")))
+                .isNotEqualTo(digestOf(UnaryOperator.identity()));
+    }
+
+    private static ExecutionCommand withSandboxRuntime(ExecutionCommand command, String runtime) {
+        var profile = command.sandboxSecurityProfile();
+        return new ExecutionCommand(
+                command.commandId(), command.authorizationId(), command.organizationId(), command.projectId(),
+                command.runId(), command.runVersion(), command.attemptId(), command.attemptNumber(),
+                command.assignmentEpoch(), command.runSnapshotSha256(), command.engine(),
+                command.sourceBundle(), command.secretCapabilities(), command.networkPolicy(),
+                new ExecutionCommand.SandboxSecurityProfileReference(
+                        profile.profileVersion(), runtime, profile.assessmentDigest()),
+                command.configuration(), command.selection(), command.parallelism(), command.scenarioRetry(),
+                command.executionTimeoutSeconds(), command.artifactPolicy(), command.issuedAt(),
+                command.expiresAt(), command.commandDigest());
+    }
+
     private static String digestOf(UnaryOperator<ExecutionCommand> mutation) {
         return ExecutionCommandPolicy.digest(command(mutation));
     }

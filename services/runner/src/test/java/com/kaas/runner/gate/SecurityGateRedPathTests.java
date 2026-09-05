@@ -353,6 +353,31 @@ class SecurityGateRedPathTests {
     }
 
     @Test
+    void aFlagReportedAsBlankIsTreatedAsNotReportedAtAll() {
+        // THE SHAPE THE REAL PROBE PRODUCES. It emits the key unconditionally and fills it from an awk over
+        // /proc/self/status, so a runtime with no NoNewPrivs line yields an empty VALUE rather than a missing
+        // key. Testing only the missing-key case let the mediating runtime fall back onto the mandatory path
+        // and fail on the empty string it was never going to be able to fill -- which is what CI caught and
+        // no fixture did.
+        HostileExecutionAssessment assessment = assess(new FakeLauncher(ExecutionRuntimeType.GVISOR)
+                .reporting(SyntheticProbe.INSPECT, "no_new_privs", ""));
+
+        assertThat(blockers(assessment)).doesNotContain("NO_NEW_PRIVILEGES");
+        assertThat(assessment.checks())
+                .filteredOn(check -> "NO_NEW_PRIVILEGES".equals(check.control()))
+                .singleElement()
+                .satisfies(check -> assertThat(check.verdict()).isEqualTo(SecurityCheck.Verdict.UNSUPPORTED));
+    }
+
+    @Test
+    void aBlankFlagOnARuntimeThatDoesReportItStillBlocks() {
+        // And the excusal stays scoped to the runtime that cannot report it. Under the baseline an empty
+        // NoNewPrivs is a kernel that said nothing where it always says something, which is a failure.
+        assertThat(blockers(assess(new FakeLauncher().reporting(SyntheticProbe.INSPECT, "no_new_privs", ""))))
+                .contains("NO_NEW_PRIVILEGES");
+    }
+
+    @Test
     void withholdingTheFlagOnARuntimeThatDoesReportItStillBlocks() {
         // The suppression path. Without this, "the observation is missing" would be a way to buy the excusal
         // that only the mediating runtime is entitled to.
@@ -370,6 +395,30 @@ class SecurityGateRedPathTests {
                 .reporting(SyntheticProbe.INSPECT, "kernel_paths_present", ""));
 
         assertThat(blockers(assessment)).doesNotContain("KERNEL_PATHS_MASKED");
+    }
+
+    @Test
+    void theEmulatedDevicesAreAllowedOnlyUnderTheRuntimeThatEmulatesThem() {
+        // The allowance is scoped to the mediating runtime because there those two devices are served by the
+        // sentry's own VFS and netstack. Under the baseline the same names mean a real host device was passed
+        // into the sandbox, which is precisely what NO_HOST_DEVICES exists to catch.
+        //
+        // Both directions, because only the pair has any content: a global allowance passes the first
+        // assertion and quietly stops catching a genuinely exposed /dev/fuse, and no single-runtime test
+        // notices.
+        HostileExecutionAssessment mediated = assess(new FakeLauncher(ExecutionRuntimeType.GVISOR)
+                .reporting(SyntheticProbe.INSPECT, "char_device_nodes",
+                        "/dev/null,/dev/zero,/dev/urandom,/dev/fuse,/dev/net/tun"));
+        assertThat(blockers(mediated))
+                .as("the runtime that emulates them must not be failed for presenting them")
+                .doesNotContain("NO_HOST_DEVICES");
+
+        HostileExecutionAssessment baseline = assess(new FakeLauncher()
+                .reporting(SyntheticProbe.INSPECT, "char_device_nodes",
+                        "/dev/null,/dev/zero,/dev/urandom,/dev/fuse,/dev/net/tun"));
+        assertThat(blockers(baseline))
+                .as("under the baseline these are host devices somebody passed in, not emulated ones")
+                .contains("NO_HOST_DEVICES");
     }
 
     @Test

@@ -25,6 +25,22 @@ public enum SandboxFailure {
      * would complete inside a boundary ADR-022 says is not sufficient.
      */
     SANDBOX_RUNTIME_UNAVAILABLE,
+
+    /**
+     * The daemon created the sandbox under a different runtime than the profile requires.
+     *
+     * <p>Distinct from {@link #SANDBOX_RUNTIME_UNAVAILABLE}, and deliberately so. "This host does not have
+     * that runtime" is a deployment gap an operator fixes by installing it. "The daemon assigned a runtime
+     * other than the one requested" means the request and the result disagree on a host that had every
+     * chance to honour it, which is a far more alarming statement and sends an operator somewhere else
+     * entirely.
+     *
+     * <p>The distinction is also what makes the read-back testable. Both conditions end in the same refusal
+     * with no surviving container, so a launcher that quietly requested the wrong runtime would produce an
+     * outcome indistinguishable from a host that simply lacked it — the defence would still hold, and
+     * nothing would be able to prove it was the defence that held.
+     */
+    SANDBOX_RUNTIME_MISMATCH,
     /** Created but could not start. */
     SANDBOX_START_FAILED,
     /** Exceeded its wall-clock deadline and was terminated by the launcher. */
