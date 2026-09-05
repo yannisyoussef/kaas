@@ -367,8 +367,13 @@ public final class HostileExecutionSecurityGate {
                 outcome,
                 "MEMORY_LIMIT",
                 constrained,
+                // The failure and the elapsed time are part of the evidence, not decoration. "No exit code"
+                // has several causes -- the deadline fired, the daemon was lost, the drain was incomplete --
+                // and they call for different responses, so the check has to say which one it saw.
                 "memory_allocated_mb=" + allocated + " memory_requested_mb=" + requested
-                        + " oom_killed=" + outcome.outOfMemory() + " exit=" + outcome.exitCode().orElse(null));
+                        + " oom_killed=" + outcome.outOfMemory() + " exit=" + outcome.exitCode().orElse(null)
+                        + " failure=" + outcome.failure().orElse(null)
+                        + " elapsed=" + outcome.elapsed());
     }
 
     private SecurityCheck timeoutCheck(SandboxOutcome outcome) {

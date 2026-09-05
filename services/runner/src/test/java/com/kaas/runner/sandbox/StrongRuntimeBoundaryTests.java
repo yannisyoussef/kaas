@@ -192,15 +192,19 @@ class StrongRuntimeBoundaryTests {
     @Timeout(600)
     @DisplayName("the process bound tracks the configured ceiling rather than something else")
     void theProcessBoundTracksTheCeiling() {
+        // 128 against 64 rather than 64 against 16. The runtime's own threads come out of the same budget, so
+        // a ceiling low enough to be interesting to the workload is not high enough for the sentry to start:
+        // at 16 the sandbox failed to create at all, which measures the sentry's footprint rather than the
+        // workload's bound.
+        int atOneTwentyEight = processesStartedUnderPidsLimit(128);
         int atSixtyFour = processesStartedUnderPidsLimit(64);
-        int atSixteen = processesStartedUnderPidsLimit(16);
 
-        assertThat(atSixtyFour)
-                .as("a lower ceiling must permit strictly fewer processes; both runs stopping at the same "
+        assertThat(atOneTwentyEight)
+                .as("a higher ceiling must permit strictly more processes; both runs stopping at the same "
                         + "place would mean something other than the ceiling is what stops them, and the "
                         + "per-assessment check under this runtime cannot tell the difference")
-                .isGreaterThan(atSixteen);
-        assertThat(atSixteen).as("the loop must still start something at all").isPositive();
+                .isGreaterThan(atSixtyFour);
+        assertThat(atSixtyFour).as("the loop must still start something at all").isPositive();
     }
 
     private static int processesStartedUnderPidsLimit(long pidsLimit) {
