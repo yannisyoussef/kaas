@@ -2,8 +2,24 @@
 
 ## Status
 
-ACCEPTED. `DENY_ALL` is the only network policy any launcher applies. `ALLOWLIST` is modelled, refused at
-authorization, and refused again independently by the runner. **No egress proxy exists.**
+ACCEPTED, and **PARTIALLY SUPERSEDED by [ADR-026](026-enforceable-assignment-scoped-execution-egress.md)**.
+
+This document remains the record of why egress was refused rather than approximated, and its analysis of why
+the weak design cannot be made safe is unchanged and still load-bearing. What it no longer describes is the
+current state: a trusted egress proxy now exists, and `ALLOWLIST` is enforceable for trusted synthetic
+execution.
+
+Two of the eight requirements below were found to be **technically incorrect as written** and are corrected in
+ADR-026. Both corrections preserve or strengthen the property; neither weakens an invariant.
+
+- **Requirement 1** said an internal network has no default route. Measured, it does — to a gateway that cannot
+  forward. The real invariant is that no reachable target route exists except through the proxy.
+- **Requirement 2** implied an alternating public/private hostname must always be refused. Under a correct
+  one-resolution-per-connection algorithm that would require detecting an answer that was never queried. The
+  real invariant is that the address security-checked is the address connected to, classified afresh per
+  connection.
+
+The rest of this document is preserved as written, as the historical record of the decision it made.
 
 ## Context
 
@@ -47,14 +63,31 @@ These are requirements, not suggestions. An implementation that does not meet al
 
 ### 1. The sandbox must have no route except the proxy
 
-The sandbox attaches to a Docker `--internal` network with no default route. A trusted proxy container attaches
-to *both* that network and one which can reach targets. The sandbox cannot route around the proxy because
-there is no other route — not because it is asked not to.
+The sandbox attaches to a Docker `--internal` network. A trusted proxy container attaches to *both* that
+network and one which can reach targets. The sandbox cannot route around the proxy because nothing else is
+reachable — not because it is asked not to.
+
+**Corrected in kaas-13, against measurement.** This requirement previously said the internal network has "no
+default route". That is false: Docker's `--internal` network *does* install a default route to a gateway which
+simply cannot forward externally. The property was right and the description of it was wrong, which is worse
+than saying nothing — a reader checking the claim finds a route that is supposed to be absent, and then either
+weakens the requirement or concludes the topology is broken.
+
+The invariant is **not** the absence of a route. It is that **no target is reachable through it**, measured
+from inside the sandbox by the trusted probe: one global address, one live interface, one default route, and
+every attempted destination — public, private, metadata, link-local, IPv6 metadata, the Docker host, and the
+discovered gateway — unreachable.
 
 **Test to write:** with the proxy stopped, every outbound attempt from the sandbox must fail. If anything
 succeeds, the sandbox has a second route and the whole design is void.
 
 ### 2. The proxy resolves DNS itself, and connects to the address it resolved
+
+**Measured in kaas-13:** a sandbox on the internal network cannot resolve external names. Docker's embedded
+resolver is reachable there and forwards to the host's resolvers, which an internal network cannot reach, so
+resolution fails. That is a property of Docker's networking rather than of anything this repository controls,
+so it is asserted from inside the sandbox on every run — a Docker change that made those forwards succeed would
+be a silent exfiltration channel nothing else would notice.
 
 The sandbox must not resolve names. If it resolves and the proxy connects, or the proxy resolves twice, a name
 that returns different addresses on successive lookups defeats the check. Resolution and connection must be one

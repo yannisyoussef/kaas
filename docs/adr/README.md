@@ -22,7 +22,8 @@
 | [022](022-hostile-execution-boundary-and-synthetic-probe.md) | Hostile-execution trust boundary, hardened sandbox, trusted synthetic probe, and executable release gate | IMPLEMENTED |
 | [023](023-execution-authorization-and-assignment-scoped-capabilities.md) | Execution authorization, assignment-scoped short-lived capabilities, platform-owned network policy, and an immutable command that nothing executes | IMPLEMENTED for authorization and command production; commands are executed as of ADR-024 |
 | [024](024-synthetic-execution-lifecycle.md) | The four execution phases, bounded phase deadlines, orthogonal outcomes, result provenance, and a truthfully named synthetic engine | IMPLEMENTED; what executes is a platform-owned synthetic workload, not a test engine |
-| [025](025-execution-egress-remains-deny-all.md) | Egress stays deny-all until it can be enforced, with the eight requirements an allowlist must satisfy | ACCEPTED; no egress proxy exists |
+| [025](025-execution-egress-remains-deny-all.md) | Egress stays deny-all until it can be enforced, with the eight requirements an allowlist must satisfy | ACCEPTED; PARTIALLY SUPERSEDED by 026 |
+| [026](026-enforceable-assignment-scoped-execution-egress.md) | Enforceable assignment-scoped egress through a purpose-built trusted proxy the sandbox cannot route around | ACCEPTED; allowlist enforceable for synthetic execution |
 
 Deferred topics without active decisions remain: concrete object-storage/upload adapter, secret **delivery**
 mechanism and a real secret provider, outbox and CREATED-run retention policy, self-service quarantine
@@ -37,8 +38,13 @@ ADR-023 does not revisit and does not satisfy that prerequisite, and neither doe
 workload it executes is repository-controlled content, so admitting *user* content still waits on the stronger
 runtime ADR-022 names.
 
-Egress allowlist **enforcement** is no longer an undecided deferral — ADR-025 decides that it stays refused
-until eight named requirements are met, and records them. Worker heartbeating during execution is a new
+Egress allowlist **enforcement** is no longer deferred at all. ADR-025 recorded eight requirements and
+refused until they were met; ADR-026 meets them and makes `ALLOWLIST` enforceable for trusted synthetic
+execution. Two of ADR-025's eight were technically incorrect as written — an internal Docker network does
+present a default route to a gateway that cannot forward, and a correct one-resolution-per-connection algorithm
+cannot detect a DNS answer it never queried — and ADR-026 corrects both wordings while preserving the
+properties they were reaching for. What remains deferred is IPv6 egress, tenant self-service authorship of a
+policy, and a signed attestation, which ADR-026 records as residual risks rather than as decisions. Worker heartbeating during execution is a new
 deferral created by ADR-024 and a prerequisite for any run longer than a lease.
 
 `IMPLEMENTED` means verified by repository code or tooling. `PROPOSED` means design intent only. `DEFERRED` means no decision is active and implementation must not assume one.

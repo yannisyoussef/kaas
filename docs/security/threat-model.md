@@ -1,6 +1,6 @@
 # Threat Model
 
-**Status: REQUIREMENTS CATALOG.** A platform-owned synthetic workload executes; no tenant content does, and egress is deny-all. Controls in this document are not implemented unless `IMPLEMENTATION_STATUS.md` says otherwise.
+**Status: REQUIREMENTS CATALOG.** A platform-owned synthetic workload executes; no tenant content does. Egress is `DENY_ALL` by default and enforceable as an `ALLOWLIST` for that same platform-owned workload ([ADR-026](../adr/026-enforceable-assignment-scoped-execution-egress.md)). Controls in this document are not implemented unless `IMPLEMENTATION_STATUS.md` says otherwise.
 
 ## Assets
 
@@ -16,7 +16,7 @@ Client → API; API → broker; broker → worker; worker → ephemeral sandbox;
 |---|---|
 | Arbitrary code escapes API | API has no Karate runtime; execution is a separate process and container |
 | Container escape | non-root, no privileged flags, dropped capabilities, read-only filesystem, patched pinned images, runtime scanning, seccomp/AppArmor review |
-| SSRF/data exfiltration | explicit egress policy, DNS/IP controls, proxy, per-project network policy, audit logs |
+| SSRF/data exfiltration | explicit egress policy, DNS/IP controls, proxy, per-project network policy, audit logs. **Implemented** for the trusted synthetic workload: a per-execution internal network with a trusted proxy as its only peer, one resolution per connection with the connection made to that exact classified address, global-unicast-only targets, and assignment-scoped authority revalidated on every request |
 | Secret leakage | implemented APIs accept metadata-only SecretReferences and never values/provider paths; future delivery requires short-lived capabilities, redaction, no secrets in events/artifacts, and rotation |
 | Tenant IDOR | authorization at service and repository layers, full parent scoping, composite ownership constraints, concealed 404s, and negative tests |
 | Configuration time-of-check/time-of-use drift | RunProfileRevision pins an exact immutable EnvironmentRevision; future TestRun must pin RunProfileRevision and FeatureRevision IDs, never mutable logical identities |

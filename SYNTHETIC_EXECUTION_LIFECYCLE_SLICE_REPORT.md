@@ -193,11 +193,22 @@ sandbox retains a normal route, so nothing forces traffic through the check at a
 
 ### The shape that can work
 
-The sandbox attaches to a Docker `--internal` network with no default route. A trusted proxy attaches to that
+The sandbox attaches to a Docker `--internal` network. (kaas-13 measured this: the network *does* install a
+default route to a gateway that cannot forward, so the invariant is reachability rather than the absence of a
+route — the original wording described a true property falsely.) A trusted proxy attaches to that
 network **and** to one that can reach targets. The sandbox cannot route around the proxy because there is no
 other route — a property of the topology, not of anything the workload agrees to.
 
 ### What kaas-13 must satisfy before ALLOWLIST can be enforceable
+
+> **Superseded by outcome.** kaas-13 met all eight, and `ALLOWLIST` is now enforceable for trusted synthetic
+> execution — see [ADR-026](docs/adr/026-enforceable-assignment-scoped-execution-egress.md) and
+> [EXECUTION_EGRESS_SLICE_REPORT.md](EXECUTION_EGRESS_SLICE_REPORT.md). Two of the eight were **technically
+> incorrect as written** and were corrected rather than preserved: an internal Docker network *does* install a
+> default route to a gateway that cannot forward (requirement 1 below), and a one-resolution algorithm cannot
+> detect a DNS answer it never queried (requirement 2). The security properties are unchanged or stronger; the
+> wording is now something the implementation can prove. This section is left as written because it is the
+> record of what was required at the time.
 
 These are requirements, not suggestions. An implementation that does not meet **all** of them is not an
 allowlist, and each carries the test that decides whether it holds. Also recorded in

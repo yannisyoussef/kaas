@@ -42,11 +42,11 @@ Arbitrary test execution is disabled. No user-supplied feature runs in the API o
 | SSE and artifact semantics | DESIGNED + VALIDATED | Proposed ADRs, canonical docs, strict schemas, fixtures, and OpenAPI; no runtime adapters |
 | Synthetic execution lifecycle | IMPLEMENTED + VALIDATED | CLAIMED through PROVISIONING, RUNNING, COLLECTING_RESULTS, and PROCESSING_RESULTS to COMPLETED, driven by a real worker over the internal API, with per-phase deadlines, a reconciler that stops and fences overdue runs, and result provenance checked against authoritative state (ADR-024). A worker renews its lease for the whole of execution, so a run may outlive one lease period. Proven end to end on a real database, a real container runtime, and a real sandbox |
 | Karate execution | PLANNED + DISABLED | No engine dependency and no path that executes tenant content. What runs is a platform-owned synthetic workload (`KAAS_SYNTHETIC_V1`); the declared engine is `SYNTHETIC` and the runner refuses any engine it does not have |
-| Execution egress | DENY_ALL ONLY | ALLOWLIST is modelled and refused at two independent points rather than degraded. No egress proxy exists; ADR-025 records the eight requirements one must satisfy |
+| Execution egress | IMPLEMENTED + VALIDATED | `DENY_ALL` keeps the proven network-disabled path. `ALLOWLIST` is enforceable for trusted synthetic execution (ADR-026): the sandbox joins one per-execution `--internal` network whose only other member is a trusted proxy, so the no-bypass property is topological rather than configured. `ALLOWLIST` is still refused — never downgraded — unless the deployment's own assessment demonstrates it can enforce it |
 | Execution authorization | IMPLEMENTED | Owning an attempt is not permission to execute it: a separate assignment-scoped decision, bounded by the lease, revalidated on every capability redemption |
 | Source capability | IMPLEMENTED | Short-lived assignment-scoped bearer token for the snapshot-pinned feature sources; plaintext never stored |
 | Secret capability | MODELLED, NEVER ISSUED | The envelope exists; no production secret provider does, so a secret-bearing run is refused at authorization |
-| Network policy | IMPLEMENTED FOR DENY_ALL | Platform-owned immutable revisions. ALLOWLIST is modelled and refused as not enforceable |
+| Network policy | IMPLEMENTED | Platform-owned immutable revisions, snapshot-pinned at run creation. An `ALLOWLIST` names exact host, port, and scheme; wildcards, CIDRs, and IP literals are refused rather than accepted and never matched |
 
 Status meanings: **IMPLEMENTED** is present in code/tooling; **VALIDATED** has an automated passing check; **SCAFFOLDED** has only a minimal executable or contract shell; **DESIGNED** is documented intent; **PLANNED** has no active implementation.
 
@@ -65,7 +65,7 @@ flowchart LR
 
 Solid edges are implemented and covered by tests; the dotted edge is not built. Publication, consumption, claim, lease, execution authorization, and the synthetic execution lifecycle all exist — see [ADR-021](docs/adr/021-durable-dispatch-consumption-fencing-and-worker-lease.md), [ADR-023](docs/adr/023-execution-authorization-and-assignment-scoped-capabilities.md), and [ADR-024](docs/adr/024-synthetic-execution-lifecycle.md).
 
-**What the sandbox runs is a platform-owned synthetic workload, not tenant content.** The control plane never executes user-controlled test content, and execution of user content remains disabled until the ADR-022 runtime prerequisite is met and the ADR-025 egress requirements are satisfied. Egress is deny-all; there is no proxy.
+**What the sandbox runs is a platform-owned synthetic workload, not tenant content.** The control plane never executes user-controlled test content, and execution of user content remains disabled until the ADR-022 runtime prerequisite is met. Egress is now enforceable ([ADR-026](docs/adr/026-enforceable-assignment-scoped-execution-egress.md)) and is no longer what blocks it — but what an allowlist authorizes today is that same platform-owned workload reaching a destination an operator wrote down, so nothing about it moves the boundary on tenant code.
 
 ## Repository layout
 
@@ -141,6 +141,9 @@ The checked-in values are local-development defaults, not production secret mana
 - [Early terminal lifecycle slice report](EARLY_TERMINAL_LIFECYCLE_SLICE_REPORT.md)
 - [Implemented consumer/claim/lease architecture](docs/architecture/consumer-claim-lease-slice.md)
 - [Consumer/claim/lease slice report](CONSUMER_CLAIM_LEASE_SLICE_REPORT.md)
+- [Implemented enforceable execution egress](docs/architecture/enforceable-execution-egress.md)
+- [Execution egress slice report](EXECUTION_EGRESS_SLICE_REPORT.md)
+- [Execution egress policy](docs/security/execution-egress-policy.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Security release requirements](docs/security/threat-model.md)
 
