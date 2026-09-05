@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.kaas.runner.gate.EgressEnforcementAssessment;
 import com.kaas.runner.gate.HostileExecutionAssessment;
+import com.kaas.runner.sandbox.ExecutionRuntimeType;
 import com.kaas.runner.gate.SecurityCheck;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -194,7 +195,11 @@ class SandboxSecurityAttestationProducerTest {
 
     private static HostileExecutionAssessment assessment(SecurityCheck... checks) {
         return new HostileExecutionAssessment(
-                "kaas.sandbox.v1", "docker", Instant.parse("2026-09-05T09:12:33Z"), List.of(checks));
+                "kaas.sandbox.v1",
+                "docker",
+                ExecutionRuntimeType.DOCKER.name(),
+                Instant.parse("2026-09-05T09:12:33Z"),
+                List.of(checks));
     }
 
     private static SecurityCheck mandatory(String control, SecurityCheck.Verdict verdict) {

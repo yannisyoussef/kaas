@@ -19,6 +19,9 @@
     "wrong-algorithm": "A different algorithm identifier. The verifier accepts exactly ED25519 and does not dispatch.",
     "missing-signature": "No signature at all. Absent evidence is not a pass.",
     "unknown-property": "An undefined top-level property. FAIL_ON_UNKNOWN_PROPERTIES does not apply to tree parsing, so this needs an explicit allowlist.",
-    "unsigned-v2": "The old unsigned document. Refused outright: no fallback path and no migration window."
+    "unsigned-v2": "The old unsigned document. Refused outright: no fallback path and no migration window.",
+    "tampered-sandbox-runtime": "The sandbox runtime edited after signing, so the document names a boundary its evidence was not taken behind. Inside the preimage, so the digest moves.",
+    "self-contradictory-runtime": "Genuinely signed, and its two statements about one boundary disagree: securityProfileVersion says kaas.sandbox.v1 while sandboxRuntime says GVISOR. Authentic and still refused - no reading of it is the truth, and resolving the disagreement in favour of either field would let a producer choose which.",
+    "superseded-v3": "A v3 document, authentic under the v3 domain separator. Refused for its schema exactly as v2 is: a superseded schema is never downgraded to, and the separator moved with the version so v3 bytes can never verify as v4."
   }
 }

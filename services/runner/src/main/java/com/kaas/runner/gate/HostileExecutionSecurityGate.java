@@ -96,7 +96,12 @@ public final class HostileExecutionSecurityGate {
         checks.add(outputCheck(run(SyntheticProbe.OUTPUT)));
         checks.add(runtimeCheck(inspect));
         return new HostileExecutionAssessment(
-                launcher.profile().version(), runtime, Instant.now(), checks);
+                launcher.profile().version(),
+                runtime,
+                // Read off the launcher that ran the probes, not off anything the caller said.
+                launcher.profile().runtime().name(),
+                Instant.now(),
+                checks);
     }
 
     private SandboxOutcome run(SyntheticProbe probe) {

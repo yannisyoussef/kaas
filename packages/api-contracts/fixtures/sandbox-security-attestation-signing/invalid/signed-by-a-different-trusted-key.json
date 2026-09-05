@@ -1,11 +1,12 @@
 {
-  "schemaVersion": "kaas.sandbox-security-attestation.v3",
+  "schemaVersion": "kaas.sandbox-security-attestation.v4",
   "attestationId": "01JBQZ8V4T0000000000000001",
   "producerVersion": "kaas.attestation-producer.v1",
   "keyId": "kaas-test-key-1",
   "signatureAlgorithm": "ED25519",
   "securityProfileVersion": "kaas.sandbox.v1",
   "runtime": "docker",
+  "sandboxRuntime": "DOCKER",
   "runtimeSubject": "kaas.runtime.vector",
   "runtimeGeneration": "gen:0123456789abcdef0123456789abcdef",
   "probeImageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -23,6 +24,7 @@
     "NO_HOST_DEVICES": "PASS",
     "NO_HOST_MOUNTS": "PASS",
     "NO_NEW_PRIVILEGES": "PASS",
+    "NO_SETUID_BINARIES": "PASS",
     "OUTPUT_BOUNDED": "PASS",
     "PID_LIMIT": "PASS",
     "READ_ONLY_ROOT": "PASS",
@@ -36,6 +38,6 @@
     "EGRESS_PROXY_IMAGE_PINNED": "PASS",
     "EGRESS_PROXY_READY": "PASS"
   },
-  "payloadDigest": "sha256:8e9ae71d2414cc429d51c4d9c8af56b12eaf4f44a6c405a93621e31bd17200be",
-  "signature": "w/uNBuBXGjnOe7updH8l69KltFHw/LpbfVTpzu/2XK8fnQTBsaNV9Xlh1Oa5HEw5bVO3Gy3f0qBn3aZULxhqAQ=="
+  "payloadDigest": "sha256:d5ca91ee1d6acba8f791a1285d96d259d2bc0171e28df1a9121ede2ff16e423d",
+  "signature": "/paivc1yTzmFxtE6dHto0/MQA7VshZiGY6NWKEmK9tN+xKbobe8KLgiJQVbI5olzWWHxxzs8AsktF67vYWBrAg=="
 }

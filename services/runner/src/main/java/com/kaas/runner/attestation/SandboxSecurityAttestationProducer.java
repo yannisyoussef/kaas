@@ -83,6 +83,9 @@ public final class SandboxSecurityAttestationProducer {
                 AttestationPayload.SIGNATURE_ALGORITHM,
                 mandatory.profileVersion(),
                 mandatory.runtime(),
+                // From the assessment, which derived it from the launcher. The producer does not get to name
+                // the boundary either -- it signs what was measured.
+                mandatory.sandboxRuntime(),
                 runtime.subject(),
                 runtime.generation(),
                 probeImageDigest,

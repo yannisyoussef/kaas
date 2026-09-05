@@ -12,6 +12,7 @@
     "signatureAlgorithm",
     "securityProfileVersion",
     "runtime",
+    "sandboxRuntime",
     "runtimeSubject",
     "runtimeGeneration",
     "probeImageDigest",
@@ -23,7 +24,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "kaas.sandbox-security-attestation.v3"
+      "const": "kaas.sandbox-security-attestation.v4"
     },
     "securityProfileVersion": {
       "type": "string",
@@ -40,6 +41,14 @@
       "minLength": 1,
       "maxLength": 64,
       "description": "The container runtime the assessment ran against. Recorded and covered by the digest, but NOT currently compared against anything by the control plane \u2014 there is no configured expected runtime to compare it to. It is provenance for a human reading an audit trail, not a check, and this description says so rather than implying enforcement that does not exist."
+    },
+    "sandboxRuntime": {
+      "type": "string",
+      "enum": [
+        "DOCKER",
+        "GVISOR"
+      ],
+      "description": "Which sandbox runtime served the probes, as the platform's own runtime constant. Unlike `runtime`, this IS compared: it must be the runtime that `securityProfileVersion` implies, per runtimeByProfileVersion in mandatory-sandbox-controls.json, and a document whose two answers disagree is refused rather than resolved in favour of either. Closed enum because a runtime name is the name of a program a daemon will execute, and nothing a document supplies may widen that set."
     },
     "assessedAt": {
       "type": "string",

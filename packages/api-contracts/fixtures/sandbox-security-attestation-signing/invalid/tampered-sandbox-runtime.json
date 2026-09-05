@@ -6,7 +6,7 @@
   "signatureAlgorithm": "ED25519",
   "securityProfileVersion": "kaas.sandbox.v1",
   "runtime": "docker",
-  "sandboxRuntime": "DOCKER",
+  "sandboxRuntime": "GVISOR",
   "runtimeSubject": "kaas.runtime.vector",
   "runtimeGeneration": "gen:0123456789abcdef0123456789abcdef",
   "probeImageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -34,7 +34,7 @@
   "egressControls": {
     "EGRESS_NETWORK_INTERNAL": "PASS",
     "EGRESS_NO_DIRECT_ROUTE": "PASS",
-    "EGRESS_PROXY_FAILS_CLOSED": "FAIL",
+    "EGRESS_PROXY_FAILS_CLOSED": "PASS",
     "EGRESS_PROXY_IMAGE_PINNED": "PASS",
     "EGRESS_PROXY_READY": "PASS"
   },

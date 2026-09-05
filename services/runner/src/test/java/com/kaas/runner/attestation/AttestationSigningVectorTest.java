@@ -100,13 +100,15 @@ class AttestationSigningVectorTest {
         var withoutEvidence = new AttestationPayload(
                 withEvidence.schemaVersion(), withEvidence.attestationId(), withEvidence.producerVersion(),
                 withEvidence.keyId(), withEvidence.signatureAlgorithm(), withEvidence.securityProfileVersion(),
-                withEvidence.runtime(), withEvidence.runtimeSubject(), withEvidence.runtimeGeneration(),
+                withEvidence.runtime(), withEvidence.sandboxRuntime(), withEvidence.runtimeSubject(),
+                withEvidence.runtimeGeneration(),
                 withEvidence.probeImageDigest(), Optional.empty(), withEvidence.assessedAt(),
                 withEvidence.mandatoryControls(), withEvidence.egressControls());
         var withEmptyString = new AttestationPayload(
                 withEvidence.schemaVersion(), withEvidence.attestationId(), withEvidence.producerVersion(),
                 withEvidence.keyId(), withEvidence.signatureAlgorithm(), withEvidence.securityProfileVersion(),
-                withEvidence.runtime(), withEvidence.runtimeSubject(), withEvidence.runtimeGeneration(),
+                withEvidence.runtime(), withEvidence.sandboxRuntime(), withEvidence.runtimeSubject(),
+                withEvidence.runtimeGeneration(),
                 withEvidence.probeImageDigest(), Optional.of(""), withEvidence.assessedAt(),
                 withEvidence.mandatoryControls(), withEvidence.egressControls());
 
@@ -139,6 +141,7 @@ class AttestationSigningVectorTest {
                 root.get("signatureAlgorithm").stringValue(),
                 root.get("securityProfileVersion").stringValue(),
                 root.get("runtime").stringValue(),
+                root.get("sandboxRuntime").stringValue(),
                 root.get("runtimeSubject").stringValue(),
                 root.get("runtimeGeneration").stringValue(),
                 root.get("probeImageDigest").stringValue(),

@@ -48,6 +48,16 @@ public enum AttestationVerification {
     /** Authentic, and taken under a different sandbox security profile than the one execution would use. */
     PROFILE_MISMATCH,
 
+    /**
+     * Authentic, and its two statements about which boundary produced it disagree.
+     *
+     * <p>Separate from {@link #PROFILE_MISMATCH}, which means the evidence describes a boundary other than
+     * the one execution would use — a real assessment, of the wrong thing. This one means the document
+     * contradicts itself, and no reading of it is the truth. An operator seeing it should be looking for a
+     * broken or hostile producer, not a configuration difference.
+     */
+    RUNTIME_MISMATCH,
+
     /** Authentic, and a required control is missing, extra, or did not pass. */
     CONTROL_FAILED;
 

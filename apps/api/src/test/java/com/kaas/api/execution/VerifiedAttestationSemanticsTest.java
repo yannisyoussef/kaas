@@ -235,4 +235,29 @@ class VerifiedAttestationSemanticsTest {
             throw new IllegalStateException("The published test key is unusable", impossible);
         }
     }
+    @Test
+    @DisplayName("a document whose profile version and sandbox runtime disagree is refused")
+    void aSelfContradictoryRuntimeIsRefused() {
+        // Authentic, and still not usable. The two fields describe one boundary, so a document that answers
+        // the question twice and differently is not evidence about either -- and resolving the disagreement
+        // in favour of one field would hand the choice to whoever wrote the document.
+        var verified = verify(SignedAttestationFixture.signed(builder().withSandboxRuntime("GVISOR")));
+
+        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED))
+                .contains(AttestationVerification.RUNTIME_MISMATCH);
+    }
+
+    @Test
+    @DisplayName("evidence taken under the mediating runtime authorizes only where that is what runs")
+    void mediatedEvidenceDoesNotAuthorizeTheBaseline() {
+        // The pair of the test above, from the other side: a genuine, internally consistent gVisor
+        // attestation must not satisfy a deployment expecting the baseline profile. Without this, the
+        // runtime binding would only ever refuse malformed documents and never a real mismatch.
+        var verified = verify(SignedAttestationFixture.signed(
+                SignedAttestationFixture.builder("kaas.sandbox.gvisor.v1", Instant.now())));
+
+        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED))
+                .contains(AttestationVerification.PROFILE_MISMATCH);
+    }
+
 }

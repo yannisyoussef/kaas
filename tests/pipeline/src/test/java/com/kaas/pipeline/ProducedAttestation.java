@@ -6,6 +6,7 @@ import com.kaas.runner.attestation.RuntimeIdentity;
 import com.kaas.runner.attestation.SandboxSecurityAttestationProducer;
 import com.kaas.runner.gate.EgressEnforcementAssessment;
 import com.kaas.runner.gate.HostileExecutionAssessment;
+import com.kaas.runner.sandbox.ExecutionRuntimeType;
 import com.kaas.runner.gate.SecurityCheck;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -70,8 +71,16 @@ final class ProducedAttestation {
         // Real assessment objects, not a verdict map. The producer has no API that takes one, which is the
         // point of the slice: a caller who wants to claim a control passed has to produce an assessment
         // saying so, and only a gate produces those.
+        // The sandbox runtime the profile version implies, so the two signed answers agree. A document whose
+        // profile version and runtime disagree is refused, and this pipeline exists to produce genuine ones.
         var assessment = new HostileExecutionAssessment(
-                profileVersion, "docker", assessedAt, List.copyOf(mandatory));
+                profileVersion,
+                "docker",
+                "kaas.sandbox.gvisor.v1".equals(profileVersion)
+                        ? ExecutionRuntimeType.GVISOR.name()
+                        : ExecutionRuntimeType.DOCKER.name(),
+                assessedAt,
+                List.copyOf(mandatory));
         return new SandboxSecurityAttestationProducer(signer())
                 .produce(
                         assessment,

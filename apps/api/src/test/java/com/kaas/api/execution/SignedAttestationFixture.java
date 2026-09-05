@@ -1,6 +1,8 @@
 package com.kaas.api.execution;
 
+import com.kaas.api.execution.domain.AttestationPayloadFields;
 import com.kaas.api.execution.domain.RequiredSecurityControls;
+import com.kaas.api.execution.domain.SandboxRuntimeBinding;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyFactory;
@@ -87,10 +89,14 @@ public final class SignedAttestationFixture {
     public static final class Builder {
         private final Map<String, String> mandatory = new TreeMap<>();
         private final Map<String, String> egress = new TreeMap<>();
-        private String schemaVersion = "kaas.sandbox-security-attestation.v3";
+        // The constant, not a literal. A second copy of the schema version in a fixture is a copy that has
+        // to be found and edited every time the schema moves, and the symptom of missing it is every
+        // semantics test failing with UNSUPPORTED_SCHEMA for a reason unrelated to what it was testing.
+        private String schemaVersion = AttestationPayloadFields.SCHEMA_VERSION;
         private String attestationId = "01JTEST00000000000000000001";
         private String producerVersion = "kaas.attestation-producer.v1";
         private String runtime = "docker";
+        private String sandboxRuntime;
         private String runtimeSubject = RUNTIME_SUBJECT;
         private String runtimeGeneration = "gen:0123456789abcdef0123456789abcdef";
         private String probeImageDigest = "sha256:" + "1".repeat(64);
@@ -145,6 +151,12 @@ public final class SignedAttestationFixture {
             return this;
         }
 
+        /** For the one property that needs a self-contradictory document: profile says one, runtime another. */
+        public Builder withSandboxRuntime(String sandboxRuntime) {
+            this.sandboxRuntime = sandboxRuntime;
+            return this;
+        }
+
         public Builder withSchemaVersion(String schemaVersion) {
             this.schemaVersion = schemaVersion;
             return this;
@@ -159,6 +171,13 @@ public final class SignedAttestationFixture {
             fields.put("signatureAlgorithm", "ED25519");
             fields.put("securityProfileVersion", profileVersion);
             fields.put("runtime", runtime);
+            // Derived from the profile version so the document's two answers agree by default; a test that
+            // wants them to disagree sets it explicitly.
+            fields.put("sandboxRuntime", sandboxRuntime != null
+                    ? sandboxRuntime
+                    : SandboxRuntimeBinding.knownProfileVersions().contains(profileVersion)
+                            ? SandboxRuntimeBinding.runtimeFor(profileVersion)
+                            : "DOCKER");
             fields.put("runtimeSubject", runtimeSubject);
             fields.put("runtimeGeneration", runtimeGeneration);
             fields.put("probeImageDigest", probeImageDigest);
@@ -210,7 +229,7 @@ public final class SignedAttestationFixture {
         static byte[] of(
                 Map<String, String> fields, Map<String, String> mandatory, Map<String, String> egress) {
             java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-            emit(out, "KAAS_SANDBOX_SECURITY_ATTESTATION_V3");
+            emit(out, "KAAS_SANDBOX_SECURITY_ATTESTATION_V4");
             label(out, "SCHEMA_VERSION", fields.get("schemaVersion"));
             label(out, "ATTESTATION_ID", fields.get("attestationId"));
             label(out, "PRODUCER_VERSION", fields.get("producerVersion"));
@@ -218,6 +237,7 @@ public final class SignedAttestationFixture {
             label(out, "SIGNATURE_ALGORITHM", fields.get("signatureAlgorithm"));
             label(out, "SECURITY_PROFILE_VERSION", fields.get("securityProfileVersion"));
             label(out, "RUNTIME", fields.get("runtime"));
+            label(out, "SANDBOX_RUNTIME", fields.get("sandboxRuntime"));
             label(out, "RUNTIME_SUBJECT", fields.get("runtimeSubject"));
             label(out, "RUNTIME_GENERATION", fields.get("runtimeGeneration"));
             label(out, "PROBE_IMAGE_DIGEST", fields.get("probeImageDigest"));

@@ -42,6 +42,16 @@ public record AttestationPayloadFields(
         String signatureAlgorithm,
         String securityProfileVersion,
         String runtime,
+        /**
+         * Which sandbox runtime served the probes: the name of the platform's runtime constant, never a
+         * daemon string and never anything a request supplied.
+         *
+         * <p>Signed alongside {@code securityProfileVersion}, which already implies it. The redundancy is the
+         * point: two independent statements about the same boundary, both covered by one signature, so a
+         * document that says {@code kaas.sandbox.gvisor.v1} and {@code DOCKER} is self-contradictory and is
+         * refused rather than resolved in favour of whichever field a reader happened to consult.
+         */
+        String sandboxRuntime,
         String runtimeSubject,
         String runtimeGeneration,
         String probeImageDigest,
@@ -51,12 +61,12 @@ public record AttestationPayloadFields(
         Map<String, String> egressControls) {
 
     /** The only schema this control plane accepts. A v2 document is refused, never downgraded. */
-    public static final String SCHEMA_VERSION = "kaas.sandbox-security-attestation.v3";
+    public static final String SCHEMA_VERSION = "kaas.sandbox-security-attestation.v4";
 
     /** The only algorithm identifier. Compared for equality; never dispatched on. */
     public static final String SIGNATURE_ALGORITHM = "ED25519";
 
-    private static final String DOMAIN = "KAAS_SANDBOX_SECURITY_ATTESTATION_V3";
+    private static final String DOMAIN = "KAAS_SANDBOX_SECURITY_ATTESTATION_V4";
 
     private static final String ABSENT = " ABSENT";
 
@@ -91,6 +101,8 @@ public record AttestationPayloadFields(
         emit(bytes, securityProfileVersion);
         emit(bytes, "RUNTIME");
         emit(bytes, runtime);
+        emit(bytes, "SANDBOX_RUNTIME");
+        emit(bytes, sandboxRuntime);
         emit(bytes, "RUNTIME_SUBJECT");
         emit(bytes, runtimeSubject);
         emit(bytes, "RUNTIME_GENERATION");

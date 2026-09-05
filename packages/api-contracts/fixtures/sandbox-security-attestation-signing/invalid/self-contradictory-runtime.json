@@ -6,7 +6,7 @@
   "signatureAlgorithm": "ED25519",
   "securityProfileVersion": "kaas.sandbox.v1",
   "runtime": "docker",
-  "sandboxRuntime": "DOCKER",
+  "sandboxRuntime": "GVISOR",
   "runtimeSubject": "kaas.runtime.vector",
   "runtimeGeneration": "gen:0123456789abcdef0123456789abcdef",
   "probeImageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -34,10 +34,10 @@
   "egressControls": {
     "EGRESS_NETWORK_INTERNAL": "PASS",
     "EGRESS_NO_DIRECT_ROUTE": "PASS",
-    "EGRESS_PROXY_FAILS_CLOSED": "FAIL",
+    "EGRESS_PROXY_FAILS_CLOSED": "PASS",
     "EGRESS_PROXY_IMAGE_PINNED": "PASS",
     "EGRESS_PROXY_READY": "PASS"
   },
-  "payloadDigest": "sha256:d5ca91ee1d6acba8f791a1285d96d259d2bc0171e28df1a9121ede2ff16e423d",
-  "signature": "N3K0O4CGzw7O0rzwdrygaiobn4ks5wDIIHL80QtdGOSDVC0Qr1VAbOSSKiVzhKkJPkt0zp7QVjnbN73l2NGLBw=="
+  "payloadDigest": "sha256:83d941d250415cb98ae54f0ba53364a62f9431fe7be8b211a23b695a494b850c",
+  "signature": "sHfgcBsmBZ6xYLEgHvSSrilbvpUX2tIHz9H5ySbZ5ZtSTJZm9gfQlgCbQP//X3K6ZNWYC5mS5XMFlUg1XqzaAw=="
 }

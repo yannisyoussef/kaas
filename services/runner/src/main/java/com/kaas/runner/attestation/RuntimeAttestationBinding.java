@@ -91,6 +91,7 @@ public final class RuntimeAttestationBinding {
                     text(root, "signatureAlgorithm"),
                     text(root, "securityProfileVersion"),
                     text(root, "runtime"),
+                    text(root, "sandboxRuntime"),
                     text(root, "runtimeSubject"),
                     text(root, "runtimeGeneration"),
                     text(root, "probeImageDigest"),

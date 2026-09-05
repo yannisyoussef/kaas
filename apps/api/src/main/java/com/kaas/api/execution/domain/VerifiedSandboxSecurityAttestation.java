@@ -95,6 +95,13 @@ public final class VerifiedSandboxSecurityAttestation {
         if (!expectedProfileVersion.equals(payload.securityProfileVersion())) {
             return Optional.of(AttestationVerification.PROFILE_MISMATCH);
         }
+        if (!SandboxRuntimeBinding.knownProfileVersions().contains(expectedProfileVersion)
+                || !SandboxRuntimeBinding.runtimeFor(expectedProfileVersion).equals(payload.sandboxRuntime())) {
+            // The document's own two answers about its boundary, compared. Reached only after the profile
+            // version has been shown to equal the expected one, so this is genuinely the document
+            // contradicting itself rather than describing a different deployment.
+            return Optional.of(AttestationVerification.RUNTIME_MISMATCH);
+        }
         if (!RequiredSecurityControls.knownProfileVersions().contains(expectedProfileVersion)) {
             // A deployment configured to expect a boundary this build has no control set for. Refused rather
             // than allowed to throw out of the authorization path: an exception here is an error page, and an

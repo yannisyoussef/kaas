@@ -50,6 +50,7 @@ public record SignedAttestation(AttestationPayload payload, String payloadDigest
         root.put("signatureAlgorithm", payload.signatureAlgorithm());
         root.put("securityProfileVersion", payload.securityProfileVersion());
         root.put("runtime", payload.runtime());
+        root.put("sandboxRuntime", payload.sandboxRuntime());
         root.put("runtimeSubject", payload.runtimeSubject());
         root.put("runtimeGeneration", payload.runtimeGeneration());
         root.put("probeImageDigest", payload.probeImageDigest());

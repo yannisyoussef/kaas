@@ -42,6 +42,16 @@ public record AttestationPayload(
         String signatureAlgorithm,
         String securityProfileVersion,
         String runtime,
+        /**
+         * Which sandbox runtime served the probes: the name of the platform's runtime constant, never a
+         * daemon string and never anything a request supplied.
+         *
+         * <p>Signed alongside {@code securityProfileVersion}, which already implies it. The redundancy is the
+         * point: two independent statements about the same boundary, both covered by one signature, so a
+         * document that says {@code kaas.sandbox.gvisor.v1} and {@code DOCKER} is self-contradictory and is
+         * refused rather than resolved in favour of whichever field a reader happened to consult.
+         */
+        String sandboxRuntime,
         String runtimeSubject,
         String runtimeGeneration,
         String probeImageDigest,
@@ -58,7 +68,7 @@ public record AttestationPayload(
         Map<String, String> egressControls) {
 
     /** The schema this payload shape is. A later shape is a different version and a different preimage. */
-    public static final String SCHEMA_VERSION = "kaas.sandbox-security-attestation.v3";
+    public static final String SCHEMA_VERSION = "kaas.sandbox-security-attestation.v4";
 
     /** The one algorithm. Not a field a document gets to choose; a constant a verifier requires. */
     public static final String SIGNATURE_ALGORITHM = "ED25519";
@@ -67,10 +77,11 @@ public record AttestationPayload(
      * The domain separator, first in every preimage.
      *
      * <p>So that this signing key cannot accidentally authenticate a different KaaS document type that happens
-     * to have the same byte shape, and so a future v4 preimage can never be mistaken for a v3 one even if every
-     * other field matched.
+     * to have the same byte shape, and so a v3 preimage can never be mistaken for a v4 one even if every other
+     * field matched. The separator moved with the schema for exactly that reason: v4 added a signed field, and
+     * a v3 document whose bytes happened to line up must not verify against a v4 reader.
      */
-    static final String DOMAIN = "KAAS_SANDBOX_SECURITY_ATTESTATION_V3";
+    static final String DOMAIN = "KAAS_SANDBOX_SECURITY_ATTESTATION_V4";
 
     /** Emitted for an absent optional field, so absent and empty-string are not the same preimage. */
     static final String ABSENT = " ABSENT";
@@ -108,6 +119,7 @@ public record AttestationPayload(
         field(out, "SIGNATURE_ALGORITHM", signatureAlgorithm);
         field(out, "SECURITY_PROFILE_VERSION", securityProfileVersion);
         field(out, "RUNTIME", runtime);
+        field(out, "SANDBOX_RUNTIME", sandboxRuntime);
         field(out, "RUNTIME_SUBJECT", runtimeSubject);
         field(out, "RUNTIME_GENERATION", runtimeGeneration);
         field(out, "PROBE_IMAGE_DIGEST", probeImageDigest);

@@ -15,7 +15,23 @@ import java.util.List;
  * egress policy model — are exactly the ones that let user content near the sandbox in the first place.
  */
 public record HostileExecutionAssessment(
-        String profileVersion, String runtime, Instant assessedAt, List<SecurityCheck> checks) {
+        String profileVersion,
+        String runtime,
+        /**
+         * Which sandbox runtime actually served the probes.
+         *
+         * <p>Distinct from {@link #runtime()}, which names the orchestration this deployment runs under and is
+         * supplied by whoever constructed the gate. This one is <strong>derived from the launcher's own
+         * profile</strong> and is never passed in: an assessment is a statement about the boundary the probes
+         * ran behind, and a caller able to name that boundary could label baseline evidence as mediated.
+         *
+         * <p>It is redundant with {@link #profileVersion()} by construction, and deliberately so. Both are
+         * signed, so a document whose two answers disagree is self-contradictory and refused rather than
+         * resolved in favour of one of them.
+         */
+        String sandboxRuntime,
+        Instant assessedAt,
+        List<SecurityCheck> checks) {
 
     public HostileExecutionAssessment {
         checks = List.copyOf(checks);
