@@ -425,58 +425,6 @@ jobs:
           # this slice exists to answer, and the suite -- not this step -- is what makes a claim about it.
           exit $status
 
-      # MEASUREMENT, not a gate. The resource-limit controls read differently under the mediating runtime --
-      # the fork loop stopped at 20 processes against a ceiling of 64, and the memory probe reported nothing at
-      # all -- and the question is whether the ceiling is what bound them or something else did. Comparing the
-      # same loops across both runtimes and two memory ceilings answers that; guessing from one data point
-      # would produce a check tuned to a number rather than to a property.
-      - name: Measure the resource ceilings under both runtimes
-        run: |
-          image=busybox@sha256:8d7b1636e974e0adfd8d945955fca609304f0a56c18799dfd032d6e661382d84
-          for rt in runc runsc; do
-            for mem in 256m 512m; do
-              echo "===== fork loop runtime=$rt memory=$mem pids=64"
-              docker run --rm --runtime=$rt --network=none --user 65534:65534 --read-only \
-                --cap-drop=ALL --pids-limit 64 --memory $mem \
-                --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m "$image" \
-                sh -c 'i=0; while [ $i -lt 200 ]; do sleep 5 & i=$((i+1)); printf "started=%s\n" "$i"; done; echo LOOP_COMPLETED' \
-                2>&1 | tail -2
-            done
-            echo "===== memory loop runtime=$rt memory=256m"
-            name=mem-$rt-$RANDOM
-            docker run --name "$name" --runtime=$rt --network=none --user 65534:65534 --read-only \
-              --cap-drop=ALL --pids-limit 64 --memory 256m \
-              --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m "$image" \
-              sh -c 'i=0; while [ $i -lt 256 ]; do eval "c$i=\$(head -c 1048576 /dev/zero | tr \\0 x)" 2>/dev/null || break; i=$((i+1)); done; printf "allocated=%s\n" "$i"; echo LOOP_COMPLETED' \
-              2>&1 | tail -2 || true
-            echo "inspect: $(docker inspect --format '{{.State.ExitCode}} OOMKilled={{.State.OOMKilled}}' "$name")"
-            docker rm -f "$name" >/dev/null
-          done
-
-      # The real probe, under both runtimes, with the daemon's own view of how it ended.
-      #
-      # The synthetic loop above completed under both runtimes, so it does not reproduce what the gate sees:
-      # the gate's MEMORY_LIMIT reported memory_allocated_mb absent, OOMKilled false and NO exit code at all,
-      # which is three different kinds of silence and the check cannot be written until it is known which.
-      - name: Measure the real memory probe under both runtimes
-        run: |
-          probe=$(docker build -q services/runner/src/main/docker/probe)
-          for rt in runc runsc; do
-            echo "===== real memory probe runtime=$rt"
-            name=probe-mem-$rt
-            docker run --name "$name" --runtime=$rt --network=none --user 65534:65534 --read-only \
-              --cap-drop=ALL --security-opt=no-new-privileges:true --pids-limit 64 --memory 256m \
-              --memory-swap 256m --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
-              "$probe" memory 256 2>&1 | tail -3 || true
-            docker inspect --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}} status={{.State.Status}} error={{.State.Error}}' "$name"
-            docker rm -f "$name" >/dev/null
-          done
-          echo "===== what the inspect probe reports under runsc"
-          docker run --rm --runtime=runsc --network=none --user 65534:65534 --read-only \
-            --cap-drop=ALL --security-opt=no-new-privileges:true --pids-limit 64 --memory 256m \
-            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m "$probe" inspect 2>&1 \
-            | grep -E "kernel_paths|no_new_privs|setuid_binaries|char_device_nodes|runtime_kernel_release" || true
-
       # THE PRODUCTION PATH, under the mediating runtime, end to end.
       #
       # Everything else about this runtime is exercised by suites that build their own profile. This runs the
