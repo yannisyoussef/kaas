@@ -95,6 +95,24 @@ class RuntimeImplementationTest {
         }
     }
 
+    @Test
+    @DisplayName("a bare registration is resolved the way the daemon would, and a missing one still refuses")
+    void aBareRegistrationResolvesThroughPath() throws Exception {
+        // Docker registers its default runtime as a bare name -- RuntimeInfo(path=runc) -- so a measurement
+        // that only accepted absolute paths could not measure the baseline runtime at all. The honest reading
+        // of a bare name is the one the daemon itself makes when it starts a container.
+        //
+        // Something certain to be on PATH and certain to answer --version without side effects.
+        var measured = RuntimeImplementation.measureAt("sh", Path.of("sh"));
+        assertThat(measured.digest()).matches("sha256:[a-f0-9]{64}");
+        assertThat(measured.name()).isEqualTo("sh");
+
+        // And a bare name that resolves to nothing is refused rather than invented.
+        assertThatThrownBy(() ->
+                        RuntimeImplementation.measureAt("nope", Path.of("kaas-no-such-runtime-binary")))
+                .isInstanceOf(AttestationProductionFailed.class);
+    }
+
     private static Path executable(String script) throws Exception {
         Path file = Files.createTempFile("kaas-runtime-", "");
         Files.writeString(file, script);

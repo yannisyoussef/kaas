@@ -93,7 +93,7 @@ public record RuntimeImplementation(String name, String version, String digest, 
         try {
             // toRealPath resolves every symlink in the chain, so the digest below is of the file the daemon
             // will actually execute rather than of a link that could be repointed afterwards.
-            real = configured.toRealPath();
+            real = resolve(configured).toRealPath();
         } catch (IOException unreadable) {
             throw new AttestationProductionFailed(
                     AttestationFailure.RUNTIME_UNIDENTIFIED,
@@ -106,6 +106,42 @@ public record RuntimeImplementation(String name, String version, String digest, 
         }
         return new RuntimeImplementation(
                 runtimeName, versionOf(real), digestOf(real), pathIdentityOf(configured, real));
+    }
+
+    /**
+     * Turns a registration into a path on disk.
+     *
+     * <p>Docker registers its default runtime as a bare name — {@code RuntimeInfo(path=runc)} — rather than as
+     * an absolute path, so a measurement that only accepted absolute paths could never measure the baseline
+     * runtime at all. That is not a reason to give up and it is not a reason to fall back to a general
+     * {@code PATH} lookup either: the honest reading of a bare registration is the one the daemon itself will
+     * make, which is to resolve it against {@code PATH} when it starts a container.
+     *
+     * <p>So an absolute registration is measured exactly as configured, and a bare one is resolved the way the
+     * daemon would. The distinction matters and is not hidden: a bare name is a weaker binding, because what
+     * it resolves to depends on the daemon's environment rather than on a path an operator wrote down.
+     * Deployments that want the strong form register an absolute path — which is what this repository's own
+     * gVisor registration does.
+     */
+    private static Path resolve(Path configured) {
+        if (configured.isAbsolute()) {
+            return configured;
+        }
+        String search = System.getenv("PATH");
+        if (search != null) {
+            for (String directory : search.split(java.io.File.pathSeparator)) {
+                if (directory.isBlank()) {
+                    continue;
+                }
+                Path candidate = Path.of(directory).resolve(configured);
+                if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
+                    return candidate;
+                }
+            }
+        }
+        // Returned unresolved so the caller's toRealPath fails and refuses, rather than this inventing a
+        // path that does not exist.
+        return configured;
     }
 
     /**
