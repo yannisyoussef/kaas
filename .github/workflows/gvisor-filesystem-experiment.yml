@@ -124,101 +124,166 @@ jobs:
           SH
           chmod +x /tmp/observe.sh
 
-      - name: A — the current gofer bind, both runtimes
+      # ROUND TWO — THE PROPOSED MECHANISM, MEASURED END TO END.
+      #
+      # Round one settled the shape of the answer. A gofer bind under gVisor carries `ro` alone, and a
+      # shebang script on it executed. A sandbox-internal tmpfs honours noexec and nosuid. A populated tmpfs
+      # can be remounted read-only from inside the sandbox with CAP_SYS_ADMIN — refused under runc, allowed
+      # under gVisor, because the sentry implements mount itself and no host mount syscall is involved.
+      #
+      # What is still open, and what this round exists to answer:
+      #   * does the freeze produce `nodev`? It was absent from round one's option list.
+      #   * can the bootstrap drop every capability irreversibly, read back empty, and lose the remount?
+      #   * does an executable fixture actually run on a permissive control filesystem in this sandbox, so
+      #     that the same fixture being refused on the hardened one means something?
+      #   * does a setuid fixture actually escalate on the control, so nosuid is not a vacuous pass?
+      #   * what happens when a legal frame does not fit the filesystem it is being written into?
+      - name: Build the bootstrap from the repository source
         run: |
-          set -uo pipefail
-          for rt in runc runsc; do
-            echo "##################### A / $rt"
-            docker volume rm kaas-exp-a >/dev/null 2>&1 || true
-            docker volume create --driver local \
-              --opt type=none --opt device=/tmp/kaas-exp --opt o=bind,ro,noexec,nosuid,nodev kaas-exp-a >/dev/null
-            docker run --rm --runtime=$rt --network=none \
-              -v kaas-exp-a:/kaas/source:ro \
-              -v /tmp/observe.sh:/observe.sh:ro \
-              alpine:3.20 /observe.sh /kaas/source 2>&1 || echo "(container failed)"
-            docker volume rm kaas-exp-a >/dev/null 2>&1 || true
-          done
+          set -euo pipefail
+          mkdir -p /tmp/build
+          gcc -static -O2 -Wall -Wextra \
+            -o /tmp/build/source-bootstrap \
+            services/runner/src/main/docker/probe/source-bootstrap.c
+          ls -l /tmp/build/source-bootstrap
+          file /tmp/build/source-bootstrap || true
 
-      - name: B — a plain bind with docker's own ro, both runtimes
+      - name: Frame a bundle the way the runner will
         run: |
-          set -uo pipefail
-          for rt in runc runsc; do
-            echo "##################### B / $rt"
-            docker run --rm --runtime=$rt --network=none \
-              -v /tmp/kaas-exp:/kaas/source:ro \
-              -v /tmp/observe.sh:/observe.sh:ro \
-              alpine:3.20 /observe.sh /kaas/source 2>&1 || echo "(container failed)"
-          done
+          python3 - <<'PY'
+          import hashlib, struct
+          entries = [("features/a.feature", b"Feature: a\n"),
+                     ("features/nested/b.feature", b"CRLF\r\nLF\ntab\there\n")]
+          out = bytearray(b"KAASSRC1")
+          out += hashlib.sha256(b"experiment").hexdigest().encode()
+          out += struct.pack(">I", len(entries))
+          for path, content in entries:
+              p = path.encode()
+              out += struct.pack(">I", len(p)) + p
+              out += hashlib.sha256(content).hexdigest().encode()
+              out += struct.pack(">Q", len(content)) + content
+          out += b"KAASEND1"
+          open("/tmp/bundle.frame", "wb").write(out)
+          print("frame bytes:", len(out))
+          # And an oversized one: sixteen 1 MiB entries into an 8 MiB filesystem. The frame is legal by every
+          # bound the format declares and simply does not fit, which is the case a filesystem size limit has
+          # to turn into a clean refusal rather than an unbounded write.
+          big = [("features/f%d.feature" % i, b"x" * (1024 * 1024)) for i in range(16)]
+          out = bytearray(b"KAASSRC1") + hashlib.sha256(b"big").hexdigest().encode() + struct.pack(">I", len(big))
+          for path, content in big:
+              p = path.encode()
+              out += struct.pack(">I", len(p)) + p + hashlib.sha256(content).hexdigest().encode()
+              out += struct.pack(">Q", len(content)) + content
+          out += b"KAASEND1"
+          open("/tmp/big.frame", "wb").write(out)
+          print("oversized frame bytes:", len(out))
+          PY
 
-      - name: C — a writable tmpfs asking for noexec,nosuid,nodev
+      - name: Write the boundary observer
+        run: |
+          cat > /tmp/boundary.sh <<'SH'
+          #!/bin/sh
+          # Runs as the unprivileged consumer, after the freeze and after the capability drop. Everything it
+          # reports is read from the process it is actually running in.
+          echo "=== FINAL CONSUMER"
+          echo "identity: $(id 2>&1)"
+          echo "--- mounts"
+          awk '$2 ~ /^\/kaas/ {print}' /proc/self/mounts
+          echo "--- mountinfo"
+          awk '$5 ~ /^\/kaas/ {print}' /proc/self/mountinfo
+          echo "--- capabilities and no-new-privs"
+          grep -E '^(CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs)' /proc/self/status
+          echo "--- can the consumer remount the source writable?"
+          if mount -o remount,rw /kaas/source 2>&1; then echo "reremount=OK <-- BAD"; else echo "reremount=REFUSED"; fi
+          echo "--- write to the hardened filesystem"
+          if echo x > /kaas/source/write-probe 2>&1; then echo "hardened_write=ACCEPTED <-- BAD"; else echo "hardened_write=REFUSED"; fi
+          echo "--- CONTROL: an identical fixture on a permissive tmpfs"
+          printf '#!/bin/sh\necho FIXTURE_RAN\n' > /kaas/control/fixture-exec.sh 2>/dev/null
+          chmod 0555 /kaas/control/fixture-exec.sh 2>/dev/null
+          if /kaas/control/fixture-exec.sh 2>&1; then echo "exec_control=EXECUTED"; else echo "exec_control=REFUSED <-- CONTROL BROKEN"; fi
+          cp /fixtures/whoami-suid /kaas/control/fixture-suid 2>/dev/null
+          out=$(/kaas/control/fixture-suid 2>&1 || echo refused)
+          echo "suid_control_output=$out"
+          case "$out" in *"euid=0"*) echo "suid_control=ESCALATED";; *) echo "suid_control=NOT_ESCALATED <-- CONTROL BROKEN";; esac
+          echo "--- HARDENED: the same fixtures, with real modes, on the source filesystem"
+          ls -l /kaas/source/files/ 2>&1
+          if /kaas/source/files/fixture-exec.sh 2>&1; then echo "exec_hardened=EXECUTED <-- BAD"; else echo "exec_hardened=REFUSED"; fi
+          out=$(/kaas/source/files/fixture-suid 2>&1 || echo refused)
+          echo "suid_hardened_output=$out"
+          case "$out" in *"euid=0"*) echo "suid_hardened=ESCALATED <-- BAD";; *) echo "suid_hardened=REFUSED";; esac
+          echo "--- device node creation on the hardened filesystem"
+          if mknod /kaas/source/files/dev-probe c 1 3 2>&1; then echo "mknod_hardened=CREATED <-- BAD"; else echo "mknod_hardened=REFUSED"; fi
+          echo "--- device node on the control, to see whether the attempt can succeed at all here"
+          if mknod /kaas/control/dev-probe c 1 3 2>&1; then echo "mknod_control=CREATED"; else echo "mknod_control=REFUSED"; fi
+          echo "--- every mount this consumer can see"
+          awk '{print $2, $3}' /proc/self/mounts | sort
+          echo "--- bytes"
+          cat /kaas/source/manifest.tsv 2>&1
+          find /kaas/source/files -type f -exec sh -c 'echo "$1 $(sha256sum "$1" | cut -d" " -f1)"' _ {} \;
+          SH
+          chmod +x /tmp/boundary.sh
+
+      # THE FIXTURES ARE PLANTED BY AN EXPERIMENT-ONLY SHELL, before the bootstrap freezes anything.
+      #
+      # Production has no such path and is not getting one: the bundle format carries a path and bytes and
+      # cannot express a mode. The fixtures exist so that "noexec refused it" is distinguishable from "the
+      # file was not executable", which is precisely the confusion KAAS-18 ended on.
+      - name: M — the full mechanism, with executable and setuid fixtures on the hardened filesystem
         run: |
           set -uo pipefail
           for rt in runc runsc; do
-            echo "##################### C / $rt"
-            docker run --rm --runtime=$rt --network=none \
+            echo "##################### M / $rt"
+            docker run --rm -i --runtime=$rt --network=none \
+              --cap-drop=ALL --cap-add=SYS_ADMIN --cap-add=MKNOD --cap-add=CHOWN --cap-add=FOWNER \
               --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
-              -v /tmp/kaas-exp:/ingress:ro \
-              -v /tmp/observe.sh:/observe.sh:ro \
-              alpine:3.20 sh -c 'mkdir -p /kaas/source/files && cp /ingress/files/* /kaas/source/files/ 2>/dev/null; /observe.sh /kaas/source' 2>&1 || echo "(container failed)"
-          done
-
-      - name: D — a writable tmpfs asking for NOTHING (the anti-vacuity control)
-        run: |
-          set -uo pipefail
-          for rt in runc runsc; do
-            echo "##################### D / $rt   (exec MUST succeed here or every REFUSED above is meaningless)"
-            docker run --rm --runtime=$rt --network=none \
-              --tmpfs /kaas/source:rw,exec,suid,dev,size=8m \
-              -v /tmp/kaas-exp:/ingress:ro \
-              -v /tmp/observe.sh:/observe.sh:ro \
-              alpine:3.20 sh -c 'mkdir -p /kaas/source/files && cp -p /ingress/files/* /kaas/source/files/ 2>/dev/null; chmod 4755 /kaas/source/files/whoami-suid 2>/dev/null; /observe.sh /kaas/source' 2>&1 || echo "(container failed)"
-          done
-
-      - name: E — a read-only tmpfs, and whether it can be asked for at all
-        run: |
-          set -uo pipefail
-          for rt in runc runsc; do
-            echo "##################### E / $rt"
-            docker run --rm --runtime=$rt --network=none \
-              --mount type=tmpfs,destination=/kaas/source,tmpfs-size=8388608,readonly \
-              -v /tmp/observe.sh:/observe.sh:ro \
-              alpine:3.20 /observe.sh /kaas/source 2>&1 || echo "(container failed)"
-          done
-
-      - name: F — can a bootstrap remount a populated tmpfs read-only, and then drop the capability
-        run: |
-          set -uo pipefail
-          for rt in runc runsc; do
-            echo "##################### F / $rt"
-            docker run --rm --runtime=$rt --network=none \
-              --cap-drop=ALL --cap-add=SYS_ADMIN \
-              --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
-              -v /tmp/kaas-exp:/ingress:ro \
-              -v /tmp/observe.sh:/observe.sh:ro \
+              --tmpfs /kaas/control:rw,exec,suid,dev,size=8m \
+              -v /tmp/build/source-bootstrap:/bootstrap:ro \
+              -v /tmp/fixtures:/fixtures:ro \
+              -v /tmp/boundary.sh:/probe.sh:ro \
               alpine:3.20 sh -c '
-                mkdir -p /kaas/source/files && cp /ingress/files/* /kaas/source/files/ 2>/dev/null
-                echo "--- remount attempt"
-                if mount -o remount,ro,noexec,nosuid,nodev /kaas/source 2>&1; then echo "remount=OK"; else echo "remount=FAILED"; fi
-                /observe.sh /kaas/source' 2>&1 || echo "(container failed)"
+                mkdir -p /kaas/source/files
+                printf "#!/bin/sh\necho FIXTURE_RAN\n" > /kaas/source/files/fixture-exec.sh
+                chmod 0555 /kaas/source/files/fixture-exec.sh
+                cp /fixtures/whoami-suid /kaas/source/files/fixture-suid
+                chown 0:0 /kaas/source/files/fixture-suid
+                chmod 4755 /kaas/source/files/fixture-suid
+                exec /bootstrap' < /tmp/bundle.frame 2>&1 || echo "(container exited non-zero)"
           done
 
-      - name: G — what the daemon actually asked the runtime for
+      - name: N — the production bootstrap alone, no fixtures, under gVisor
         run: |
           set -uo pipefail
-          docker run -d --name kaas-exp-g --runtime=runsc --network=none \
-            -v /tmp/kaas-exp:/kaas/source:ro alpine:3.20 sleep 60 >/dev/null
-          echo "--- docker's view of the mount"
-          docker inspect kaas-exp-g --format '{{json .Mounts}}' | head -c 2000; echo
-          echo "--- the OCI bundle runsc was handed, if reachable"
-          sudo find /run/docker/runtime-runc /run/containerd -name config.json -newermt '-2 minutes' 2>/dev/null | head -5 | while read -r f; do
-            echo "=== $f"; sudo python3 -c "
-          import json,sys
-          d=json.load(open(sys.argv[1]))
-          for m in d.get('mounts',[]):
-              if 'kaas' in m.get('destination',''): print(m)
-          " "$f" 2>/dev/null || true
-          done
-          docker rm -f kaas-exp-g >/dev/null 2>&1 || true
+          echo "##################### N / runsc"
+          docker run --rm -i --runtime=runsc --network=none \
+            --cap-drop=ALL --cap-add=SYS_ADMIN \
+            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
+            --tmpfs /kaas/control:rw,exec,suid,dev,size=8m \
+            -v /tmp/build/source-bootstrap:/bootstrap:ro \
+            -v /tmp/fixtures:/fixtures:ro \
+            -v /tmp/boundary.sh:/probe.sh:ro \
+            alpine:3.20 /bootstrap < /tmp/bundle.frame 2>&1 || echo "(container exited non-zero)"
+
+      - name: O — a legal frame that does not fit the filesystem
+        run: |
+          set -uo pipefail
+          echo "##################### O / runsc"
+          docker run --rm -i --runtime=runsc --network=none \
+            --cap-drop=ALL --cap-add=SYS_ADMIN \
+            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
+            -v /tmp/build/source-bootstrap:/bootstrap:ro \
+            -v /tmp/boundary.sh:/probe.sh:ro \
+            alpine:3.20 /bootstrap < /tmp/big.frame 2>&1 | head -25 || echo "(container exited non-zero)"
+
+      - name: P — no CAP_SYS_ADMIN at all, so the freeze is the thing that fails
+        run: |
+          set -uo pipefail
+          echo "##################### P / runsc  (the negative control for the whole mechanism)"
+          docker run --rm -i --runtime=runsc --network=none \
+            --cap-drop=ALL \
+            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
+            -v /tmp/build/source-bootstrap:/bootstrap:ro \
+            -v /tmp/boundary.sh:/probe.sh:ro \
+            alpine:3.20 /bootstrap < /tmp/bundle.frame 2>&1 | head -15 || echo "(container exited non-zero)"
 
       - name: Clean up
         if: always()
