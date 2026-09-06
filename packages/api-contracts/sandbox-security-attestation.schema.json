@@ -15,6 +15,10 @@
     "sandboxRuntime",
     "runtimeSubject",
     "runtimeGeneration",
+    "runtimeImplementationName",
+    "runtimeImplementationVersion",
+    "runtimeImplementationDigest",
+    "runtimeImplementationPath",
     "probeImageDigest",
     "assessedAt",
     "mandatoryControls",
@@ -24,7 +28,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "kaas.sandbox-security-attestation.v4"
+      "const": "kaas.sandbox-security-attestation.v5"
     },
     "securityProfileVersion": {
       "type": "string",
@@ -49,6 +53,29 @@
         "GVISOR"
       ],
       "description": "Which sandbox runtime served the probes, as the platform's own runtime constant. Unlike `runtime`, this IS compared: it must be the runtime that `securityProfileVersion` implies, per runtimeByProfileVersion in mandatory-sandbox-controls.json, and a document whose two answers disagree is refused rather than resolved in favour of either. Closed enum because a runtime name is the name of a program a daemon will execute, and nothing a document supplies may widen that set."
+    },
+    "runtimeImplementationName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "The daemon runtime name whose binary was measured, e.g. runsc. Names WHICH registration the three fields below describe, so a document cannot be read as measuring a runtime it did not."
+    },
+    "runtimeImplementationVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[\\x20-\\x7E]+$",
+      "description": "What the sandbox runtime reports as its own version, read by executing the binary the daemon registered. Bounded and restricted to printable ASCII because it is a program's stdout: a runtime that printed control characters must not put them into signed evidence."
+    },
+    "runtimeImplementationDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "description": "SHA-256 of the sandbox runtime binary the daemon will invoke, measured from the daemon's own runtime registration rather than from PATH or from an operator-supplied value. This is the field that stops evidence gathered against one build of the runtime from authorizing execution under another; the control plane compares it against the implementations it was configured to accept."
+    },
+    "runtimeImplementationPath": {
+      "type": "string",
+      "pattern": "^path:[a-f0-9]{32}$",
+      "description": "An opaque hash covering both the configured runtime path and its resolved target. Hashed rather than published because a host path describes the host and the artifact travels; it is present so that repointing a symlink at a different build changes the evidence even when the previous binary still exists elsewhere."
     },
     "assessedAt": {
       "type": "string",

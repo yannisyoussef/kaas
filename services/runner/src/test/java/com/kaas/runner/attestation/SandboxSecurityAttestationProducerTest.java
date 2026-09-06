@@ -28,6 +28,17 @@ class SandboxSecurityAttestationProducerTest {
 
     private static final JsonMapper MAPPER = JsonMapper.builder().build();
 
+    /**
+     * A measured runtime implementation, as the producer would receive one.
+     *
+     * <p>Constructed here rather than measured, because these tests are about what the producer signs and not
+     * about what a daemon reports — {@link RuntimeImplementation#measure} needs a real daemon and is exercised
+     * where one exists. What matters at this boundary is that the producer has no way to invent these values:
+     * they arrive as a parameter and there is no option that sets them.
+     */
+    private static final RuntimeImplementation MEASURED = new RuntimeImplementation(
+            "runsc", "runsc version release-20260817.0", "sha256:" + "a".repeat(64), "path:" + "c".repeat(32));
+
     private static final String PROBE = "sha256:" + "1".repeat(64);
 
     @Test
@@ -95,6 +106,7 @@ class SandboxSecurityAttestationProducerTest {
                         assessment(mandatory("NON_ROOT_UID", SecurityCheck.Verdict.PASS)),
                         egress,
                         runtime(),
+                        MEASURED,
                         PROBE);
 
         // EGRESS_PROXY_READY=PASS says a proxy was ready. It does not say WHICH, and the two travel together
@@ -124,6 +136,7 @@ class SandboxSecurityAttestationProducerTest {
                                 assessment(mandatory("NON_ROOT_UID", SecurityCheck.Verdict.PASS)),
                                 EgressEnforcementAssessment.nothingObserved(),
                                 runtime(),
+                                MEASURED,
                                 "kaas/probe:latest"))
                 .isInstanceOf(AttestationProductionFailed.class)
                 .satisfies(failed -> assertThat(((AttestationProductionFailed) failed).failure())
@@ -190,7 +203,7 @@ class SandboxSecurityAttestationProducerTest {
 
     private static SignedAttestation produce(HostileExecutionAssessment assessment) {
         return new SandboxSecurityAttestationProducer(signer())
-                .produce(assessment, EgressEnforcementAssessment.nothingObserved(), runtime(), PROBE);
+                .produce(assessment, EgressEnforcementAssessment.nothingObserved(), runtime(), MEASURED, PROBE);
     }
 
     private static HostileExecutionAssessment assessment(SecurityCheck... checks) {

@@ -36,7 +36,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 FIXTURES = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / "sandbox-security-attestation-signing"
 
-DOMAIN = "KAAS_SANDBOX_SECURITY_ATTESTATION_V4"
+DOMAIN = "KAAS_SANDBOX_SECURITY_ATTESTATION_V5"
 ABSENT = " ABSENT"
 
 
@@ -44,6 +44,58 @@ def emit(text):
     """LABEL(s) and VALUE(s) are the same primitive: 4-byte big-endian length, then UTF-8 bytes."""
     encoded = text.encode("utf-8")
     return struct.pack(">I", len(encoded)) + encoded
+
+
+def v5_fields():
+    return [
+        ("SCHEMA_VERSION", "schemaVersion"),
+        ("ATTESTATION_ID", "attestationId"),
+        ("PRODUCER_VERSION", "producerVersion"),
+        ("KEY_ID", "keyId"),
+        ("SIGNATURE_ALGORITHM", "signatureAlgorithm"),
+        ("SECURITY_PROFILE_VERSION", "securityProfileVersion"),
+        ("RUNTIME", "runtime"),
+        ("SANDBOX_RUNTIME", "sandboxRuntime"),
+        ("RUNTIME_SUBJECT", "runtimeSubject"),
+        ("RUNTIME_GENERATION", "runtimeGeneration"),
+        ("RUNTIME_IMPLEMENTATION_NAME", "runtimeImplementationName"),
+        ("RUNTIME_IMPLEMENTATION_VERSION", "runtimeImplementationVersion"),
+        ("RUNTIME_IMPLEMENTATION_DIGEST", "runtimeImplementationDigest"),
+        ("RUNTIME_IMPLEMENTATION_PATH", "runtimeImplementationPath"),
+        ("PROBE_IMAGE_DIGEST", "probeImageDigest"),
+    ]
+
+
+def v4_fields():
+    """The predecessor's field list: everything v5 signs except the runtime implementation."""
+    return [f for f in v5_fields() if not f[1].startswith("runtimeImplementation")]
+
+
+def canonical_preimage_with_domain(payload, domain, fields):
+    out = bytearray()
+    out += emit(domain)
+
+    for label, field in fields:
+        out += emit(label)
+        out += emit(payload[field])
+
+    out += emit("EGRESS_PROXY_IMAGE_DIGEST")
+    out += emit(payload.get("egressProxyImageDigest") or ABSENT)
+    out += emit("ASSESSED_AT")
+    out += emit(payload["assessedAt"])
+
+    for label, field in [
+        ("MANDATORY_CONTROL", "mandatoryControls"),
+        ("EGRESS_CONTROL", "egressControls"),
+    ]:
+        controls = payload.get(field) or {}
+        out += emit(label + "_COUNT")
+        out += emit(str(len(controls)))
+        for control in sorted(controls):
+            out += emit(label)
+            out += emit(control)
+            out += emit(controls[control])
+    return bytes(out)
 
 
 def canonical_preimage(payload):
@@ -61,6 +113,10 @@ def canonical_preimage(payload):
         ("SANDBOX_RUNTIME", "sandboxRuntime"),
         ("RUNTIME_SUBJECT", "runtimeSubject"),
         ("RUNTIME_GENERATION", "runtimeGeneration"),
+        ("RUNTIME_IMPLEMENTATION_NAME", "runtimeImplementationName"),
+        ("RUNTIME_IMPLEMENTATION_VERSION", "runtimeImplementationVersion"),
+        ("RUNTIME_IMPLEMENTATION_DIGEST", "runtimeImplementationDigest"),
+        ("RUNTIME_IMPLEMENTATION_PATH", "runtimeImplementationPath"),
         ("PROBE_IMAGE_DIGEST", "probeImageDigest"),
     ]:
         out += emit(label)
@@ -180,6 +236,16 @@ def generate_negatives(valid, keys, signature, digest):
     write("tampered-runtime", tampered(runtime="containerd"))
     write("tampered-runtime-subject", tampered(runtimeSubject="kaas.runtime.elsewhere"))
     write("tampered-runtime-generation", tampered(runtimeGeneration="gen:ffffffffffffffffffffffffffffffff"))
+    # THE RUNTIME IMPLEMENTATION VECTORS. Each changes exactly one statement about which program will confine
+    # the execution, leaving the signature in place -- so a verifier that reconstructs the preimage refuses
+    # them and one that trusts the document's own digest does not.
+    write("tampered-runtime-implementation-digest",
+          tampered(runtimeImplementationDigest="sha256:" + "b" * 64))
+    write("tampered-runtime-implementation-version",
+          tampered(runtimeImplementationVersion="runsc version release-99999999.0"))
+    write("tampered-runtime-implementation-name", tampered(runtimeImplementationName="runc"))
+    write("tampered-runtime-implementation-path",
+          tampered(runtimeImplementationPath="path:" + "e" * 32))
     write("tampered-sandbox-runtime", tampered(sandboxRuntime="GVISOR"))
 
     mandatory = dict(valid["mandatoryControls"])
@@ -238,6 +304,26 @@ def generate_negatives(valid, keys, signature, digest):
     v3["payloadDigest"] = digest
     v3["signature"] = signature
     write("superseded-v3", v3)
+
+    # AND A SUPERSEDED v4, which is the one that matters now.
+    #
+    # v4 is the schema this repository shipped until tenant execution was on the table. It is authentic, it
+    # was signed by a trusted key, and it names a runtime family, a profile and a subject -- everything except
+    # WHICH BINARY confines the sandbox. A verifier that accepted it would let evidence gathered before the
+    # runtime identity existed authorize execution after it.
+    #
+    # Built by dropping the four implementation fields and restoring the v4 schema name, then re-signing under
+    # the v4 domain separator so the document is genuinely valid v4 rather than merely mislabelled. Only the
+    # domain separator makes it unacceptable, which is exactly the property being tested.
+    v4 = {k: v for k, v in valid.items()
+          if not k.startswith("runtimeImplementation")}
+    v4["schemaVersion"] = "kaas.sandbox-security-attestation.v4"
+    v4_preimage = canonical_preimage_with_domain(v4, "KAAS_SANDBOX_SECURITY_ATTESTATION_V4", v4_fields())
+    v4["payloadDigest"] = "sha256:" + hashlib.sha256(v4_preimage).hexdigest()
+    v4_key = serialization.load_der_private_key(
+        base64.b64decode(keys["kaas-test-key-1"]["privateKeyPkcs8"]), password=None)
+    v4["signature"] = base64.b64encode(v4_key.sign(v4_preimage)).decode()
+    write("superseded-v4", v4)
 
 
 if __name__ == "__main__":

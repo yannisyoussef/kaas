@@ -108,8 +108,13 @@ public final class SandboxSecurityAttestationCli {
                 : EgressEnforcementAssessment.nothingObserved();
 
         RuntimeIdentity runtime = RuntimeIdentity.ofDaemon(docker, options.runtimeSubject());
-        SignedAttestation signed =
-                new SandboxSecurityAttestationProducer(signer).produce(mandatory, egress, runtime, probeImage);
+        // MEASURED FROM THE DAEMON'S OWN REGISTRATION, and there is deliberately no option for it. An
+        // operator who could type a digest would be attesting to a claim rather than to a binary, which is
+        // exactly the gap this closes.
+        RuntimeImplementation implementation =
+                RuntimeImplementation.measure(docker, profile.runtime().daemonRuntimeName());
+        SignedAttestation signed = new SandboxSecurityAttestationProducer(signer)
+                .produce(mandatory, egress, runtime, implementation, probeImage);
 
         writeAtomically(options.output(), signed.toJson());
 

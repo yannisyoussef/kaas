@@ -54,6 +54,22 @@ public record AttestationPayloadFields(
         String sandboxRuntime,
         String runtimeSubject,
         String runtimeGeneration,
+        /**
+         * The runtime implementation that actually confines the sandbox, measured rather than declared.
+         *
+         * <p>The four fields below are the reason this schema moved from v4 to v5. Everything v4 signed
+         * described the runtime FAMILY — GVISOR, a profile version, an operator label, a hash of the daemon's
+         * instance id — and every one of those survives swapping the {@code runsc} binary for a different
+         * build. Evidence gathered against one implementation could authorize execution against another.
+         *
+         * <p>That was tolerable while the sandbox ran a repository-controlled probe over inert bytes. It is
+         * not tolerable for tenant code, because the runtime implementation is the boundary: the sentry is the
+         * kernel the tenant's syscalls actually meet.
+         */
+        String runtimeImplementationName,
+        String runtimeImplementationVersion,
+        String runtimeImplementationDigest,
+        String runtimeImplementationPath,
         String probeImageDigest,
         Optional<String> egressProxyImageDigest,
         Instant assessedAt,
@@ -61,12 +77,12 @@ public record AttestationPayloadFields(
         Map<String, String> egressControls) {
 
     /** The only schema this control plane accepts. A v2 document is refused, never downgraded. */
-    public static final String SCHEMA_VERSION = "kaas.sandbox-security-attestation.v4";
+    public static final String SCHEMA_VERSION = "kaas.sandbox-security-attestation.v5";
 
     /** The only algorithm identifier. Compared for equality; never dispatched on. */
     public static final String SIGNATURE_ALGORITHM = "ED25519";
 
-    private static final String DOMAIN = "KAAS_SANDBOX_SECURITY_ATTESTATION_V4";
+    private static final String DOMAIN = "KAAS_SANDBOX_SECURITY_ATTESTATION_V5";
 
     private static final String ABSENT = " ABSENT";
 
@@ -107,6 +123,14 @@ public record AttestationPayloadFields(
         emit(bytes, runtimeSubject);
         emit(bytes, "RUNTIME_GENERATION");
         emit(bytes, runtimeGeneration);
+        emit(bytes, "RUNTIME_IMPLEMENTATION_NAME");
+        emit(bytes, runtimeImplementationName);
+        emit(bytes, "RUNTIME_IMPLEMENTATION_VERSION");
+        emit(bytes, runtimeImplementationVersion);
+        emit(bytes, "RUNTIME_IMPLEMENTATION_DIGEST");
+        emit(bytes, runtimeImplementationDigest);
+        emit(bytes, "RUNTIME_IMPLEMENTATION_PATH");
+        emit(bytes, runtimeImplementationPath);
         emit(bytes, "PROBE_IMAGE_DIGEST");
         emit(bytes, probeImageDigest);
         emit(bytes, "EGRESS_PROXY_IMAGE_DIGEST");

@@ -146,6 +146,9 @@ class SyntheticExecutionPipelineTests {
         registry.add("kaas.execution.attestation-trusted-keys", ProducedAttestation::trustedKeys);
         registry.add(
                 "kaas.execution.attestation-runtime-subjects", () -> ProducedAttestation.RUNTIME_SUBJECT);
+        registry.add(
+                "kaas.execution.attestation-runtime-implementations",
+                () -> ProducedAttestation.RUNTIME_IMPLEMENTATION_DIGEST);
     }
 
     private final HttpClient http = HttpClient.newHttpClient();

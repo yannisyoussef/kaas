@@ -3,7 +3,7 @@
   "attestationId": "01JBQZ8V4T0000000000000001",
   "producerVersion": "kaas.attestation-producer.v1",
   "keyId": "kaas-test-key-1",
-  "signatureAlgorithm": "ED448",
+  "signatureAlgorithm": "ED25519",
   "securityProfileVersion": "kaas.sandbox.v1",
   "runtime": "docker",
   "sandboxRuntime": "DOCKER",
@@ -12,7 +12,7 @@
   "runtimeImplementationName": "runsc",
   "runtimeImplementationVersion": "runsc version release-20260817.0",
   "runtimeImplementationDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "runtimeImplementationPath": "path:cccccccccccccccccccccccccccccccc",
+  "runtimeImplementationPath": "path:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
   "probeImageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
   "egressProxyImageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
   "assessedAt": "2026-09-05T09:12:33Z",
@@ -42,6 +42,6 @@
     "EGRESS_PROXY_IMAGE_PINNED": "PASS",
     "EGRESS_PROXY_READY": "PASS"
   },
-  "payloadDigest": "sha256:8e9ae71d2414cc429d51c4d9c8af56b12eaf4f44a6c405a93621e31bd17200be",
-  "signature": "/Olf4ZL3j8pkwVfluAzBbghHFqi+7KK+P6vIGVGsPIepiTgvDdgIf7dtIr8RYlsaY+BHAxHUG51S5hrs34niDw=="
+  "payloadDigest": "sha256:149af67ffaaed2da68072fc1683bbfac3aac9be3d1f2349abbab9e6a057318ac",
+  "signature": "ZXbw+SX+IGIG9Zl8oK5v5YV/64KqSfoygWWSCufUoX0tZOPy673Jwlf2iZQagiRcWGsQRnCzF12S+naIBFRDDg=="
 }

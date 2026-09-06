@@ -39,6 +39,10 @@ class VerifiedAttestationSemanticsTest {
 
     private static final Set<String> ACCEPTED = Set.of(SignedAttestationFixture.RUNTIME_SUBJECT);
 
+    /** The runtime binaries these tests accept. One, and it is the one the fixture measured. */
+    private static final Set<String> ACCEPTED_IMPLEMENTATIONS =
+            Set.of(SignedAttestationFixture.RUNTIME_IMPLEMENTATION_DIGEST);
+
     @Test
     @DisplayName("a complete, recent, passing assessment for this runtime authorizes")
     void aCompleteRecentPassingAssessmentAuthorizes() {
@@ -53,6 +57,45 @@ class VerifiedAttestationSemanticsTest {
         assertThat(reason(SignedAttestationFixture.signed(
                         builder().withoutMandatoryControl("NETWORK_DENIED"))))
                 .contains(AttestationVerification.CONTROL_FAILED);
+    }
+
+    @Test
+    @DisplayName("evidence for a different runtime binary cannot authorize execution")
+    void aReplacedRuntimeBinaryInvalidatesEvidence() {
+        // THE INVARIANT KAAS-20 EXISTS TO ESTABLISH, and the shape of the test is the argument.
+        //
+        // Everything else about this document is right: the same trusted key, the same daemon subject, the
+        // same profile, the same runtime family, the same controls, an assessment taken seconds ago. The only
+        // difference is which runsc binary was measured. Before v5 nothing in the signature carried that, so
+        // an operator could gather evidence against one build, install another, and every existing
+        // attestation would keep authorizing execution.
+        //
+        // Stated the other way round, because that is the operational rule: replacing the runtime binary
+        // invalidates the evidence automatically. There is no "remember to re-run the gate" step, because
+        // forgetting it fails closed.
+        var otherBinary = SignedAttestationFixture.signed(
+                builder().withRuntimeImplementationDigest("sha256:" + "b".repeat(64)));
+
+        assertThat(reason(otherBinary))
+                .contains(AttestationVerification.RUNTIME_IMPLEMENTATION_MISMATCH);
+
+        // ANTI-VACUITY. The same document, with the measured binary accepted, authorizes -- so the refusal
+        // above is about the implementation and not about a check that refuses everything.
+        assertThat(verify(otherBinary)
+                        .reasonItCannotAuthorize(
+                                Instant.now(), MAX_AGE, PROFILE, ACCEPTED, Set.of("sha256:" + "b".repeat(64))))
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("a deployment that accepts no runtime binary authorizes nothing")
+    void acceptingNoImplementationRefusesEverything() {
+        // Fail closed by construction rather than by a branch, exactly as the accepted-subject set does. A
+        // deployment that named no implementation has no runtime identity at all, and that must read as a
+        // refusal rather than as "any implementation will do".
+        assertThat(verify(SignedAttestationFixture.mandatoryOnly(PROFILE, Instant.now()))
+                        .reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED, Set.of()))
+                .contains(AttestationVerification.RUNTIME_IMPLEMENTATION_MISMATCH);
     }
 
     @Test
@@ -71,7 +114,7 @@ class VerifiedAttestationSemanticsTest {
         var verified = verify(SignedAttestationFixture.signed(
                 builder().withMandatoryControl("NO_DOCKER_SOCKET", "FAIL")));
 
-        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED))
+        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED, ACCEPTED_IMPLEMENTATIONS))
                 .contains(AttestationVerification.CONTROL_FAILED);
         // Safe to say out loud, and only here: the signature already proved a pinned key produced it, so this
         // is a trusted producer's statement rather than attacker-influenced text.
@@ -129,7 +172,7 @@ class VerifiedAttestationSemanticsTest {
         var verified = verify(SignedAttestationFixture.signed(
                 builder().withRuntimeSubject("kaas.runtime.elsewhere")));
 
-        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED))
+        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED, ACCEPTED_IMPLEMENTATIONS))
                 .contains(AttestationVerification.WRONG_SUBJECT);
     }
 
@@ -139,7 +182,7 @@ class VerifiedAttestationSemanticsTest {
         // Fail closed, and by construction rather than by a branch: an empty set contains nothing, so a
         // deployment that forgot to name its runtimes authorizes none of them.
         assertThat(verify(SignedAttestationFixture.mandatoryOnly(PROFILE, Instant.now()))
-                        .reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, Set.of()))
+                        .reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, Set.of(), ACCEPTED_IMPLEMENTATIONS))
                 .contains(AttestationVerification.WRONG_SUBJECT);
     }
 
@@ -155,7 +198,7 @@ class VerifiedAttestationSemanticsTest {
         // It authorizes a DENY_ALL execution perfectly well. Absence of an egress claim is not a failure of
         // the mandatory evidence — it is simply no statement about egress, and the fail-closed reading of no
         // statement is "not enforceable".
-        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED)).isEmpty();
+        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED, ACCEPTED_IMPLEMENTATIONS)).isEmpty();
         assertThat(verified.reasonEgressCannotBeEnforced())
                 .contains(AttestationVerification.CONTROL_FAILED);
     }
@@ -176,7 +219,7 @@ class VerifiedAttestationSemanticsTest {
 
         // The separation that matters: a DENY_ALL run must not be refused because the egress subsystem is
         // unhealthy, because it is a subsystem that run does not use.
-        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED)).isEmpty();
+        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED, ACCEPTED_IMPLEMENTATIONS)).isEmpty();
         assertThat(verified.reasonEgressCannotBeEnforced())
                 .contains(AttestationVerification.CONTROL_FAILED);
     }
@@ -200,7 +243,7 @@ class VerifiedAttestationSemanticsTest {
     }
 
     private static Optional<AttestationVerification> reason(String document) {
-        return verify(document).reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED);
+        return verify(document).reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED, ACCEPTED_IMPLEMENTATIONS);
     }
 
     /** Verifies, and fails loudly if the document was not authentic — these tests are about the next stage. */
@@ -243,7 +286,7 @@ class VerifiedAttestationSemanticsTest {
         // in favour of one field would hand the choice to whoever wrote the document.
         var verified = verify(SignedAttestationFixture.signed(builder().withSandboxRuntime("GVISOR")));
 
-        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED))
+        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED, ACCEPTED_IMPLEMENTATIONS))
                 .contains(AttestationVerification.RUNTIME_MISMATCH);
     }
 
@@ -256,7 +299,7 @@ class VerifiedAttestationSemanticsTest {
         var verified = verify(SignedAttestationFixture.signed(
                 SignedAttestationFixture.builder("kaas.sandbox.gvisor.v1", Instant.now())));
 
-        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED))
+        assertThat(verified.reasonItCannotAuthorize(Instant.now(), MAX_AGE, PROFILE, ACCEPTED, ACCEPTED_IMPLEMENTATIONS))
                 .contains(AttestationVerification.PROFILE_MISMATCH);
     }
 

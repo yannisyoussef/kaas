@@ -65,13 +65,24 @@ public final class AttestationVerificationCli {
         // operator should learn here rather than from a refused execution.
         String subjects = System.getProperty("kaas.attestation.verify.runtime-subjects", "");
         String profile = System.getProperty("kaas.attestation.verify.profile-version", "");
+        // The accepted runtime binaries. Defaulted to the digest the document itself carries ONLY when the
+        // caller names none, and that default is a reporting convenience rather than a policy: this CLI
+        // answers "would this authorize, given what you accept", and a caller who names no implementation is
+        // asking about everything except the implementation. A deployment that configures none accepts none.
+        String implementations = System.getProperty(
+                "kaas.attestation.verify.runtime-implementations",
+                attestation.payload().runtimeImplementationDigest());
+        System.out.println("runtimeImplementationName=" + attestation.payload().runtimeImplementationName());
+        System.out.println("runtimeImplementationVersion=" + attestation.payload().runtimeImplementationVersion());
+        System.out.println("runtimeImplementationDigest=" + attestation.payload().runtimeImplementationDigest());
         if (!subjects.isBlank() && !profile.isBlank()) {
             var unusable = attestation.reasonItCannotAuthorize(
                     Instant.now(),
                     Duration.parse(
                             System.getProperty("kaas.attestation.verify.maximum-age", "PT24H")),
                     profile,
-                    Set.of(subjects.split(",")));
+                    Set.of(subjects.split(",")),
+                    Set.of(implementations.split(",")));
             System.out.println("authorizes=" + unusable.isEmpty());
             unusable.ifPresent(reason -> System.out.println("wouldRefuseBecause=" + reason));
             System.out.println(

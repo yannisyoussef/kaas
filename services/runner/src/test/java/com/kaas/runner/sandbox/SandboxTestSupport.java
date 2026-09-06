@@ -48,6 +48,30 @@ final class SandboxTestSupport {
                 : Path.of("services", "runner", "src", "main", "docker", "probe");
     }
 
+    private static String jvmProbeImageReference;
+
+    /**
+     * The hostile JVM probe image, built once.
+     *
+     * <p>A separate image from the security probe, and separate on purpose. That one is busybox and is what
+     * every existing gate measures; putting a JVM into it would change the thing under test everywhere for
+     * the sake of one measurement. This exists only to ask what the boundary does when the workload is a JVM,
+     * which is the question that matters once the future engine is one.
+     */
+    static synchronized String jvmProbeImage() {
+        if (jvmProbeImageReference == null) {
+            jvmProbeImageReference = ProbeImage.build(docker(), jvmProbeContext());
+        }
+        return jvmProbeImageReference;
+    }
+
+    static Path jvmProbeContext() {
+        Path fromModule = Path.of("src", "main", "docker", "jvm-probe");
+        return fromModule.toFile().isDirectory()
+                ? fromModule
+                : Path.of("services", "runner", "src", "main", "docker", "jvm-probe");
+    }
+
     private static String proxyImageReference;
 
     private static String targetImageReference;

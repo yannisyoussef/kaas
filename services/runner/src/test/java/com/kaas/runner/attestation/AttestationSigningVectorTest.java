@@ -85,6 +85,8 @@ class AttestationSigningVectorTest {
         for (String property : new String[] {
             "schemaVersion", "attestationId", "producerVersion", "keyId", "signatureAlgorithm",
             "securityProfileVersion", "runtime", "runtimeSubject", "runtimeGeneration",
+            "runtimeImplementationName", "runtimeImplementationVersion", "runtimeImplementationDigest",
+            "runtimeImplementationPath",
             "probeImageDigest", "egressProxyImageDigest", "assessedAt", "payloadDigest", "signature"
         }) {
             assertThat(emitted.get(property).stringValue())
@@ -101,14 +103,18 @@ class AttestationSigningVectorTest {
                 withEvidence.schemaVersion(), withEvidence.attestationId(), withEvidence.producerVersion(),
                 withEvidence.keyId(), withEvidence.signatureAlgorithm(), withEvidence.securityProfileVersion(),
                 withEvidence.runtime(), withEvidence.sandboxRuntime(), withEvidence.runtimeSubject(),
-                withEvidence.runtimeGeneration(),
+                withEvidence.runtimeGeneration(), withEvidence.runtimeImplementationName(),
+                withEvidence.runtimeImplementationVersion(), withEvidence.runtimeImplementationDigest(),
+                withEvidence.runtimeImplementationPath(),
                 withEvidence.probeImageDigest(), Optional.empty(), withEvidence.assessedAt(),
                 withEvidence.mandatoryControls(), withEvidence.egressControls());
         var withEmptyString = new AttestationPayload(
                 withEvidence.schemaVersion(), withEvidence.attestationId(), withEvidence.producerVersion(),
                 withEvidence.keyId(), withEvidence.signatureAlgorithm(), withEvidence.securityProfileVersion(),
                 withEvidence.runtime(), withEvidence.sandboxRuntime(), withEvidence.runtimeSubject(),
-                withEvidence.runtimeGeneration(),
+                withEvidence.runtimeGeneration(), withEvidence.runtimeImplementationName(),
+                withEvidence.runtimeImplementationVersion(), withEvidence.runtimeImplementationDigest(),
+                withEvidence.runtimeImplementationPath(),
                 withEvidence.probeImageDigest(), Optional.of(""), withEvidence.assessedAt(),
                 withEvidence.mandatoryControls(), withEvidence.egressControls());
 
@@ -144,6 +150,10 @@ class AttestationSigningVectorTest {
                 root.get("sandboxRuntime").stringValue(),
                 root.get("runtimeSubject").stringValue(),
                 root.get("runtimeGeneration").stringValue(),
+                root.get("runtimeImplementationName").stringValue(),
+                root.get("runtimeImplementationVersion").stringValue(),
+                root.get("runtimeImplementationDigest").stringValue(),
+                root.get("runtimeImplementationPath").stringValue(),
                 root.get("probeImageDigest").stringValue(),
                 Optional.ofNullable(root.get("egressProxyImageDigest")).map(JsonNode::stringValue),
                 Instant.parse(root.get("assessedAt").stringValue()),

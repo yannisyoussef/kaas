@@ -96,6 +96,11 @@ class AttestationSigningVectorTest {
         "tampered-runtime",
         "tampered-runtime-subject",
         "tampered-runtime-generation",
+        "tampered-runtime-implementation-digest",
+        "tampered-runtime-implementation-version",
+        "tampered-runtime-implementation-name",
+        "tampered-runtime-implementation-path",
+        "superseded-v4",
         "tampered-payload-digest",
         "tampered-signature",
         "key-id-does-not-match-signature",
@@ -134,6 +139,11 @@ class AttestationSigningVectorTest {
         // v3 is refused exactly as v2 is. It is genuinely signed -- under the v3 domain separator -- so this
         // is a superseded schema being refused rather than a broken document failing anyway.
         assertThat(trusting.verify(document("invalid/superseded-v3.json")).outcome())
+                .isEqualTo(AttestationVerification.UNSUPPORTED_SCHEMA);
+        // And v4, which is the one that matters now. It is genuinely signed under the v4 domain separator by
+        // a trusted key, and it names the runtime family, profile and subject -- everything except WHICH
+        // binary confines the sandbox. Refused as a superseded schema, not accepted as "close enough".
+        assertThat(trusting.verify(document("invalid/superseded-v4.json")).outcome())
                 .isEqualTo(AttestationVerification.UNSUPPORTED_SCHEMA);
         assertThat(trusting.verify(document("invalid/unknown-key-id.json")).outcome())
                 .isEqualTo(AttestationVerification.UNKNOWN_KEY);
@@ -252,6 +262,15 @@ class AttestationSigningVectorTest {
             "superseded-v3", "dropped-mandatory-control", "tampered-egress-verdict", "tampered-assessed-at",
             "tampered-profile-version", "tampered-probe-image-digest", "tampered-proxy-image-digest",
             "tampered-runtime", "tampered-runtime-subject", "tampered-runtime-generation",
+            // THE RUNTIME IMPLEMENTATION VECTORS. Each alters one statement about which program will confine
+            // the execution and leaves the signature alone, so a verifier that reconstructs the preimage
+            // refuses them and one that trusted the document's own digest would not.
+            "tampered-runtime-implementation-digest", "tampered-runtime-implementation-version",
+            "tampered-runtime-implementation-name", "tampered-runtime-implementation-path",
+            // v4 is authentic, trusted-signed, and describes everything except which binary confines the
+            // sandbox. Accepting it would let evidence gathered before runtime identity existed authorize
+            // execution after it.
+            "superseded-v4",
             "tampered-payload-digest", "tampered-signature", "missing-signature", "unknown-property",
             "unknown-key-id", "signed-by-a-different-trusted-key", "key-id-does-not-match-signature",
             "wrong-algorithm", "unsigned-v2");
@@ -269,6 +288,10 @@ class AttestationSigningVectorTest {
                 root.get("sandboxRuntime").stringValue(),
                 root.get("runtimeSubject").stringValue(),
                 root.get("runtimeGeneration").stringValue(),
+                root.get("runtimeImplementationName").stringValue(),
+                root.get("runtimeImplementationVersion").stringValue(),
+                root.get("runtimeImplementationDigest").stringValue(),
+                root.get("runtimeImplementationPath").stringValue(),
                 root.get("probeImageDigest").stringValue(),
                 Optional.ofNullable(root.get("egressProxyImageDigest")).map(JsonNode::stringValue),
                 Instant.parse(root.get("assessedAt").stringValue()),

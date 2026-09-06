@@ -58,6 +58,20 @@ public enum AttestationVerification {
      */
     RUNTIME_MISMATCH,
 
+    /**
+     * Authentic, and describes a runtime BINARY this deployment was not told to accept.
+     *
+     * <p>Distinct from {@link #WRONG_SUBJECT}, which is about which host gathered the evidence. This is about
+     * which program will confine the execution. Until tenant code, the two were close enough that only the
+     * first was checked: the runtime family, the profile and the operator's label all survive replacing the
+     * runtime binary with a different build, so evidence gathered against one implementation could authorize
+     * an execution against another.
+     *
+     * <p>For inert bytes that was an accepted residual. For tenant code it is not, because the runtime
+     * implementation IS the boundary — the sentry is the kernel the tenant's syscalls meet.
+     */
+    RUNTIME_IMPLEMENTATION_MISMATCH,
+
     /** Authentic, and a required control is missing, extra, or did not pass. */
     CONTROL_FAILED;
 

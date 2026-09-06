@@ -131,6 +131,9 @@ class ExecutionAuthorizationTests {
         registry.add(
                 "kaas.execution.attestation-runtime-subjects",
                 () -> SignedAttestationFixture.RUNTIME_SUBJECT);
+        registry.add(
+                "kaas.execution.attestation-runtime-implementations",
+                () -> SignedAttestationFixture.RUNTIME_IMPLEMENTATION_DIGEST);
     }
 
     private final HttpClient client = HttpClient.newHttpClient();

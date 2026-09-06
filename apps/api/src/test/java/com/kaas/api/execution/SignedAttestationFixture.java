@@ -50,6 +50,9 @@ public final class SignedAttestationFixture {
     /** The subject these fixtures attest, and the one a test control plane must be configured to accept. */
     public static final String RUNTIME_SUBJECT = "kaas.runtime.test";
 
+    /** The runtime binary these fixtures describe. Tests accept this one and refuse anything else. */
+    public static final String RUNTIME_IMPLEMENTATION_DIGEST = "sha256:" + "a".repeat(64);
+
     private static final JsonMapper MAPPER = JsonMapper.builder().build();
 
     private SignedAttestationFixture() {}
@@ -99,6 +102,10 @@ public final class SignedAttestationFixture {
         private String sandboxRuntime;
         private String runtimeSubject = RUNTIME_SUBJECT;
         private String runtimeGeneration = "gen:0123456789abcdef0123456789abcdef";
+        private String runtimeImplementationName = "runsc";
+        private String runtimeImplementationVersion = "runsc version release-20260817.0";
+        private String runtimeImplementationDigest = "sha256:" + "a".repeat(64);
+        private String runtimeImplementationPath = "path:" + "c".repeat(32);
         private String probeImageDigest = "sha256:" + "1".repeat(64);
         private Optional<String> proxyImageDigest = Optional.of("sha256:" + "2".repeat(64));
         private final String profileVersion;
@@ -141,6 +148,12 @@ public final class SignedAttestationFixture {
             return this;
         }
 
+        /** Varies the measured runtime binary, so "a different runsc" is expressible in a test. */
+        public Builder withRuntimeImplementationDigest(String digest) {
+            this.runtimeImplementationDigest = digest;
+            return this;
+        }
+
         public Builder withRuntimeSubject(String subject) {
             this.runtimeSubject = subject;
             return this;
@@ -180,6 +193,10 @@ public final class SignedAttestationFixture {
                             : "DOCKER");
             fields.put("runtimeSubject", runtimeSubject);
             fields.put("runtimeGeneration", runtimeGeneration);
+            fields.put("runtimeImplementationName", runtimeImplementationName);
+            fields.put("runtimeImplementationVersion", runtimeImplementationVersion);
+            fields.put("runtimeImplementationDigest", runtimeImplementationDigest);
+            fields.put("runtimeImplementationPath", runtimeImplementationPath);
             fields.put("probeImageDigest", probeImageDigest);
             proxyImageDigest.ifPresent(digest -> fields.put("egressProxyImageDigest", digest));
             fields.put("assessedAt",
@@ -229,7 +246,7 @@ public final class SignedAttestationFixture {
         static byte[] of(
                 Map<String, String> fields, Map<String, String> mandatory, Map<String, String> egress) {
             java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-            emit(out, "KAAS_SANDBOX_SECURITY_ATTESTATION_V4");
+            emit(out, "KAAS_SANDBOX_SECURITY_ATTESTATION_V5");
             label(out, "SCHEMA_VERSION", fields.get("schemaVersion"));
             label(out, "ATTESTATION_ID", fields.get("attestationId"));
             label(out, "PRODUCER_VERSION", fields.get("producerVersion"));
@@ -240,6 +257,10 @@ public final class SignedAttestationFixture {
             label(out, "SANDBOX_RUNTIME", fields.get("sandboxRuntime"));
             label(out, "RUNTIME_SUBJECT", fields.get("runtimeSubject"));
             label(out, "RUNTIME_GENERATION", fields.get("runtimeGeneration"));
+            label(out, "RUNTIME_IMPLEMENTATION_NAME", fields.get("runtimeImplementationName"));
+            label(out, "RUNTIME_IMPLEMENTATION_VERSION", fields.get("runtimeImplementationVersion"));
+            label(out, "RUNTIME_IMPLEMENTATION_DIGEST", fields.get("runtimeImplementationDigest"));
+            label(out, "RUNTIME_IMPLEMENTATION_PATH", fields.get("runtimeImplementationPath"));
             label(out, "PROBE_IMAGE_DIGEST", fields.get("probeImageDigest"));
             label(out, "EGRESS_PROXY_IMAGE_DIGEST",
                     fields.getOrDefault("egressProxyImageDigest", " ABSENT"));

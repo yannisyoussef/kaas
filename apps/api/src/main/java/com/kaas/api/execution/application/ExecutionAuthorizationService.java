@@ -233,7 +233,8 @@ public class ExecutionAuthorizationService {
                         now,
                         attestationMaxAge,
                         expectedProfileVersion,
-                        attestations.acceptedRuntimeSubjects());
+                        attestations.acceptedRuntimeSubjects(),
+                        attestations.acceptedRuntimeImplementationDigests());
         if (unusable.isPresent()) {
             LOGGER.atWarn()
                     .addKeyValue("event", "SANDBOX_ATTESTATION_REJECTED")

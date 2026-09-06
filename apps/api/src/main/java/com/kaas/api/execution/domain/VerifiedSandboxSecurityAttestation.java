@@ -70,12 +70,16 @@ public final class VerifiedSandboxSecurityAttestation {
      * @param acceptedRuntimeSubjects the runtimes this deployment was told to accept evidence for. Empty means
      *     none — which refuses everything, because a control plane that accepts evidence for any subject lets
      *     a signature from host A authorize an execution on host B
+     * @param acceptedRuntimeImplementationDigests the runtime binaries this deployment was told to accept.
+     *     Empty means none, for the same reason: a deployment that accepts any implementation is one where
+     *     replacing the sandbox runtime leaves every existing signature still valid
      */
     public Optional<AttestationVerification> reasonItCannotAuthorize(
             Instant now,
             Duration maximumAge,
             String expectedProfileVersion,
-            Set<String> acceptedRuntimeSubjects) {
+            Set<String> acceptedRuntimeSubjects,
+            Set<String> acceptedRuntimeImplementationDigests) {
 
         if (!acceptedRuntimeSubjects.contains(payload.runtimeSubject())) {
             // THE host-A-authorizes-host-B check. Displaying the subject rather than validating it would make
@@ -91,6 +95,19 @@ public final class VerifiedSandboxSecurityAttestation {
             // tree. A host reconfigured last month is not described by an assessment from last year. A
             // signature does not make an old statement current.
             return Optional.of(AttestationVerification.STALE);
+        }
+        if (!acceptedRuntimeImplementationDigests.contains(payload.runtimeImplementationDigest())) {
+            // WHICH PROGRAM WILL CONFINE THE EXECUTION, checked rather than displayed.
+            //
+            // Every other identity in this document survives replacing the runtime binary: the family, the
+            // profile, the operator's subject, the daemon's instance hash. So without this, evidence gathered
+            // against one build of the sandbox runtime authorizes execution against any other build the same
+            // key ever signed for -- including one installed after the assessment.
+            //
+            // Configured, like the accepted subjects, and empty means none. A deployment that accepts any
+            // implementation has no runtime identity at all, and that must read as a refusal rather than as a
+            // permissive default.
+            return Optional.of(AttestationVerification.RUNTIME_IMPLEMENTATION_MISMATCH);
         }
         if (!expectedProfileVersion.equals(payload.securityProfileVersion())) {
             return Optional.of(AttestationVerification.PROFILE_MISMATCH);

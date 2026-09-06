@@ -42,6 +42,24 @@ final class ProducedAttestation {
     /** The subject these fixtures attest, which a test control plane must be configured to accept. */
     static final String RUNTIME_SUBJECT = "kaas.runtime.pipeline";
 
+    /** The runtime binary this pipeline's evidence describes, and the only one its control plane accepts. */
+    static final String RUNTIME_IMPLEMENTATION_DIGEST = "sha256:" + "d".repeat(64);
+
+    /**
+     * A measured runtime implementation, constructed rather than measured.
+     *
+     * <p>These tests run against a daemon that has no mediating runtime registered, so measuring one is not
+     * possible and is not what they are about: what they exercise is that the control plane refuses evidence
+     * whose implementation it was not configured to accept. The measurement itself is exercised where a real
+     * runtime exists.
+     */
+    static final com.kaas.runner.attestation.RuntimeImplementation MEASURED_RUNTIME =
+            new com.kaas.runner.attestation.RuntimeImplementation(
+                    "runsc",
+                    "runsc version release-20260817.0",
+                    RUNTIME_IMPLEMENTATION_DIGEST,
+                    "path:" + "c".repeat(32));
+
     private static final JsonMapper MAPPER = JsonMapper.builder().build();
 
     private ProducedAttestation() {}
@@ -86,6 +104,7 @@ final class ProducedAttestation {
                         assessment,
                         egress,
                         new RuntimeIdentity("docker", RUNTIME_SUBJECT, "gen:" + "a".repeat(32)),
+                        MEASURED_RUNTIME,
                         "sha256:" + "1".repeat(64))
                 .toJson();
     }

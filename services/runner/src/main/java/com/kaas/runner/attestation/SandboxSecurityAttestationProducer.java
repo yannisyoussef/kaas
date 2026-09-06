@@ -52,12 +52,15 @@ public final class SandboxSecurityAttestationProducer {
      *     when egress was not assessed. Nothing observed produces an attestation with no egress controls and
      *     no proxy image — which the control plane reads as "makes no egress claim", and refuses an ALLOWLIST
      * @param runtime the opaque subject and generation this evidence describes
+     * @param implementation the runtime binary that confined the probes, measured from the daemon's own
+     *     registration. Not a parameter an operator can supply a value for -- see {@link RuntimeImplementation}.
      * @param probeImageDigest the content-addressed probe image the mandatory assessment ran
      */
     public SignedAttestation produce(
             HostileExecutionAssessment mandatory,
             EgressEnforcementAssessment egress,
             RuntimeIdentity runtime,
+            RuntimeImplementation implementation,
             String probeImageDigest) {
 
         if (mandatory.checks().isEmpty()) {
@@ -88,6 +91,13 @@ public final class SandboxSecurityAttestationProducer {
                 mandatory.sandboxRuntime(),
                 runtime.subject(),
                 runtime.generation(),
+                // MEASURED, NOT DECLARED. Read from the daemon's own runtime registration and hashed here, so
+                // an attestation names the implementation that will actually confine tenant code rather than
+                // the family it belongs to. An operator cannot type these in: there is no parameter for them.
+                implementation.name(),
+                implementation.version(),
+                implementation.digest(),
+                implementation.pathIdentity(),
                 probeImageDigest,
                 proxyImageOf(egress),
                 mandatory.assessedAt(),

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "kaas.sandbox-security-attestation.v4",
+  "schemaVersion": "kaas.sandbox-security-attestation.v5",
   "attestationId": "01JBQZ8V4T0000000000000001",
   "producerVersion": "kaas.attestation-producer.v1",
   "keyId": "kaas-test-key-1",
@@ -9,6 +9,10 @@
   "sandboxRuntime": "DOCKER",
   "runtimeSubject": "kaas.runtime.elsewhere",
   "runtimeGeneration": "gen:0123456789abcdef0123456789abcdef",
+  "runtimeImplementationName": "runsc",
+  "runtimeImplementationVersion": "runsc version release-20260817.0",
+  "runtimeImplementationDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "runtimeImplementationPath": "path:cccccccccccccccccccccccccccccccc",
   "probeImageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
   "egressProxyImageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
   "assessedAt": "2026-09-05T09:12:33Z",
@@ -38,6 +42,6 @@
     "EGRESS_PROXY_IMAGE_PINNED": "PASS",
     "EGRESS_PROXY_READY": "PASS"
   },
-  "payloadDigest": "sha256:d5ca91ee1d6acba8f791a1285d96d259d2bc0171e28df1a9121ede2ff16e423d",
-  "signature": "N3K0O4CGzw7O0rzwdrygaiobn4ks5wDIIHL80QtdGOSDVC0Qr1VAbOSSKiVzhKkJPkt0zp7QVjnbN73l2NGLBw=="
+  "payloadDigest": "sha256:149af67ffaaed2da68072fc1683bbfac3aac9be3d1f2349abbab9e6a057318ac",
+  "signature": "ZXbw+SX+IGIG9Zl8oK5v5YV/64KqSfoygWWSCufUoX0tZOPy673Jwlf2iZQagiRcWGsQRnCzF12S+naIBFRDDg=="
 }

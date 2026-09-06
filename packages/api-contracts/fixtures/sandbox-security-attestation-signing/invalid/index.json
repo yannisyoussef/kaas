@@ -22,6 +22,11 @@
     "unsigned-v2": "The old unsigned document. Refused outright: no fallback path and no migration window.",
     "tampered-sandbox-runtime": "The sandbox runtime edited after signing, so the document names a boundary its evidence was not taken behind. Inside the preimage, so the digest moves.",
     "self-contradictory-runtime": "Genuinely signed, and its two statements about one boundary disagree: securityProfileVersion says kaas.sandbox.v1 while sandboxRuntime says GVISOR. Authentic and still refused - no reading of it is the truth, and resolving the disagreement in favour of either field would let a producer choose which.",
-    "superseded-v3": "A v3 document, authentic under the v3 domain separator. Refused for its schema exactly as v2 is: a superseded schema is never downgraded to, and the separator moved with the version so v3 bytes can never verify as v4."
+    "superseded-v3": "A v3 document, authentic under the v3 domain separator. Refused for its schema exactly as v2 is: a superseded schema is never downgraded to, and the separator moved with the version so v3 bytes can never verify as v4.",
+    "tampered-runtime-implementation-digest": "The measured digest of the sandbox runtime binary, changed. This is the field that says WHICH program will confine the execution, so altering it is the forgery that would let evidence gathered against one build of runsc authorize execution under another.",
+    "tampered-runtime-implementation-version": "The runtime's reported version, changed while the digest stays. A document whose two statements about the runtime disagree is not a document to reason from.",
+    "tampered-runtime-implementation-name": "The runtime registration name changed from runsc to runc, so the evidence claims to describe a different registration than the one it measured.",
+    "tampered-runtime-implementation-path": "The opaque path identity changed. Present so that repointing a symlink at a different build is a change to the evidence even when some copy of the old binary still exists.",
+    "superseded-v4": "A genuine v4 document, signed by a trusted key under the v4 domain separator. It names the runtime family, the profile and the subject and says nothing about which binary confines the sandbox. Refused as a superseded schema rather than accepted, because that silence is exactly what v5 exists to end."
   }
 }

@@ -60,6 +60,10 @@ public final class SandboxSecurityAttestationVerifier {
             "sandboxRuntime",
             "runtimeSubject",
             "runtimeGeneration",
+            "runtimeImplementationName",
+            "runtimeImplementationVersion",
+            "runtimeImplementationDigest",
+            "runtimeImplementationPath",
             "probeImageDigest",
             "egressProxyImageDigest",
             "assessedAt",
@@ -199,6 +203,10 @@ public final class SandboxSecurityAttestationVerifier {
                 text(root, "sandboxRuntime"),
                 text(root, "runtimeSubject"),
                 text(root, "runtimeGeneration"),
+                text(root, "runtimeImplementationName"),
+                text(root, "runtimeImplementationVersion"),
+                text(root, "runtimeImplementationDigest"),
+                text(root, "runtimeImplementationPath"),
                 text(root, "probeImageDigest"),
                 // Absent is legal and means no egress claim. Present-but-not-textual is an error rather than
                 // an absence: a document that tried to name a proxy image and failed must not read as one that

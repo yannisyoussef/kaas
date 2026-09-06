@@ -224,6 +224,9 @@ class ExecutionSecurityGateDependencyTests {
             registry.add(
                     "kaas.execution.attestation-runtime-subjects",
                     () -> SignedAttestationFixture.RUNTIME_SUBJECT);
+        registry.add(
+                "kaas.execution.attestation-runtime-implementations",
+                () -> SignedAttestationFixture.RUNTIME_IMPLEMENTATION_DIGEST);
         }
 
         @Test
@@ -240,7 +243,8 @@ class ExecutionSecurityGateDependencyTests {
                             Instant.now(),
                             java.time.Duration.ofHours(24),
                             "kaas.sandbox.v1",
-                            java.util.Set.of(SignedAttestationFixture.RUNTIME_SUBJECT)))
+                            java.util.Set.of(SignedAttestationFixture.RUNTIME_SUBJECT),
+                            java.util.Set.of(SignedAttestationFixture.RUNTIME_IMPLEMENTATION_DIGEST)))
                     .contains(AttestationVerification.CONTROL_FAILED);
         }
     }
@@ -267,6 +271,9 @@ class ExecutionSecurityGateDependencyTests {
             registry.add(
                     "kaas.execution.attestation-runtime-subjects",
                     () -> SignedAttestationFixture.RUNTIME_SUBJECT);
+        registry.add(
+                "kaas.execution.attestation-runtime-implementations",
+                () -> SignedAttestationFixture.RUNTIME_IMPLEMENTATION_DIGEST);
         }
 
         @Test
@@ -278,7 +285,8 @@ class ExecutionSecurityGateDependencyTests {
                             Instant.now(),
                             java.time.Duration.ofHours(24),
                             "kaas.sandbox.v1",
-                            java.util.Set.of(SignedAttestationFixture.RUNTIME_SUBJECT)))
+                            java.util.Set.of(SignedAttestationFixture.RUNTIME_SUBJECT),
+                            java.util.Set.of(SignedAttestationFixture.RUNTIME_IMPLEMENTATION_DIGEST)))
                     .contains(AttestationVerification.WRONG_SUBJECT);
         }
     }
@@ -304,6 +312,9 @@ class ExecutionSecurityGateDependencyTests {
             registry.add(
                     "kaas.execution.attestation-runtime-subjects",
                     () -> SignedAttestationFixture.RUNTIME_SUBJECT);
+        registry.add(
+                "kaas.execution.attestation-runtime-implementations",
+                () -> SignedAttestationFixture.RUNTIME_IMPLEMENTATION_DIGEST);
         }
 
         @Test
@@ -316,7 +327,8 @@ class ExecutionSecurityGateDependencyTests {
                             Instant.now(),
                             java.time.Duration.ofHours(24),
                             "kaas.sandbox.v1",
-                            java.util.Set.of(SignedAttestationFixture.RUNTIME_SUBJECT)))
+                            java.util.Set.of(SignedAttestationFixture.RUNTIME_SUBJECT),
+                            java.util.Set.of(SignedAttestationFixture.RUNTIME_IMPLEMENTATION_DIGEST)))
                     .contains(AttestationVerification.STALE);
         }
     }

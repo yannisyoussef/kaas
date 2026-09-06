@@ -30,5 +30,5 @@
     "EGRESS_PROXY_IMAGE_PINNED": "PASS",
     "EGRESS_PROXY_READY": "PASS"
   },
-  "digest": "sha256:d5ca91ee1d6acba8f791a1285d96d259d2bc0171e28df1a9121ede2ff16e423d"
+  "digest": "sha256:149af67ffaaed2da68072fc1683bbfac3aac9be3d1f2349abbab9e6a057318ac"
 }

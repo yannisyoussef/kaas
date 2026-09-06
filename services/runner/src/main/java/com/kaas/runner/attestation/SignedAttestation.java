@@ -53,6 +53,10 @@ public record SignedAttestation(AttestationPayload payload, String payloadDigest
         root.put("sandboxRuntime", payload.sandboxRuntime());
         root.put("runtimeSubject", payload.runtimeSubject());
         root.put("runtimeGeneration", payload.runtimeGeneration());
+        root.put("runtimeImplementationName", payload.runtimeImplementationName());
+        root.put("runtimeImplementationVersion", payload.runtimeImplementationVersion());
+        root.put("runtimeImplementationDigest", payload.runtimeImplementationDigest());
+        root.put("runtimeImplementationPath", payload.runtimeImplementationPath());
         root.put("probeImageDigest", payload.probeImageDigest());
         // Omitted entirely when there is no egress evidence, matching the contract: the preimage distinguishes
         // absent from empty, and so must the document, or a round trip would not reproduce the preimage.

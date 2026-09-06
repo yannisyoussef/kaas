@@ -78,6 +78,24 @@ public enum SyntheticProbe {
      */
     SOURCE_BOUNDARY(List.of("sourceboundary"), "/source-boundary-fixture"),
 
+    /**
+     * A hostile workload written in Java, because the engine that would run tenant code is a JVM.
+     *
+     * <p>Every other hostile probe here is a shell script, which was the right shape while the sandbox ran
+     * shell and is the wrong shape for asking whether a JVM can be contained: threads are not processes, a
+     * JVM's memory floor is not a shell's, and Java's networking does not go through the tools a shell probe
+     * exercises. This attempts what tenant Karate could attempt through Java interop — writing to the source
+     * filesystem, executing from it, remounting it, creating a device node, generating and running code in
+     * {@code /tmp}, spawning children, opening raw sockets — and reports what was refused.
+     *
+     * <p>It is NOT Karate and parses nothing. It runs in its own image so the security probe every other gate
+     * measures stays a busybox image rather than gaining a JVM for one measurement's sake.
+     */
+    HOSTILE_JVM(List.of("jvm")),
+
+    /** The same, but it leaves a child behind, so cancellation can be tested against something that resists. */
+    HOSTILE_JVM_ORPHAN(List.of("orphan")),
+
     // The two below are not security probes. Every value above exists to attack the sandbox's own
     // confinement and prove it holds; these two are the platform's synthetic WORKLOAD, and they are what a
     // run actually executes in this slice. They live in the same enumeration because they run through the

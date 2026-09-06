@@ -54,6 +54,31 @@ public record AttestationPayload(
         String sandboxRuntime,
         String runtimeSubject,
         String runtimeGeneration,
+        /**
+         * The runtime implementation that actually confines the sandbox, measured rather than declared.
+         *
+         * <p>The three fields below are the whole reason this schema moved from v4 to v5. Everything v4 signed
+         * described the runtime FAMILY — GVISOR, a profile version, an operator label, a hash of the daemon's
+         * instance id — and every one of those survives swapping the {@code runsc} binary for a different
+         * build. Evidence gathered against one implementation could authorize execution against another.
+         *
+         * <p>That was tolerable while the sandbox ran a repository-controlled probe over inert bytes. It is
+         * not tolerable for tenant code, because the runtime implementation is the boundary: the sentry is the
+         * kernel the tenant's syscalls actually meet.
+         */
+        String runtimeImplementationName,
+        /** What the runtime says it is, read from the binary the daemon will invoke. */
+        String runtimeImplementationVersion,
+        /** SHA-256 of that binary. Changing the binary changes this, and every signature over it. */
+        String runtimeImplementationDigest,
+        /**
+         * An opaque identity for where the runtime was registered.
+         *
+         * <p>Hashed rather than published: a host path describes the host, and the artifact travels. It covers
+         * the configured path and the resolved one together, so repointing a symlink at a different build
+         * changes the evidence even if the old binary still exists somewhere.
+         */
+        String runtimeImplementationPath,
         String probeImageDigest,
         /**
          * The proxy image this evidence describes, or empty when no egress evidence was gathered.
@@ -68,7 +93,7 @@ public record AttestationPayload(
         Map<String, String> egressControls) {
 
     /** The schema this payload shape is. A later shape is a different version and a different preimage. */
-    public static final String SCHEMA_VERSION = "kaas.sandbox-security-attestation.v4";
+    public static final String SCHEMA_VERSION = "kaas.sandbox-security-attestation.v5";
 
     /** The one algorithm. Not a field a document gets to choose; a constant a verifier requires. */
     public static final String SIGNATURE_ALGORITHM = "ED25519";
@@ -81,7 +106,7 @@ public record AttestationPayload(
      * field matched. The separator moved with the schema for exactly that reason: v4 added a signed field, and
      * a v3 document whose bytes happened to line up must not verify against a v4 reader.
      */
-    static final String DOMAIN = "KAAS_SANDBOX_SECURITY_ATTESTATION_V4";
+    static final String DOMAIN = "KAAS_SANDBOX_SECURITY_ATTESTATION_V5";
 
     /** Emitted for an absent optional field, so absent and empty-string are not the same preimage. */
     static final String ABSENT = " ABSENT";
@@ -96,6 +121,10 @@ public record AttestationPayload(
         Objects.requireNonNull(runtime);
         Objects.requireNonNull(runtimeSubject);
         Objects.requireNonNull(runtimeGeneration);
+        Objects.requireNonNull(runtimeImplementationName);
+        Objects.requireNonNull(runtimeImplementationVersion);
+        Objects.requireNonNull(runtimeImplementationDigest);
+        Objects.requireNonNull(runtimeImplementationPath);
         Objects.requireNonNull(probeImageDigest);
         Objects.requireNonNull(egressProxyImageDigest);
         Objects.requireNonNull(assessedAt);
@@ -122,6 +151,10 @@ public record AttestationPayload(
         field(out, "SANDBOX_RUNTIME", sandboxRuntime);
         field(out, "RUNTIME_SUBJECT", runtimeSubject);
         field(out, "RUNTIME_GENERATION", runtimeGeneration);
+        field(out, "RUNTIME_IMPLEMENTATION_NAME", runtimeImplementationName);
+        field(out, "RUNTIME_IMPLEMENTATION_VERSION", runtimeImplementationVersion);
+        field(out, "RUNTIME_IMPLEMENTATION_DIGEST", runtimeImplementationDigest);
+        field(out, "RUNTIME_IMPLEMENTATION_PATH", runtimeImplementationPath);
         field(out, "PROBE_IMAGE_DIGEST", probeImageDigest);
         field(out, "EGRESS_PROXY_IMAGE_DIGEST", egressProxyImageDigest.orElse(ABSENT));
         field(out, "ASSESSED_AT", assessedAtText());

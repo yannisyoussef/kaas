@@ -128,6 +128,9 @@ class ExecutionAuthorizationGateRefusalTests {
             registry.add(
                     "kaas.execution.attestation-runtime-subjects",
                     () -> com.kaas.api.execution.SignedAttestationFixture.RUNTIME_SUBJECT);
+            registry.add(
+                    "kaas.execution.attestation-runtime-implementations",
+                    () -> com.kaas.api.execution.SignedAttestationFixture.RUNTIME_IMPLEMENTATION_DIGEST);
         }
 
         @Test

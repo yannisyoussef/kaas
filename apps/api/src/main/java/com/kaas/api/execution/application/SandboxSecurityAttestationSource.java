@@ -52,15 +52,22 @@ public class SandboxSecurityAttestationSource {
 
     private final Set<String> acceptedRuntimeSubjects;
 
+    private final Set<String> acceptedRuntimeImplementationDigests;
+
     /**
      * @param document the signed artifact, transported here as configuration
      * @param runtimeSubjects the runtimes this control plane will accept evidence for. Empty means none, and
      *     none means no execution: a control plane that accepted evidence for any subject would let a
      *     signature produced on one host authorize an execution on another
+     * @param runtimeImplementationDigests the sandbox runtime BINARIES this control plane will accept, as
+     *     {@code sha256:...} values. Empty means none, for the same reason and a sharper one: every other
+     *     identity in an attestation survives replacing that binary, so without this an assessment of one
+     *     build authorizes execution under any other build the same key ever signed for
      */
     public SandboxSecurityAttestationSource(
             @Value("${kaas.execution.sandbox-attestation:}") String document,
             @Value("${kaas.execution.attestation-runtime-subjects:}") String runtimeSubjects,
+            @Value("${kaas.execution.attestation-runtime-implementations:}") String runtimeImplementationDigests,
             AttestationTrustStore trustStore,
             MeterRegistry meters) {
 
@@ -69,6 +76,13 @@ public class SandboxSecurityAttestationSource {
                         .map(String::trim)
                         .filter(subject -> !subject.isEmpty())
                         .toList());
+        this.acceptedRuntimeImplementationDigests = Set.copyOf(java.util.Arrays.stream(
+                        runtimeImplementationDigests == null
+                                ? new String[0]
+                                : runtimeImplementationDigests.split(","))
+                .map(String::trim)
+                .filter(digest -> !digest.isEmpty())
+                .toList());
 
         SandboxSecurityAttestationVerifier.Result result =
                 new SandboxSecurityAttestationVerifier(trustStore).verify(document);
@@ -112,5 +126,17 @@ public class SandboxSecurityAttestationSource {
     /** The runtimes this deployment accepts evidence for. Empty refuses everything, by construction. */
     public Set<String> acceptedRuntimeSubjects() {
         return acceptedRuntimeSubjects;
+    }
+
+    /**
+     * The sandbox runtime binaries this deployment accepts. Empty refuses everything, by construction.
+     *
+     * <p>The operational consequence is deliberate and is the point of the field: replacing the runtime
+     * binary means the configured digest no longer matches, and every existing attestation stops authorizing
+     * execution until a new one is produced against the new binary. There is no "remember to re-run the gate"
+     * step, because forgetting it fails closed.
+     */
+    public Set<String> acceptedRuntimeImplementationDigests() {
+        return acceptedRuntimeImplementationDigests;
     }
 }

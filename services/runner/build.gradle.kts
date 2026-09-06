@@ -145,6 +145,9 @@ val strongRuntimeTest = tasks.register<Test>("strongRuntimeTest") {
         // The mediated source filesystem. Named explicitly for the same reason as its neighbours: the gate
         // asserts which suites produced its evidence, and a glob would let a renamed class drop out silently.
         includeTestsMatching("com.kaas.runner.sandbox.MediatedSourceFilesystemBoundaryTests")
+        // What the boundary does when the workload is a JVM, which is what a future engine is. Named
+        // explicitly like its neighbours so a rename cannot silently remove mandatory evidence.
+        includeTestsMatching("com.kaas.runner.sandbox.HostileJvmContainmentTests")
     }
 }
 
@@ -159,6 +162,7 @@ tasks.named<Test>("test") {
         excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeBoundaryTests")
         excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeAuthorityRevocationTests")
         excludeTestsMatching("com.kaas.runner.sandbox.MediatedSourceFilesystemBoundaryTests")
+        excludeTestsMatching("com.kaas.runner.sandbox.HostileJvmContainmentTests")
     }
 }
 
