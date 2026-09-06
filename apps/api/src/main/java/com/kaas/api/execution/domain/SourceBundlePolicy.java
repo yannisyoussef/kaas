@@ -46,7 +46,8 @@ import java.util.zip.ZipOutputStream;
  * output on the same runtime: entries sorted by path, fixed timestamps, and a fixed compression method.
  */
 public final class SourceBundlePolicy {
-    private static final String FORMAT = "kaas.source-bundle.v1";
+    /** The bundle format this build produces. Shared with the runner through the api-contracts file. */
+    public static final String FORMAT = "kaas.source-bundle.v1";
 
     /**
      * A fixed local timestamp for every entry.
@@ -67,6 +68,19 @@ public final class SourceBundlePolicy {
     public static final int MAX_FEATURES = 1000;
 
     public static final long MAX_TOTAL_BYTES = 64L * 1024 * 1024;
+
+    /**
+     * One entry's ceiling, restated here rather than left to the database.
+     *
+     * <p>Deliberately looser than the {@code feature_revisions} column constraint. This is not that check
+     * repeated; it is the delivery boundary refusing to hand over an entry the runner would refuse to
+     * materialise, so a corrupted or migrated row cannot produce a bundle that dies inside a sandbox instead
+     * of at the boundary that assembled it.
+     */
+    public static final long MAX_ENTRY_BYTES = 1024L * 1024;
+
+    /** A logical path. Bounds what any filesystem this is written into has to accommodate. */
+    public static final int MAX_PATH_LENGTH = 512;
 
     private SourceBundlePolicy() {}
 
@@ -92,7 +106,7 @@ public final class SourceBundlePolicy {
             if (path == null || path.isBlank()) {
                 throw new IllegalArgumentException("A bundle entry must have a path.");
             }
-            if (path.length() > 512) {
+            if (path.length() > MAX_PATH_LENGTH) {
                 throw new IllegalArgumentException("A bundle entry path is bounded.");
             }
             if (path.indexOf('\0') >= 0) {
@@ -172,6 +186,11 @@ public final class SourceBundlePolicy {
     /** A deterministic ZIP of the given entries. Same input, same bytes. */
     public static byte[] archive(List<BundleEntry> entries) {
         requireSafePaths(entries.stream().map(BundleEntry::logicalPath).toList());
+        for (BundleEntry entry : entries) {
+            if (entry.content().length > MAX_ENTRY_BYTES) {
+                throw new IllegalArgumentException("A bundle entry is bounded in size.");
+            }
+        }
         long total = entries.stream().mapToLong(entry -> entry.content().length).sum();
         if (total > MAX_TOTAL_BYTES) {
             throw new IllegalArgumentException("A bundle is bounded in total size.");

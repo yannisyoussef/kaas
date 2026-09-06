@@ -23,6 +23,7 @@ import com.kaas.runner.source.SourceBundle;
 import com.kaas.runner.source.SourceBundleContract;
 import com.kaas.runner.source.SourceBundleRejected;
 import com.kaas.runner.source.SourceStaging;
+import com.kaas.runner.source.StaleSourceReconciler;
 import com.kaas.runner.sandbox.SyntheticProbe;
 import java.time.Clock;
 import java.time.Duration;
@@ -127,6 +128,24 @@ public final class ExecutionLoop {
     }
 
     /**
+     * Removes tenant source that outlived the execution it belonged to.
+     *
+     * <p>Failure here is deliberately not fatal. Stale bytes on a host are a hygiene problem; refusing to
+     * execute because a cleaner could not run would convert it into an availability problem, and the next
+     * execution on this host will try again.
+     */
+    private void reclaimAbandonedSource() {
+        if (sourceStagingRoot == null) {
+            return;
+        }
+        try {
+            new StaleSourceReconciler(sourceStagingRoot).reclaim(clock.instant());
+        } catch (RuntimeException ignored) {
+            // Reported by the next pass rather than failing an execution that is otherwise authorized.
+        }
+    }
+
+    /**
      * Executes one assignment.
      *
      * @return what happened, which is never an exception for an ordinary refusal — a refused run is a normal
@@ -134,6 +153,12 @@ public final class ExecutionLoop {
      */
     public ExecutionReport execute(UUID runId, UUID attemptId, int assignmentEpoch)
             throws ControlPlaneUnavailable {
+
+        // 0. TENANT SOURCE A CRASHED RUNNER LEFT ON THIS HOST. Every ordinary path removes a bundle when its
+        //    execution ends, but a host that lost power mid-run cannot have taken that path. Reclaiming here
+        //    rather than from a timer means the mechanism runs on the same code path executions run on: it
+        //    cannot rot unnoticed behind a scheduler nobody starts in production.
+        reclaimAbandonedSource();
 
         // 1. AUTHORITY, revalidated now. The claim that won this assignment may be seconds or minutes old, and
         //    the run may have been cancelled or the lease lost since. Nothing is provisioned before this.
