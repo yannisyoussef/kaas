@@ -284,18 +284,18 @@ public final class ExecutionLoop {
      * disk. Authority is re-read immediately before the write, so a worker fenced during PROVISIONING does
      * not leave source on a host it no longer serves.
      */
-    private SourceStaging materialiseSource(SourceBundle bundle, ExecutionAuthority authority) {
+    SourceStaging materialiseSource(SourceBundle bundle, ExecutionAuthority authority) {
         if (bundle == null) {
             return null;
         }
         if (authority.lost()) {
             throw new SourceBundleRejected(
-                    SourceBundleRejected.Reason.AUTHORITY_LOST, "Authority ended before source was staged.");
+                    SourceBundleRejected.Reason.AUTHORITY_LOST, "Authority ended before source reached the host.");
         }
         return SourceStaging.materialise(sourceStagingRoot, bundle);
     }
 
-    private SourceBundle redeemSource(
+    SourceBundle redeemSource(
             ValidatedCommand command, String capabilityToken, ExecutionAuthority authority) {
         if (sourceStagingRoot == null) {
             // This deployment stages no source. The sandbox runs exactly as it did before, which is what

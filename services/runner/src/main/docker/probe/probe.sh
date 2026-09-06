@@ -351,6 +351,19 @@ sourceverify)
     # something other than the materialiser created it.
     emit source_irregular_entries "$(find "$root" ! -type f ! -type d 2>/dev/null | wc -l | tr -d ' ')"
 
+    # EXECUTION, ATTEMPTED. The mount flags above are what the kernel SAYS; this is what it DOES.
+    #
+    # Both barriers are in play and they are not the same barrier. The materialiser writes every file without
+    # an executable bit, which refuses this on any runtime; a noexec mount would refuse it a second time, and
+    # one of the two runtimes does not provide that. Reported separately from source_mount_noexec on purpose:
+    # collapsing them would let the weaker configuration hide behind the stronger one.
+    execprobe=$(find "$root/files" -type f 2>/dev/null | head -n 1)
+    if [ -n "$execprobe" ] && "$execprobe" >/dev/null 2>&1; then
+        emit source_exec_refused false
+    else
+        emit source_exec_refused true
+    fi
+
     format=$(awk 'NR==1 {print $1}' "$manifest")
     expected_digest=$(awk 'NR==1 {print $2}' "$manifest")
     expected_count=$(awk 'NR==1 {print $3}' "$manifest")

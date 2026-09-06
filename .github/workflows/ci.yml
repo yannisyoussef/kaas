@@ -563,16 +563,56 @@ jobs:
           echo "executed=$executed skipped=$skipped"
           # Zero skips is the load-bearing half. A suite that skipped itself because the runtime was absent is
           # exactly the outcome this job exists to make impossible.
-          if [ "$executed" -lt 7 ] || [ "$skipped" -ne 0 ]; then
-            echo "Expected at least 7 executed tests and no skips." >&2
+          if [ "$executed" -lt 12 ] || [ "$skipped" -ne 0 ]; then
+            echo "Expected at least 12 executed tests and no skips." >&2
             exit 1
           fi
-          for suite in StrongRuntimeBoundaryTests StrongRuntimeAuthorityRevocationTests; do
+          for suite in StrongRuntimeBoundaryTests StrongRuntimeAuthorityRevocationTests \
+                       StrongRuntimeSourceDeliveryTests; do
             if ! ls "$results" | grep -q "$suite"; then
               echo "$suite did not run." >&2
               exit 1
             fi
           done
+
+      # WHAT THE SANDBOX ACTUALLY SAW OF THE SOURCE MOUNT, in the log, on a passing run.
+      #
+      # The suite asserts these; this prints them. The distinction matters because the mount-flag findings are
+      # the honest part of this slice: `ro` is carried onto a mediated bind and `noexec` is not, and that gap
+      # is the reason KAAS-18 does not declare tenant code execution ready. A reader of a green run should be
+      # able to see the measurement rather than take the verdict on trust.
+      - name: Report the mediated source-delivery evidence
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/source-delivery-evidence.txt"
+          if [ ! -f "$evidence" ]; then
+            echo "The source-delivery suite produced no evidence file; it cannot have observed a mount." >&2
+            exit 1
+          fi
+          cat "$evidence"
+          # Read back the properties the gate depends on, from what the sandbox reported rather than from the
+          # test's own summary of it.
+          grep -q '^source_verification=VALID$' "$evidence"
+          grep -q '^source_mount_ro=true$' "$evidence"
+          grep -q '^source_write_refused=true$' "$evidence"
+          grep -q '^source_exec_refused=true$' "$evidence"
+          grep -q '^source_setuid_files=0$' "$evidence"
+          grep -q '^source_irregular_entries=0$' "$evidence"
+          # AND THE GAP, recorded as a fact rather than as an omission. If this line ever changes, the mediated
+          # boundary improved and docs/security/tenant-source-delivery.md must be re-adjudicated.
+          grep -q '^source_mount_noexec=false$' "$evidence"
+
+      # Tenant bytes are the one thing in this repository that must not survive the job that used them.
+      - name: Confirm no tenant source outlived the gate
+        run: |
+          set -euo pipefail
+          stale=$(find /tmp "$RUNNER_TEMP" -maxdepth 1 -type d -name 'kaas-*source*' 2>/dev/null | wc -l | tr -d ' ')
+          echo "stale_source_dirs=$stale"
+          if [ "$stale" -ne 0 ]; then
+            find /tmp "$RUNNER_TEMP" -maxdepth 1 -type d -name 'kaas-*source*' >&2
+            echo "Tenant source staging outlived the suite that created it." >&2
+            exit 1
+          fi
 
       - name: Confirm nothing outlived the run
         run: |

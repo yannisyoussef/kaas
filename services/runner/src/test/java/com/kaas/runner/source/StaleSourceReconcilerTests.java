@@ -81,6 +81,21 @@ class StaleSourceReconcilerTests {
         } catch (UnsupportedOperationException | java.io.IOException unsupported) {
             return; // A platform without symlinks cannot exhibit the hazard.
         }
+        // AGED, AND AGED ON THE LINK ITSELF. Without this the link's own timestamp is current and the grace
+        // period alone declines it -- so the test passed while the symlink guard was removed, which is how a
+        // mutation found it.
+        //
+        // Through the attribute view with NOFOLLOW_LINKS, not Files.setLastModifiedTime, which follows the
+        // link and ages the TARGET instead. That first fix looked right, still left the link's own time
+        // current, and the mutation survived a second time -- so the age is read back below rather than
+        // assumed, and every other rule now says "reclaim this" with the guard as the only thing refusing.
+        FileTime old = FileTime.from(Instant.now().minus(Duration.ofDays(30)));
+        Files.getFileAttributeView(link, java.nio.file.attribute.BasicFileAttributeView.class,
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                .setTimes(old, null, null);
+        assertThat(Files.getLastModifiedTime(link, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                .as("the link itself must be old, or this test proves nothing about the symlink guard")
+                .isEqualTo(old);
 
         assertThat(new StaleSourceReconciler(root).reclaim(Instant.now())).isZero();
         assertThat(Files.exists(elsewhere.resolve("important")))

@@ -28,6 +28,7 @@
 | [028](028-mediated-sandbox-runtime.md) | The sandbox runs under a mediating runtime with no fallback to the baseline, and the mandatory control set is scoped to the runtime that produced the evidence | ACCEPTED; v4 required, v3 refused; ADR-022 stays open |
 | [022](022-hostile-execution-boundary-and-synthetic-probe.md) *(amended)* | The hostile-content runtime prerequisite is satisfied **for the mediated runtime**, permitting inert tenant-byte delivery only | AMENDED 2026-09-05; execution still not approved |
 | [029](029-continuous-execution-authority.md) | The lease bounds how long a worker may keep executing, not only what it may write: revocation stops a running sandbox, and an unrenewable lease stops it fail-closed | ACCEPTED; ADR-022 stays open |
+| [030](030-inert-tenant-source-delivery.md) | Tenant-authored bytes enter the sandbox as data — mounted read-only, hashed, compared — and are never parsed, executed or interpreted; the mediated mount does not carry `noexec`, and that gap is reported rather than downgraded | ACCEPTED; ADR-022 stays open |
 
 Deferred topics without active decisions remain: concrete object-storage/upload adapter, secret **delivery**
 mechanism and a real secret provider, outbox and CREATED-run retention policy, self-service quarantine
@@ -88,5 +89,13 @@ rationale for refusing ordinary Docker is preserved unchanged — an ADR is deci
 of the present. Of its five prerequisites, four are satisfied or not applicable to byte delivery; the fifth
 splits, with output handling satisfied and *input* handling being what the source-delivery slice must
 establish.
+
+ADR-030 delivers on the amendment above and stops exactly where it said it would. Tenant bytes are now
+stored, transported, mounted, read, hashed and compared; nothing parses, executes, sources or interprets them,
+and the bundle format cannot express a mode, a link or a device. **The mount requirement was not fully met and
+was not downgraded**: `noexec` is not carried onto a gofer-backed bind under the mediating runtime, execution
+is refused instead by the absence of an executable bit, and both facts are asserted in CI in the direction
+each is actually true. **Tenant code execution remains NOT APPROVED**, blocked on that gap, on the KAAS-15
+runtime-pin attestation gap, and on an adjudication ADR-030 does not perform.
 
 `IMPLEMENTED` means verified by repository code or tooling. `PROPOSED` means design intent only. `DEFERRED` means no decision is active and implementation must not assume one.

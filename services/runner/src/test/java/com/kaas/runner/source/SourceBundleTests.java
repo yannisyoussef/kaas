@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.kaas.runner.source.SourceBundle.ExpectedEntry;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -165,6 +166,49 @@ class SourceBundleTests {
     }
 
     @Test
+    @DisplayName("verification applies the path rules, not only the rule method")
+    void verificationAppliesThePathRules() {
+        // THE GAP A MUTATION FOUND. Every assertion above calls requireSafePaths directly, so deleting the
+        // call from verified() -- the only entry point production uses -- changed nothing that any test
+        // could see. A rule enforced by a method nobody is proven to call is not enforced.
+        //
+        // Driven through verified() with a traversing path in the COMMAND's own feature list, which is the
+        // shape a control-plane defect would produce and the one that would otherwise be joined onto a
+        // staging root.
+        byte[] content = "Feature: a\n".getBytes(StandardCharsets.UTF_8);
+        var traversing = List.of(expect("../escape.feature", content));
+
+        assertThatThrownBy(() -> SourceBundle.verified(
+                        archiveOf(entries("../escape.feature", content)),
+                        traversing,
+                        SourceBundle.bundleDigest(traversing)))
+                .isInstanceOf(SourceBundleRejected.class)
+                .extracting(failure -> ((SourceBundleRejected) failure).reason())
+                .isEqualTo(SourceBundleRejected.Reason.UNSAFE_PATH);
+
+        // The same, for a collision that loses a feature silently rather than escaping anywhere. Two shapes
+        // rather than one, because a call site could be restored for traversal alone and still skip the rest.
+        var colliding = List.of(expect("a.feature", content), expect("A.feature", content));
+        assertThatThrownBy(() -> SourceBundle.verified(
+                        archiveOf(entries("a.feature", content, "A.feature", content)),
+                        colliding,
+                        SourceBundle.bundleDigest(colliding)))
+                .isInstanceOf(SourceBundleRejected.class)
+                .extracting(failure -> ((SourceBundleRejected) failure).reason())
+                .isEqualTo(SourceBundleRejected.Reason.UNSAFE_PATH);
+
+        // Anti-vacuity: the same route with ordinary paths succeeds, so the refusals above are about the
+        // paths and not about verified() refusing whatever it is given.
+        var ordinary = List.of(expect("features/a.feature", content));
+        assertThat(SourceBundle.verified(
+                                archiveOf(entries("features/a.feature", content)),
+                                ordinary,
+                                SourceBundle.bundleDigest(ordinary))
+                        .contents())
+                .containsOnlyKeys("features/a.feature");
+    }
+
+    @Test
     @DisplayName("an oversized entry is refused while reading, not after buffering it")
     void anOversizedEntryIsRefused() {
         byte[] huge = new byte[(int) SourceBundleContract.MAX_ENTRY_BYTES + 1024];
@@ -175,6 +219,118 @@ class SourceBundleTests {
                 .isInstanceOf(SourceBundleRejected.class)
                 .extracting(failure -> ((SourceBundleRejected) failure).reason())
                 .isEqualTo(SourceBundleRejected.Reason.TOO_LARGE);
+    }
+
+    @Test
+    @DisplayName("a bundle is refused while reading when its entries aggregate past the ceiling")
+    void anOversizedAggregateIsRefusedWhileReading() {
+        // MEASURED AT THE READ, not at the match. Mutation testing found this: the per-entry ceiling and the
+        // aggregate accounting in verified() both survive removing the reader's own total, because every
+        // oversized case the suite had was also caught later. But "later" is after the whole archive is in
+        // memory, and an archive of individually legal entries is exactly how a peer would get there.
+        //
+        // Driven with an EMPTY authorized set on purpose. The later accounting only runs over entries the
+        // command named, so with nothing named it cannot fire -- which makes this test fail for the reader's
+        // reason or not at all.
+        Map<String, byte[]> entries = new LinkedHashMap<>();
+        byte[] oneMebibyte = new byte[(int) SourceBundleContract.MAX_ENTRY_BYTES];
+        for (int i = 0; i <= SourceBundleContract.MAX_TOTAL_BYTES / SourceBundleContract.MAX_ENTRY_BYTES; i++) {
+            entries.put("features/" + i + ".feature", oneMebibyte);
+        }
+
+        assertThatThrownBy(() -> SourceBundle.verified(archiveOf(entries), List.of(), "sha256:unused"))
+                .isInstanceOf(SourceBundleRejected.class)
+                .extracting(failure -> ((SourceBundleRejected) failure).reason())
+                .isEqualTo(SourceBundleRejected.Reason.TOO_LARGE);
+    }
+
+    @Test
+    @DisplayName("a bundle is refused while reading when it carries more entries than permitted")
+    void anOverfullArchiveIsRefusedWhileReading() {
+        // The same shape as above, for entry count rather than bytes, and for the same reason: the check in
+        // verified() bounds what the COMMAND named, which says nothing about how much a peer can make this
+        // buffer before the command is consulted.
+        Map<String, byte[]> entries = new LinkedHashMap<>();
+        byte[] tiny = "x".getBytes(StandardCharsets.UTF_8);
+        for (int i = 0; i <= SourceBundleContract.MAX_ENTRIES; i++) {
+            entries.put("features/" + i + ".feature", tiny);
+        }
+
+        assertThatThrownBy(() -> SourceBundle.verified(archiveOf(entries), List.of(), "sha256:unused"))
+                .isInstanceOf(SourceBundleRejected.class)
+                .extracting(failure -> ((SourceBundleRejected) failure).reason())
+                .isEqualTo(SourceBundleRejected.Reason.TOO_LARGE);
+    }
+
+    @Test
+    @DisplayName("an archive repeating an entry name is refused rather than resolved")
+    void aRepeatedEntryNameIsRefused() {
+        // Without this the last copy silently wins, the set comparison still balances, and the digests still
+        // match -- so an archive that is ambiguous about what it contains is accepted as though it were not.
+        // A bundle whose meaning depends on which copy a reader picked is not a bundle this platform accepts,
+        // even when both copies happen to agree.
+        byte[] content = "Feature: a\n".getBytes(StandardCharsets.UTF_8);
+        var expected = List.of(expect("a.feature", content));
+
+        assertThatThrownBy(() -> SourceBundle.verified(
+                        repeatedArchive("a.feature", content), expected, SourceBundle.bundleDigest(expected)))
+                .isInstanceOf(SourceBundleRejected.class)
+                .extracting(failure -> ((SourceBundleRejected) failure).reason())
+                .isEqualTo(SourceBundleRejected.Reason.UNSAFE_PATH);
+    }
+
+    @Test
+    @DisplayName("entries are read under a bound rather than buffered and then measured")
+    void entriesAreReadUnderABound() throws Exception {
+        // A STRUCTURAL CLAIM, and it is here because no behavioural test can make it.
+        //
+        // Replacing the bounded read with readAllBytes() leaves every rejection in this suite intact: the
+        // length check on the next line still refuses the entry. What changes is that the bytes are in memory
+        // first, which is precisely what the bound exists to prevent and which a passing test cannot
+        // distinguish from a failing one. Reading the source is the honest way to assert it.
+        String source = Files.readString(bundleSource());
+
+        assertThat(source)
+                .as("an unbounded read makes the entry ceiling a report rather than a limit")
+                .doesNotContain("readAllBytes");
+        assertThat(source).contains("readNBytes");
+    }
+
+    private static java.nio.file.Path bundleSource() {
+        java.nio.file.Path fromModule =
+                java.nio.file.Path.of("src/main/java/com/kaas/runner/source/SourceBundle.java");
+        return Files.isRegularFile(fromModule)
+                ? fromModule
+                : java.nio.file.Path.of("services/runner/src/main/java/com/kaas/runner/source/SourceBundle.java");
+    }
+
+    /**
+     * An archive carrying the same entry name twice.
+     *
+     * <p>{@code ZipOutputStream} refuses to write one, which is the whole point: a well-behaved writer cannot
+     * produce this and a hostile or broken peer is under no such constraint. Built by writing two entries
+     * whose names are the same length and whose contents are identical, then renaming the second in the raw
+     * bytes -- so every offset, size and CRC in the archive stays correct and only the name repeats.
+     */
+    private static byte[] repeatedArchive(String path, byte[] content) {
+        String other = "z".repeat(path.length());
+        byte[] archive = archiveOf(entries(path, content, other, content));
+        byte[] from = other.getBytes(StandardCharsets.UTF_8);
+        byte[] to = path.getBytes(StandardCharsets.UTF_8);
+        int replaced = 0;
+        for (int i = 0; i + from.length <= archive.length; i++) {
+            if (java.util.Arrays.equals(archive, i, i + from.length, from, 0, from.length)) {
+                System.arraycopy(to, 0, archive, i, to.length);
+                replaced++;
+            }
+        }
+        // The name appears in the local header and again in the central directory. Asserted rather than
+        // assumed: a rename that missed one would produce a malformed archive, and MALFORMED is a different
+        // refusal from the one this test is about.
+        if (replaced != 2) {
+            throw new IllegalStateException("Expected two occurrences of the entry name, found " + replaced);
+        }
+        return archive;
     }
 
     @Test

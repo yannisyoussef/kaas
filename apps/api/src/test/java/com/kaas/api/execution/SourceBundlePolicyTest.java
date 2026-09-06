@@ -111,11 +111,36 @@ class SourceBundlePolicyTest {
         assertThatThrownBy(() -> SourceBundlePolicy.requireSafePaths(tooMany))
                 .isInstanceOf(IllegalArgumentException.class);
 
-        byte[] oversized = new byte[(int) (SourceBundlePolicy.MAX_TOTAL_BYTES / 2) + 1];
-        assertThatThrownBy(() -> SourceBundlePolicy.archive(List.of(
-                        new SourceBundlePolicy.BundleEntry("features/a.feature", "sha256:aaa", oversized),
-                        new SourceBundlePolicy.BundleEntry("features/b.feature", "sha256:bbb", oversized))))
+        // The AGGREGATE ceiling, built from entries that each pass the per-entry one. Two 32 MiB entries used
+        // to stand here and proved less than they appeared to: each of them also exceeded the per-entry
+        // ceiling, so the per-entry check could be deleted without this noticing -- and a mutation showed it.
+        byte[] atTheEntryCeiling = new byte[(int) SourceBundlePolicy.MAX_ENTRY_BYTES];
+        List<SourceBundlePolicy.BundleEntry> justOverTheAggregate = java.util.stream.IntStream.rangeClosed(
+                        0, (int) (SourceBundlePolicy.MAX_TOTAL_BYTES / SourceBundlePolicy.MAX_ENTRY_BYTES))
+                .mapToObj(index -> new SourceBundlePolicy.BundleEntry(
+                        "features/f" + index + ".feature", "sha256:aaa", atTheEntryCeiling))
+                .toList();
+        assertThatThrownBy(() -> SourceBundlePolicy.archive(justOverTheAggregate))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void oneOversizedEntryIsRefusedEvenWhenTheBundleIsSmall() {
+        // The PER-ENTRY ceiling on its own, well inside the aggregate one, so only the entry check can refuse
+        // it. This is the delivery boundary declining to hand over something the runner would refuse to
+        // materialise: the database's column constraint normally prevents it, and "normally" is not a check.
+        byte[] overTheEntryCeiling = new byte[(int) SourceBundlePolicy.MAX_ENTRY_BYTES + 1];
+
+        assertThatThrownBy(() -> SourceBundlePolicy.archive(List.of(
+                        new SourceBundlePolicy.BundleEntry(
+                                "features/a.feature", "sha256:aaa", overTheEntryCeiling))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("entry");
+
+        // Anti-vacuity: one byte under, and the same call produces an archive.
+        assertThat(SourceBundlePolicy.archive(List.of(new SourceBundlePolicy.BundleEntry(
+                        "features/a.feature", "sha256:aaa", new byte[(int) SourceBundlePolicy.MAX_ENTRY_BYTES]))))
+                .isNotEmpty();
     }
 
     @Test
