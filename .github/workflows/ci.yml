@@ -472,6 +472,43 @@ jobs:
             exit 1
           fi
 
+      # TEMPORARY INVESTIGATION — removed once the mechanism is chosen.
+      #
+      # KAAS-17 made a source bundle mounted ro,noexec,nosuid,nodev a release criterion, and `nosuid` is
+      # load-bearing: NO_SETUID_BINARIES is one of the two controls compensating for the NoNewPrivs
+      # observation gVisor cannot provide. Docker bind mounts do not accept those flags directly, so this
+      # measures whether the `local` volume driver's bind option carries them -- under BOTH runtimes, because
+      # a flag honoured by runc and dropped by the gofer would be the worst possible outcome.
+      - name: Measure whether a bundle mount can carry ro,noexec,nosuid,nodev
+        run: |
+          set -euo pipefail
+          staging=$(mktemp -d /tmp/kaas-source-probe-XXXXXX)
+          printf 'inert bytes\n' > "$staging/feature.txt"
+          # A file that WOULD execute if the mount permitted it, to separate "mode says no" from "mount says no".
+          printf '#!/bin/sh\necho EXECUTED\n' > "$staging/runnable.sh"
+          chmod 0755 "$staging/runnable.sh"
+          chmod 0755 "$staging"
+
+          docker volume create --driver local \
+            --opt type=none --opt device="$staging" \
+            --opt o=bind,ro,noexec,nosuid,nodev kaas-source-probe >/dev/null
+
+          for rt in runc runsc; do
+            echo "===== runtime=$rt"
+            docker run --rm --runtime=$rt --network=none --user 65534:65534 \
+              --mount source=kaas-source-probe,target=/kaas/source,readonly \
+              alpine:3.20 sh -c '
+                echo "--- what the sandbox sees:"
+                grep " /kaas/source " /proc/self/mounts || echo "(mount not listed)"
+                echo "--- read:"; cat /kaas/source/feature.txt || echo "READ FAILED"
+                echo "--- write:"; (echo x > /kaas/source/new 2>/dev/null && echo "WRITE SUCCEEDED") || echo "write refused"
+                echo "--- exec:"; (/kaas/source/runnable.sh 2>/dev/null) || echo "exec refused"
+              ' || echo "RUN FAILED for $rt"
+          done
+
+          docker volume rm kaas-source-probe >/dev/null || true
+          rm -rf "$staging"
+
       # THE PRODUCTION PATH, under the mediating runtime, end to end.
       #
       # Everything else about this runtime is exercised by suites that build their own profile. This runs the
