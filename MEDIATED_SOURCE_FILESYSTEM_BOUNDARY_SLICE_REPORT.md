@@ -417,7 +417,8 @@ runner build script, the CI workflow, the shared contract, and the pipeline suit
 ## 49. Local verification
 
 Full `cleanTest build` on Java 25 / Gradle 9.7.1 with PostgreSQL and RabbitMQ Testcontainers, plus web,
-contracts, audit and whitespace gates.
+contracts, audit and whitespace gates. **732 tests, 0 failures, 0 skips** — 326 in `apps/api`, 251 in
+`services/runner`, 116 in `services/egress-proxy`, 39 in `tests/pipeline`.
 
 A useful accident: Docker Desktop's runc **permits** the remount that the GitHub runner's runc refuses, so the
 whole mechanism can be exercised locally end to end. That is a difference in Docker's seccomp configuration
@@ -426,7 +427,45 @@ under gVisor remain CI-only evidence** — macOS cannot register `runsc`.
 
 ## 50. GitHub Actions verification
 
-Recorded in §52 below with the final run.
+**Run 34057603014 on `c7cc5b6`: all eight jobs green** — `backend`, `web`, `contracts`, `infrastructure`,
+`synthetic-execution-pipeline`, `execution-egress-gate`, `hostile-execution-gate`, `strong-runtime-gate`.
+`MediatedSourceFilesystemBoundaryTests` executed 14 tests with 0 skips.
+
+What the sandbox reported, read back by the gate rather than summarised by the suite:
+
+```
+source_verification=VALID          source_filesystem=tmpfs
+source_mount_options=ro,noexec,nosuid,ro,size=69632k
+source_mount_ro=true               source_write_refused=true
+source_mount_noexec=true           source_remount_refused=true
+source_mount_nosuid=true           source_exec_refused=true
+source_mount_nodev=false
+exec_control=EXECUTED              exec_hardened=REFUSED
+suid_control=NOT_ESCALATED         suid_hardened=REFUSED
+source_setuid_files=1              delivery_setuid_files=0
+source_irregular_entries=0         delivery_irregular_entries=0
+source_mounts_visible=1            source_ingress_visible=0
+final_consumer_capabilities=EMPTY  source_no_new_privileges=unsupported
+source_consumer_uid=65534
+source_entries_verified=1          source_entry_mismatches=0
+stale_source_dirs=0   containers=0 networks=0 runsc_processes=0
+```
+
+Three lines carry the slice. `source_mount_noexec=true` is the KAAS-18 blocker closed.
+`exec_control=EXECUTED` beside `exec_hardened=REFUSED` is what makes that a measurement rather than a claim —
+the same `0555` file on two filesystems that differ only in their flags. And `source_mount_nodev=false` is the
+gap, asserted in the gate in the direction it is true, so a runtime that gains the flag fails the build.
+
+`source_no_new_privileges=unsupported` is the honest reading of an absence: this runtime does not expose
+`NoNewPrivs` in `/proc/self/status`, which is the same absence KAAS-17 recorded when it left
+`NO_NEW_PRIVILEGES` as UNSUPPORTED. The bootstrap does set it; what cannot be done is observe it.
+
+Three failures preceded this run and each was a real defect rather than a flaky job: `withEntrypoint(null)`
+disabled the image entrypoint for every sandbox; the stdin attach happened after the container start, so the
+bootstrap blocked on a read nothing was pumping; and the ingress check counted 9p mounts, which under this
+runtime counts the container's own root filesystem. The last of those is the most instructive — it was a check
+whose answer did not depend on the hazard, which is the exact failure mode this repository keeps a rule
+about.
 
 ## 51. Required-check governance
 
