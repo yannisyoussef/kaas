@@ -52,9 +52,9 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
     }
 
     @Override
-    public SandboxLauncher withSource(java.nio.file.Path sourceMount) {
+    public SandboxLauncher withSource(SandboxSecurityProfile.SourceDelivery delivery) {
         return new DockerSandboxLauncher(
-                docker, SandboxSecurityProfile.withSource(profile, sourceMount), generation);
+                docker, SandboxSecurityProfile.withSource(profile, delivery), generation);
     }
 
     @Override
@@ -77,6 +77,10 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                 throw new AuthorityLostException(authority.lostReason());
             }
             docker.startContainerCmd(containerId).exec();
+            // THE ONLY CHANNEL TENANT SOURCE TRAVELS ON, and it opens after the container is running because
+            // there is nothing to write into before that. The bootstrap blocks on its first read, so the
+            // ordering is not a race: it waits for this, not the other way round.
+            deliverSource(containerId);
             outcome = observe(containerId, startedAt, authority);
         } catch (RuntimeException failure) {
             outcome = new SandboxOutcome(
@@ -186,23 +190,43 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                 .withRuntime(profile.runtime().daemonRuntimeName())
                 .withAutoRemove(false);
 
-        if (profile.sourceMount() != null) {
-            // INERT TENANT SOURCE, READ-ONLY.
+        if (profile.sourceDelivery() != null) {
+            // A SANDBOX-PRIVATE SOURCE FILESYSTEM, AND NO HOST MOUNT OF TENANT SOURCE ANYWHERE.
             //
-            // Both sides of this bind are platform-owned: the host side is an opaque directory under the
-            // operator's staging root, and the container side is a fixed constant. No tenant byte contributes
-            // to either, which is what keeps "source is data" true at the mount as well as in the format.
+            // KAAS-18 bound a host directory in. Measured, that arrives under the mediating runtime as a
+            // gofer-backed 9p mount carrying `ro` and nothing else, and a shebang script on it executed. A
+            // tmpfs the sentry owns does honour noexec -- also measured, in both directions -- so the source
+            // filesystem is one of those, created empty here and populated from inside the sandbox.
             //
-            // Read-only is measured rather than assumed -- see the mount evidence in
-            // docs/security/tenant-source-delivery.md, which also records, honestly, that noexec does NOT
-            // survive onto a gofer-backed mount under the mediating runtime. That gap is why the materialiser
-            // writes every file without an executable bit and why the format cannot express one, and it is
-            // reported rather than papered over.
-            hostConfig.withMounts(java.util.List.of(new com.github.dockerjava.api.model.Mount()
-                    .withType(com.github.dockerjava.api.model.MountType.BIND)
-                    .withSource(profile.sourceMount().toAbsolutePath().toString())
-                    .withTarget(com.kaas.runner.source.SourceBundleContract.CONTAINER_PATH)
-                    .withReadOnly(true)));
+            // It is created WRITABLE, which is not the weakening it looks like. A tmpfs declared read-only at
+            // create time can never be written and therefore never holds anything; the read-only state that
+            // matters is the final one, established by the bootstrap before any consumer exists and observed
+            // rather than requested.
+            //
+            // There is deliberately no ingress mount beside it. A second, weaker copy of the same bytes
+            // reachable from inside would make hardening this one cosmetic, because hostile code does not use
+            // the path it was meant to.
+            java.util.Map<String, String> tmpfs =
+                    new java.util.LinkedHashMap<>(java.util.Objects.requireNonNull(hostConfig.getTmpFs()));
+            tmpfs.put(
+                    com.kaas.runner.source.SourceBundleContract.CONTAINER_PATH,
+                    "rw,noexec,nosuid,nodev,size=" + profile.sourceDelivery().filesystemBytes());
+            hostConfig.withTmpFs(tmpfs);
+
+            // THE CONSTRUCTION CAPABILITIES, which are the reason ADR-031 exists.
+            //
+            // CAP_SYS_ADMIN is what lets the bootstrap close the source filesystem behind itself; the identity
+            // capabilities are what let it stop being root afterwards. They are held by a platform-owned
+            // program with a fixed argument vector, for the length of one populate-and-freeze, and none of
+            // them survives into the process that reads the source: the consumer's bounding set is empty, and
+            // that is read back out of /proc rather than asserted by the program that dropped it.
+            //
+            // Under the mediating runtime this is a capability inside the sentry, and the mount it performs is
+            // a mount in the sandbox's own filesystem tree implemented in userspace; no mount syscall reaches
+            // the host kernel. The identical request under the baseline runtime is refused outright, which is
+            // measured rather than assumed -- see docs/architecture/mediated-source-filesystem-evaluation.md.
+            hostConfig.withCapAdd(
+                    Capability.SYS_ADMIN, Capability.SETUID, Capability.SETGID, Capability.SETPCAP);
         }
 
         CreateContainerResponse created = createOrRefuse(hostConfig, request);
@@ -240,12 +264,85 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
         }
     }
 
+    /**
+     * Writes the framed bundle to the bootstrap's standard input, once, and closes it.
+     *
+     * <p>Closing is part of the protocol rather than tidiness: the bootstrap reads a fixed trailer and a
+     * stream that stays open would leave it waiting for bytes that are never coming, which the wall-clock
+     * deadline would eventually resolve as a timeout instead of as the delivery it actually was.
+     *
+     * <p>Nothing is read back here. The bootstrap's own report and everything the verifier observes arrive
+     * through the ordinary output collector, bounded and sanitised like every other byte the sandbox prints.
+     */
+    private void deliverSource(String containerId) {
+        SandboxSecurityProfile.SourceDelivery delivery = profile.sourceDelivery();
+        if (delivery == null) {
+            return;
+        }
+        try (var stdin = new java.io.ByteArrayInputStream(delivery.frame());
+                var attached = docker.attachContainerCmd(containerId)
+                        .withStdIn(stdin)
+                        .withFollowStream(false)
+                        .withStdOut(false)
+                        .withStdErr(false)
+                        .exec(new ResultCallback.Adapter<Frame>())) {
+            attached.awaitCompletion(SOURCE_DELIVERY_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new SandboxSourceDeliveryException("Interrupted while delivering source to the sandbox.");
+        } catch (java.io.IOException | RuntimeException failure) {
+            // The category travels; the bundle does not. A message carrying a length or a path would be
+            // tenant-derived detail in a launcher log.
+            throw new SandboxSourceDeliveryException("The source bundle could not be delivered to the sandbox.");
+        }
+    }
+
+    /**
+     * How long the launcher will spend handing the bundle over.
+     *
+     * <p>Generous against the largest bundle the format allows and short against the sandbox's wall clock, so
+     * a delivery that hangs is reported as a delivery failure rather than consuming the execution's whole
+     * deadline and being recorded as a timeout.
+     */
+    private static final Duration SOURCE_DELIVERY_TIMEOUT = Duration.ofSeconds(60);
+
+    /** A delivery that did not happen. Distinct from a workload failure, because nothing ran. */
+    public static final class SandboxSourceDeliveryException extends RuntimeException {
+        SandboxSourceDeliveryException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * The first program in a source-carrying sandbox.
+     *
+     * <p>The bootstrap, for every execution that carries tenant source. One probe overrides it, and that
+     * probe is the boundary measurement: it plants fixtures with real modes before handing over, so the
+     * filesystem's behaviour can be told apart from the file's. The override comes from the probe enum, which
+     * is server-side and closed, so this cannot be reached by anything a command or a tenant supplies.
+     */
+    private static String entrypointFor(SyntheticProbe probe) {
+        String override = probe.bootstrapOverride();
+        return override == null ? SOURCE_BOOTSTRAP : override;
+    }
+
     private CreateContainerResponse createContainer(
             HostConfig hostConfig, SandboxLaunchRequest request) {
-        return docker.createContainerCmd(profile.imageReference())
+        boolean carriesSource = profile.sourceDelivery() != null;
+        var create = docker.createContainerCmd(profile.imageReference())
                 .withHostConfig(hostConfig)
-                .withUser(profile.runAsUser())
+                // THE CONSTRUCTION IDENTITY, and only when there is a construction phase.
+                //
+                // A source-bearing sandbox starts as root because closing its own filesystem needs a
+                // capability, and a capability needs a process that can hold one. It does not stay root: the
+                // bootstrap becomes 65534 before the verifier exists, and every control this profile declares
+                // is observed of that process. An ordinary sandbox never has a construction phase and never
+                // leaves the profile's own user.
+                .withUser(carriesSource ? SOURCE_CONSTRUCTION_USER : profile.runAsUser())
                 .withCmd(request.probe().arguments())
+                .withAttachStdin(carriesSource)
+                .withStdinOpen(carriesSource)
+                .withStdInOnce(carriesSource)
                 .withEnv(environment())
                 .withLabels(SandboxLabels.of(generation, request.correlationId(), profile.version()))
                 .withAttachStdout(true)
@@ -253,8 +350,21 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                 // Disabled only when the profile says no network. Leaving this unconditionally true would
                 // silently override the network mode above, so a sandbox that was meant to reach its proxy
                 // would instead have nothing — an allowlist that permits everything and delivers nothing.
-                .withNetworkDisabled("none".equals(profile.networkMode()))
-                .exec();
+                .withNetworkDisabled("none".equals(profile.networkMode()));
+
+        // THE ENTRYPOINT IS SET ONLY WHEN THERE IS ONE TO SET.
+        //
+        // Applied conditionally rather than passed as a null, because docker-java serialises an explicit null
+        // as an empty entrypoint and the daemon then has no program to run. Every non-source probe failed with
+        // SANDBOX_CREATE_FAILED until this was separated — a one-line convenience that silently disabled the
+        // image's own entrypoint for every sandbox in the repository.
+        //
+        // A source-carrying sandbox runs the bootstrap first. The value is a compile-time constant reached
+        // through a server-side enum, so nothing a caller supplies becomes part of a command line.
+        if (carriesSource) {
+            create.withEntrypoint(List.of(entrypointFor(request.probe())));
+        }
+        return create.exec();
     }
 
     /**
@@ -284,6 +394,24 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
      * code being contained rather than of the platform containing it. Hostile code that ignores the signal
      * simply reaches the forced kill.
      */
+    /**
+     * The platform-owned program that populates and then closes the source filesystem.
+     *
+     * <p>A path in the pinned probe image, compiled from repository source in a pinned build stage. It is
+     * named here as a constant and nowhere else, so there is no configuration, command field or tenant value
+     * that could put a different program in front of the sandbox.
+     */
+    private static final String SOURCE_BOOTSTRAP = "/source-bootstrap";
+
+    /**
+     * The identity the construction phase runs as, and the only place root appears in this launcher.
+     *
+     * <p>It is a separate constant from the profile's own user on purpose. The profile declares what the
+     * sandbox must be; this declares what it briefly is before the bootstrap makes it so, and conflating the
+     * two would let a change to one silently become a change to the other.
+     */
+    private static final String SOURCE_CONSTRUCTION_USER = "0:0";
+
     private static final Duration GRACEFUL_STOP = Duration.ofSeconds(5);
 
     /**

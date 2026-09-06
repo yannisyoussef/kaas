@@ -45,6 +45,8 @@ class SourceBundleContractTests {
         assertThat(mount.get("containerPath").asText()).isEqualTo(SourceBundleContract.CONTAINER_PATH);
         assertThat(mount.get("manifestName").asText()).isEqualTo(SourceBundleContract.MANIFEST_NAME);
         assertThat(mount.get("filesDirectory").asText()).isEqualTo(SourceBundleContract.FILES_DIRECTORY);
+        assertThat(mount.get("filesystemBytes").asLong())
+                .isEqualTo(SourceBundleContract.SOURCE_FILESYSTEM_BYTES);
     }
 
     @Test

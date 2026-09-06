@@ -306,20 +306,76 @@ sleep)
     sleep "${2:-3600}"
     emit sleep_completed true
     ;;
-sourceverify)
-    # THE PLATFORM'S SOURCE VERIFIER. It reads tenant bytes and hashes them. It does not interpret them.
+sourceverify|sourceboundary)
+    # THE PLATFORM'S SOURCE VERIFIER, running on the frozen filesystem.
     #
-    # Every file is an opaque byte sequence here. There is no parser, no syntax check, no include resolution
-    # and no evaluation of any kind -- not because those would be hard, but because this slice delivers source
-    # as DATA and an engine is a different decision with a different adjudication.
+    # It reads tenant bytes and hashes them. It does not interpret them. There is no parser, no syntax check,
+    # no include resolution and no evaluation of any kind -- not because those would be hard, but because this
+    # slice delivers source as DATA and an engine is a different decision with a different adjudication.
     #
-    # THE AUTHORITATIVE CHECK IS THIS ONE. The runner already verified the bundle before staging it, and that
-    # verification describes bytes on the host at a moment that has passed. This recomputes the digests from
-    # the files the sandbox ACTUALLY SEES, which is the only view that can still be true when the workload
-    # runs.
+    # It runs AFTER the bootstrap has populated the source filesystem, remounted it read-only, and dropped
+    # every capability. So everything below is observed by the process a future engine would be, which is the
+    # only process whose security context is worth measuring.
     emit_tooling sha256sum awk
     root=/kaas/source
     manifest="$root/manifest.tsv"
+
+    # THE BOUNDARY COMPARISONS, when this is the boundary measurement rather than an ordinary verification.
+    #
+    # One branch serves both because everything below the guard is identical: the same frozen filesystem, the
+    # same digests, the same observations. What the boundary measurement adds is a second filesystem to
+    # compare against, and fixtures the production format cannot express -- which is why it is a separate
+    # server-side workload and why an execution carrying tenant source never selects it.
+    if [ "$mode" = sourceboundary ]; then
+        # THE BOUNDARY MEASUREMENT. Everything sourceverify reports, plus the two comparisons that make the
+        # filesystem's behaviour distinguishable from the file's.
+        #
+        # A fixture planter ran before the bootstrap and left identical files on two filesystems: the frozen
+        # source filesystem, and a permissive tmpfs it created for the purpose. They differ in their mount flags
+        # and in nothing else. Each fixture is genuinely executable and genuinely setuid-root, which the
+        # production bundle format cannot express and the production materialiser would never write -- that is the
+        # entire reason this is a separate workload.
+        #
+        # Without the control half, "the hardened filesystem refused it" would be equally consistent with the
+        # filesystem enforcing noexec and with the file simply not being runnable. KAAS-18 ended on exactly that
+        # ambiguity.
+        control=/kaas/control
+
+        if [ -x "$control/fixture-exec.sh" ] && "$control/fixture-exec.sh" >/dev/null 2>&1; then
+            emit exec_control EXECUTED
+        else
+            emit exec_control REFUSED
+        fi
+        if [ -f /kaas/source/files/fixture-exec.sh ] && /kaas/source/files/fixture-exec.sh >/dev/null 2>&1; then
+            emit exec_hardened EXECUTED
+        else
+            emit exec_hardened REFUSED
+        fi
+
+        # The setuid pair. Reported as three distinct states rather than a boolean, because "it did not escalate"
+        # and "it would not run at all" are different facts and only one of them is about nosuid.
+        out=$("$control/fixture-suid" 2>/dev/null || echo refused)
+        case "$out" in
+            *euid=0*) emit suid_control ESCALATED ;;
+            *refused*) emit suid_control REFUSED ;;
+            *) emit suid_control NOT_ESCALATED ;;
+        esac
+        out=$(/kaas/source/files/fixture-suid 2>/dev/null || echo refused)
+        case "$out" in
+            *euid=0*) emit suid_hardened ESCALATED ;;
+            *refused*) emit suid_hardened REFUSED ;;
+            *) emit suid_hardened NOT_ESCALATED ;;
+        esac
+
+        # A write to the control, so read-only on the source is a difference between two filesystems rather than
+        # a statement about one.
+        if echo probe 2>/dev/null > "$control/kaas-write-probe"; then
+            emit write_control ACCEPTED
+            rm -f "$control/kaas-write-probe" 2>/dev/null
+        else
+            emit write_control REFUSED
+        fi
+    fi
 
     if [ ! -f "$manifest" ]; then
         emit source_manifest missing
@@ -327,14 +383,39 @@ sourceverify)
         exit 0
     fi
 
-    # What the sandbox observes about its own mount. Reported rather than asserted here: the gate decides
-    # what is required, and a probe that judged its own boundary would be marking its own work.
-    mountline=$(awk '$2 == "/kaas/source" {print $4; exit}' /proc/self/mounts 2>/dev/null || true)
+    # WHAT THE CONSUMER IS. Reported before anything about the filesystem, because a mount flag observed by a
+    # privileged process says nothing about what an unprivileged one can do.
+    emit source_consumer_uid "$(id -u 2>/dev/null || echo unknown)"
+    emit source_consumer_gid "$(id -g 2>/dev/null || echo unknown)"
+    # Every capability set, not just the effective one. A process with an empty effective set and a populated
+    # bounding set has not dropped its privilege; it has put it down within reach.
+    caps=$(awk '/^Cap(Inh|Prm|Eff|Bnd|Amb):/ {gsub(/^0+/, "", $2); if ($2 != "") nonzero = 1} END {print nonzero ? "PRESENT" : "EMPTY"}' /proc/self/status 2>/dev/null)
+    emit final_consumer_capabilities "${caps:-UNKNOWN}"
+    emit source_no_new_privileges "$(awk '/^NoNewPrivs:/ {print ($2 == 1) ? "true" : "false"}' /proc/self/status 2>/dev/null || echo unknown)"
+
+    # THE MOUNT, READ FROM BOTH OPTION NAMESPACES.
+    #
+    # mountinfo splits what it knows in two: the per-mount flags in field 6, and the superblock options after
+    # the separator. A parser that reads only one of them can call a filesystem hardened when it is not, so
+    # both are captured and the flags are matched against the union.
+    mountline=$(awk '$5 == "/kaas/source" {
+        flags = $6
+        for (i = 7; i <= NF; i++) if ($i == "-") { super = $(i + 3); break }
+        print flags "," super
+        exit
+    }' /proc/self/mountinfo 2>/dev/null || true)
     emit source_mount_options "${mountline:-absent}"
+    emit source_filesystem "$(awk '$5 == "/kaas/source" { for (i = 6; i <= NF; i++) if ($i == "-") { print $(i + 1); exit } }' /proc/self/mountinfo 2>/dev/null || echo unknown)"
     emit source_mount_ro "$(case ",${mountline}," in *,ro,*) echo true;; *) echo false;; esac)"
     emit source_mount_noexec "$(case ",${mountline}," in *,noexec,*) echo true;; *) echo false;; esac)"
     emit source_mount_nosuid "$(case ",${mountline}," in *,nosuid,*) echo true;; *) echo false;; esac)"
     emit source_mount_nodev "$(case ",${mountline}," in *,nodev,*) echo true;; *) echo false;; esac)"
+
+    # NO INGRESS. There must be exactly one tenant source filesystem reachable from here, and it must be the
+    # hardened one. A weaker second copy would make everything above cosmetic, because hostile code does not
+    # use the path it was meant to.
+    emit source_mounts_visible "$(awk '$2 ~ /^\/kaas\/source/' /proc/self/mounts 2>/dev/null | wc -l | tr -d ' ')"
+    emit source_ingress_visible "$(awk '$3 == "9p"' /proc/self/mounts 2>/dev/null | wc -l | tr -d ' ')"
 
     # WRITE REFUSAL, OBSERVED. A mount that reports ro and accepts a write is a mount that reports.
     if echo probe 2>/dev/null > "$root/kaas-write-probe"; then
@@ -343,20 +424,24 @@ sourceverify)
     else
         emit source_write_refused true
     fi
+    # And the filesystem cannot be reopened. The bootstrap dropped what it would take; this is that drop
+    # observed from the outside rather than trusted.
+    if mount -o remount,rw "$root" >/dev/null 2>&1; then
+        emit source_remount_refused false
+    else
+        emit source_remount_refused true
+    fi
 
-    # No setuid or setgid anywhere under the source root. The bundle format cannot express a mode and the
-    # materialiser writes none, so this is the observation that both are true of what actually arrived.
+    # No setuid or setgid anywhere under the source root, and nothing but regular files and directories.
     emit source_setuid_files "$(find "$root" \( -perm -4000 -o -perm -2000 \) -type f 2>/dev/null | wc -l | tr -d ' ')"
-    # Nothing but regular files and directories. A symlink, device node, socket or FIFO under here would mean
-    # something other than the materialiser created it.
     emit source_irregular_entries "$(find "$root" ! -type f ! -type d 2>/dev/null | wc -l | tr -d ' ')"
 
-    # EXECUTION, ATTEMPTED. The mount flags above are what the kernel SAYS; this is what it DOES.
+    # EXECUTION, ATTEMPTED. The mount flags above are what the runtime SAYS; this is what it DOES.
     #
-    # Both barriers are in play and they are not the same barrier. The materialiser writes every file without
-    # an executable bit, which refuses this on any runtime; a noexec mount would refuse it a second time, and
-    # one of the two runtimes does not provide that. Reported separately from source_mount_noexec on purpose:
-    # collapsing them would let the weaker configuration hide behind the stronger one.
+    # Reported separately from source_mount_noexec on purpose. Production files carry no executable bit, so a
+    # refusal here alone would not distinguish "the filesystem refused it" from "the file was not executable"
+    # -- which is exactly the confusion KAAS-18 ended on. The distinguishing evidence is the boundary suite's
+    # control fixture, which is genuinely executable and runs on a permissive filesystem.
     execprobe=$(find "$root/files" -type f 2>/dev/null | head -n 1)
     if [ -n "$execprobe" ] && "$execprobe" >/dev/null 2>&1; then
         emit source_exec_refused false
@@ -369,9 +454,11 @@ sourceverify)
     expected_count=$(awk 'NR==1 {print $3}' "$manifest")
     emit source_format "$format"
     emit source_entry_count "$expected_count"
+    emit source_bundle_digest "$expected_digest"
 
-    # Every entry the manifest names, hashed from the mounted file. A path in the manifest that is not there,
-    # or whose bytes differ, fails -- and so does a file present under the root that the manifest never named.
+    # Every entry the manifest names, hashed from the FINAL mounted file. A path in the manifest that is not
+    # there, or whose bytes differ, fails -- and so does a file present under the root that the manifest never
+    # named.
     mismatches=0
     checked=0
     while IFS="$(printf '\t')" read -r path digest size; do
@@ -391,17 +478,30 @@ sourceverify)
 $(tail -n +2 "$manifest")
 MANIFEST
 
-    present=$(find "$root/files" -type f 2>/dev/null | wc -l | tr -d ' ')
+    # Files present under the root, excluding anything the boundary measurement planted.
+    #
+    # The exclusion is by an exact platform-chosen prefix and applies to a filename no bundle can produce: a
+    # logical path comes from a sealed FeatureRevision and reaching this name would require the control plane
+    # to have authorized it. In sourceverify -- the mode every execution carrying tenant source uses -- there
+    # are no such files, so the two counts are the same number and this changes nothing about what a real
+    # delivery has to satisfy.
+    present=$(find "$root/files" -type f 2>/dev/null | grep -cv '/fixture-' || echo 0)
     emit source_entries_verified "$checked"
     emit source_entries_present "$present"
     emit source_entry_mismatches "$mismatches"
 
     # ONE BIT LEAVES THIS SANDBOX. Every observation above is diagnostic; the authoritative outcome is a
     # platform-defined PASS or FAIL, and no tenant filename or source byte appears in either.
+    #
+    # The boundary is part of the outcome rather than beside it: bytes that verify on a filesystem that is not
+    # read-only, or is executable, or that the consumer could reopen, are not a passing execution.
     if [ "$mismatches" -eq 0 ] \
         && [ "$checked" = "$expected_count" ] \
         && [ "$present" = "$expected_count" ] \
-        && [ "$format" = "kaas.source-bundle.v1" ]; then
+        && [ "$format" = "kaas.source-bundle.v1" ] \
+        && [ "$(case ",${mountline}," in *,ro,*) echo y;; esac)" = "y" ] \
+        && [ "$(case ",${mountline}," in *,noexec,*) echo y;; esac)" = "y" ] \
+        && [ "${caps:-UNKNOWN}" = "EMPTY" ]; then
         emit workload_identity KAAS_SYNTHETIC_V1
         emit workload_outcome PASSED
     else

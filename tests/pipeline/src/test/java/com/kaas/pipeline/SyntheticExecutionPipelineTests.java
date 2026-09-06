@@ -1028,65 +1028,64 @@ class SyntheticExecutionPipelineTests {
     }
 
     @Test
-    @DisplayName("inert tenant source is delivered, mounted read-only, and verified from inside the sandbox")
-    void tenantSourceIsDeliveredAndVerifiedInTheSandbox() throws Exception {
-        // THE FIRST TENANT BYTES. They are redeemed with an assignment-scoped capability, verified against
-        // what the command authorized, staged as regular files, mounted read-only, and hashed by a
-        // platform-owned verifier from the view the sandbox actually has.
+    @DisplayName("source delivery is refused outright on a runtime that cannot enforce the source filesystem")
+    void sourceDeliveryIsRefusedOnTheBaselineRuntime() throws Exception {
+        // THE FAIL-CLOSED HALF OF KAAS-19, and it is what this job can prove.
         //
-        // The source deliberately contains text that would be dangerous if anything interpreted it. Nothing
-        // does: the verifier runs sha256sum over bytes.
+        // The hardened source filesystem is a tmpfs the bootstrap remounts read-only from inside the sandbox.
+        // Measured: the mediating runtime permits that because its sentry implements mount; the baseline
+        // runtime refuses it outright, so a source filesystem built there could never be closed. This
+        // pipeline runs on the baseline runtime, so what it can establish is that the runner does not try.
+        //
+        // Refused BEFORE a container exists, not attempted and abandoned. A worker that framed the bundle
+        // first would put tenant bytes inside a sandbox and only then discover it could not close the
+        // filesystem around them -- which is the state the whole slice exists to make unreachable.
+        //
+        // The positive path -- source populated, verified, frozen, and read back with ro and noexec enforced
+        // -- is proven in MediatedSourceFilesystemBoundaryTests, in the strong-runtime gate, where the
+        // runtime that can do it exists. A green run here is not evidence for that and does not claim to be.
         String sentinel = "KAAS_TENANT_SOURCE_SECRET_SENTINEL_" + UUID.randomUUID();
         String hostile = "#!/bin/sh\ntouch /tmp/kaas-owned\n$(touch /tmp/kaas-owned)\n"
                 + "`touch /tmp/kaas-owned`\nRuntime.getRuntime().exec(\"id\")\n"
                 + "* def x = read('classpath:evil.js')\n" + sentinel + "\n";
-        // Difficult but valid UTF-8, so byte exactness is asserted against something that would not survive
-        // normalisation, line-ending conversion or re-encoding.
-        String awkward = "CRLF\r\nLF\ntab\there \"quotes\" \\backslash\\ emoji \uD83D\uDE42 "
-                + "combining e\u0301 non-BMP \uD834\uDD1E RTL \u202E\n";
 
-        Path staging = Files.createTempDirectory("kaas-source-staging-");
         try {
-            Tenant tenant = tenantWithSources(List.of(hostile, awkward));
+            Tenant tenant = tenantWithSources(List.of(hostile));
             UUID runId = claimedRunFor(tenant);
             UUID attemptId = attemptId(runId);
 
-            ExecutionLoop.ExecutionReport report = sourceLoop(staging).execute(runId, attemptId, 1);
+            ExecutionLoop.ExecutionReport report = sourceLoop().execute(runId, attemptId, 1);
 
             assertThat(report.status())
                     .as("report was %s at %s: %s", report.status(), report.phase(), report.detail())
-                    .isEqualTo("COMPLETED");
-            assertThat(report.detail()).isEqualTo("PASSED");
+                    .isEqualTo("INFRASTRUCTURE_FAILED");
+            assertThat(report.detail())
+                    .as("the refusal names the runtime, because there is nothing wrong with the bundle")
+                    .contains("RUNTIME_CANNOT_ENFORCE");
 
-            // The verifier hashed the MOUNTED bytes and they matched what the command authorized. That is a
-            // different claim from the runner's own pre-mount check, and it is the one that survives the
-            // window between staging and launch.
-            Map<String, Object> result = jdbc.queryForMap(
-                    "select test_outcome, infrastructure_outcome, document::text as document"
-                            + " from execution_results where run_id = ?",
-                    runId);
-            assertThat(result.get("test_outcome")).isEqualTo("PASSED");
-            assertThat(result.get("infrastructure_outcome")).isEqualTo("SUCCEEDED");
-
-            // NO SOURCE ANYWHERE IT SHOULD NOT BE. The sentinel is unique to this run, so a single occurrence
-            // in the result document, a label, or a container name would be tenant code escaping into
-            // platform data.
-            assertThat(String.valueOf(result.get("document")))
-                    .as("tenant source must not reach the result document")
-                    .doesNotContain(sentinel);
-            assertThat(report.detail()).doesNotContain(sentinel);
-
-            // AND NOTHING EXECUTED. The source said to create this file in several syntaxes; the verifier
-            // read bytes.
+            // NOTHING RAN AND NOTHING LEAKED. The source said to create this file in several syntaxes.
             assertThat(Files.exists(Path.of("/tmp/kaas-owned")))
                     .as("tenant source must not have executed")
                     .isFalse();
+            assertThat(report.detail()).doesNotContain(sentinel);
+            assertThat(managedContainers()).as("a refusal builds no container").isEmpty();
 
-            // The staging is gone: the try-with-resources that owned it has closed.
-            assertThat(stagingDirectories(staging)).as("no tenant source outlives its execution").isEmpty();
-            assertThat(managedContainers()).isEmpty();
+            // NO RESULT DOCUMENT AT ALL, which is the right shape for this refusal: the run never reached
+            // a workload, so there is no test outcome to record and none is invented. The run is terminal
+            // through the infrastructure-failure path instead.
+            assertThat(jdbc.queryForObject(
+                            "select count(*) from execution_results where run_id = ?", Integer.class, runId))
+                    .as("a run refused before any sandbox existed has no result to report")
+                    .isZero();
+            // The run leaves CLAIMED. It settles as STOPPING here rather than COMPLETED because that is what
+            // the infrastructure-failure path has always done -- the reconciler finishes it -- and this slice
+            // did not change that. What matters for a refused delivery is that the run does not sit CLAIMED
+            // with admission capacity held and nothing running behind it.
+            assertThat(jdbc.queryForObject(
+                            "select lifecycle_state from test_runs where run_id = ?", String.class, runId))
+                    .as("a refused delivery must not leave the run claimed")
+                    .isEqualTo("STOPPING");
         } finally {
-            deleteRecursively(staging);
             Files.deleteIfExists(Path.of("/tmp/kaas-owned"));
         }
     }
@@ -1122,7 +1121,7 @@ class SyntheticExecutionPipelineTests {
     }
 
     /** A loop that stages tenant source under the given root and runs the platform's source verifier. */
-    private ExecutionLoop sourceLoop(Path stagingRoot) throws Exception {
+    private ExecutionLoop sourceLoop() throws Exception {
         ControlPlaneClient client = new ControlPlaneClient(
                 HttpClient.newHttpClient(),
                 URI.create("http://localhost:" + port),
@@ -1138,7 +1137,7 @@ class SyntheticExecutionPipelineTests {
                 Clock.systemUTC(),
                 com.kaas.runner.sandbox.SyntheticProbe.WORKLOAD_SOURCE_VERIFY,
                 null,
-                stagingRoot);
+                true);
     }
 
     /** Every staged source directory still on disk under the given root. */

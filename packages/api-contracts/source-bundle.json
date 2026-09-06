@@ -8,10 +8,11 @@
     "maxEntryBytes": 1048576,
     "maxPathLength": 512
   },
-  "$mountComment": "Where the bundle appears inside the sandbox, and what the sandbox must observe about it. The path is platform-owned and fixed: it is never derived from tenant input. See docs/security/tenant-source-delivery.md for which of these flags are enforced by the mount under which runtime, which is not uniform and is not claimed to be.",
+  "$mountComment": "Where the bundle appears inside the sandbox and how large the filesystem holding it is. The path is platform-owned and fixed: it is never derived from tenant input. filesystemBytes is the size of the sandbox-private filesystem the bootstrap populates and then freezes -- the aggregate bundle ceiling plus a bounded allowance for directories, the manifest and filesystem overhead. It is memory inside the sandbox, so it is bounded; it does not replace the transport and aggregate limits, which should always be what actually refuses an oversized bundle. See docs/security/mediated-source-filesystem.md for which mount flags are enforced under which runtime, which is not uniform and is not claimed to be.",
   "mount": {
     "containerPath": "/kaas/source",
     "manifestName": "manifest.tsv",
-    "filesDirectory": "files"
+    "filesDirectory": "files",
+    "filesystemBytes": 71303168
   }
 }

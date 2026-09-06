@@ -7,9 +7,13 @@ import com.kaas.runner.authority.ExecutionAuthority;
 import com.kaas.runner.client.ControlPlaneClient;
 import com.kaas.runner.command.CommandValidator;
 import com.kaas.runner.command.ValidatedCommand;
+import com.kaas.runner.sandbox.ExecutionRuntimeType;
+import com.kaas.runner.sandbox.SandboxLaunchRequest;
+import com.kaas.runner.sandbox.SandboxLauncher;
+import com.kaas.runner.sandbox.SandboxOutcome;
+import com.kaas.runner.sandbox.SandboxSecurityProfile;
 import com.kaas.runner.source.SourceBundle;
 import com.kaas.runner.source.SourceBundleRejected;
-import com.kaas.runner.source.SourceStaging;
 import com.sun.net.httpserver.HttpServer;
 import java.io.ByteArrayOutputStream;
 import java.net.InetSocketAddress;
@@ -49,9 +53,10 @@ import tools.jackson.databind.json.JsonMapper;
 @DisplayName("Execution loop source path")
 class ExecutionLoopSourceTests {
 
-    private static final Path STAGING_ROOT = Path.of(System.getProperty("java.io.tmpdir"));
-
     /** An authority that has already ended definitively, which is the state every check below is about. */
+    /** Any digest-pinned reference. The profile refuses a tag, and nothing here ever pulls it. */
+    private static final String PINNED_IMAGE = "busybox@sha256:" + "0".repeat(64);
+
     private static final ExecutionAuthority LOST = new ExecutionAuthority() {
         @Override
         public com.kaas.runner.authority.AuthorityDecision lostReason() {
@@ -131,57 +136,93 @@ class ExecutionLoopSourceTests {
     }
 
     @Test
-    @DisplayName("a worker that lost its authority writes no tenant byte to this host")
-    void authorityIsRequiredBeforeTheWrite() throws Exception {
-        // The last check, and the one that matters most: everything before it happened in memory, and this is
-        // where bytes would reach a disk. A worker fenced during provisioning must not leave source on a host
-        // it no longer serves, where only a reconciler would eventually account for it.
-        Path root = Files.createTempDirectory("kaas-loop-source-");
-        try {
-            ExecutionLoop loop = loopWith(null, root);
-            SourceBundle bundle = bundle();
+    @DisplayName("a worker that lost its authority frames no tenant source for a sandbox")
+    void authorityIsRequiredBeforeTheHandover() {
+        // The last check on this path. Everything before it was a network transfer into memory; this is the
+        // step that would put tenant bytes in front of a sandbox, and a worker fenced during provisioning must
+        // not take it.
+        //
+        // The check is cheaper to state than it was in KAAS-18 and covers more: there is no host directory to
+        // leave behind any more, because the bytes never reach a disk. What it prevents is a container being
+        // built at all for a run this host no longer owns.
+        ExecutionLoop loop = loopWithoutClient();
+        SourceBundle bundle = bundle();
 
-            assertThatThrownBy(() -> loop.materialiseSource(bundle, LOST))
-                    .isInstanceOf(SourceBundleRejected.class)
-                    .extracting(failure -> ((SourceBundleRejected) failure).reason())
-                    .isEqualTo(SourceBundleRejected.Reason.AUTHORITY_LOST);
+        assertThatThrownBy(() -> loop.frameSource(bundle, LOST))
+                .isInstanceOf(SourceBundleRejected.class)
+                .extracting(failure -> ((SourceBundleRejected) failure).reason())
+                .isEqualTo(SourceBundleRejected.Reason.AUTHORITY_LOST);
 
-            try (var listed = Files.list(root)) {
-                assertThat(listed.toList()).as("nothing was written for a run this host no longer owns").isEmpty();
-            }
+        // ANTI-VACUITY. The same call with authority held produces a delivery, so the refusal above is about
+        // the authority and not about a method that refuses everything.
+        var delivery = loop.frameSource(bundle, HELD);
+        assertThat(delivery).isNotNull();
+        assertThat(delivery.frame()).isNotEmpty();
+        assertThat(delivery.filesystemBytes()).isPositive();
+    }
 
-            // ANTI-VACUITY. The same call with authority held does stage, so the refusal above is about the
-            // authority and not about a method that refuses everything.
-            try (SourceStaging staging = loop.materialiseSource(bundle, HELD)) {
-                assertThat(Files.isDirectory(staging.root())).isTrue();
-            }
-            try (var listed = Files.list(root)) {
-                assertThat(listed.toList()).isEmpty();
-            }
-        } finally {
-            Files.deleteIfExists(root);
-        }
+    @Test
+    @DisplayName("the framed bundle carries the bytes and never a path the sandbox could be told to run")
+    void theFrameCarriesBytesAndNothingExecutable() {
+        // The frame is the entire channel tenant source travels on, so what it is NOT carrying matters as
+        // much as what it is. There is no field for a mode, an interpreter, an entrypoint or a command,
+        // because there is nowhere in the format to put one -- and the bootstrap that reads it takes its
+        // target, its modes and the program it hands over to from compile-time constants.
+        byte[] frame = loopWithoutClient().frameSource(bundle(), HELD).frame();
+
+        assertThat(new String(frame, StandardCharsets.ISO_8859_1))
+                .as("the tenant's bytes travel verbatim")
+                .contains("Feature: a\n")
+                .startsWith("KAASSRC1")
+                .endsWith("KAASEND1");
     }
 
     private static ExecutionLoop loopWithoutClient() {
-        return loopWith(null, STAGING_ROOT);
+        return loopWith(null);
+    }
+
+    /**
+     * A launcher that only answers what runtime it instantiates.
+     *
+     * <p>The loop refuses to frame source unless the runtime can actually enforce the source filesystem, so
+     * these tests need a launcher that says which one it is. It runs nothing: every case here is decided
+     * before a container would exist, which is the point of deciding them there.
+     */
+    private static SandboxLauncher mediatedLauncher() {
+        return new SandboxLauncher() {
+            @Override
+            public SandboxSecurityProfile profile() {
+                return SandboxSecurityProfile.version1(PINNED_IMAGE, ExecutionRuntimeType.GVISOR);
+            }
+
+            @Override
+            public SandboxOutcome run(SandboxLaunchRequest request) {
+                throw new AssertionError("no case in this suite reaches a launch");
+            }
+
+            @Override
+            public SandboxOutcome run(SandboxLaunchRequest request, ExecutionAuthority authority) {
+                throw new AssertionError("no case in this suite reaches a launch");
+            }
+
+            @Override
+            public SandboxLauncher withSource(SandboxSecurityProfile.SourceDelivery delivery) {
+                throw new AssertionError("no case in this suite reaches a launch");
+            }
+        };
     }
 
     private static ExecutionLoop loopWith(ControlPlaneClient client) {
-        return loopWith(client, STAGING_ROOT);
-    }
-
-    private static ExecutionLoop loopWith(ControlPlaneClient client, Path stagingRoot) {
         JsonMapper mapper = JsonMapper.builder().build();
         return new ExecutionLoop(
                 client,
                 new CommandValidator(mapper),
-                null,
+                mediatedLauncher(),
                 mapper,
                 Clock.systemUTC(),
                 com.kaas.runner.sandbox.SyntheticProbe.WORKLOAD_SOURCE_VERIFY,
                 null,
-                stagingRoot);
+                true);
     }
 
     private static SourceBundle bundle() {

@@ -18,12 +18,12 @@ import com.kaas.runner.authority.ExecutionAuthority;
 import com.kaas.runner.authority.ExecutionAuthorityMonitor;
 import com.kaas.runner.authority.HeartbeatRenewal;
 import com.kaas.runner.authority.MonotonicClock;
+import com.kaas.runner.sandbox.ExecutionRuntimeType;
 import com.kaas.runner.sandbox.SandboxSecurityProfile;
 import com.kaas.runner.source.SourceBundle;
 import com.kaas.runner.source.SourceBundleContract;
 import com.kaas.runner.source.SourceBundleRejected;
-import com.kaas.runner.source.SourceStaging;
-import com.kaas.runner.source.StaleSourceReconciler;
+import com.kaas.runner.source.SourceFrame;
 import com.kaas.runner.sandbox.SyntheticProbe;
 import java.time.Clock;
 import java.time.Duration;
@@ -67,8 +67,15 @@ public final class ExecutionLoop {
      */
     private final EgressExecutions egressExecutions;
 
-    /** Where this host stages tenant source, or null when it stages none. Platform-owned in every part. */
-    private final java.nio.file.Path sourceStagingRoot;
+    /**
+     * Whether this deployment delivers tenant source at all.
+     *
+     * <p>A flag rather than a directory, and the change is the slice. KAAS-18 needed a staging root because it
+     * wrote the bundle to this host and mounted it; the bytes now go from memory through the sandbox's own
+     * standard input into a filesystem the sandbox creates and closes, and never reach a disk. There is no
+     * path to configure, so there is nothing an operator can point somewhere unexpected.
+     */
+    private final boolean deliversTenantSource;
 
     public ExecutionLoop(
             ControlPlaneClient controlPlane,
@@ -99,13 +106,13 @@ public final class ExecutionLoop {
             Clock clock,
             SyntheticProbe workload,
             EgressExecutions egressExecutions) {
-        this(controlPlane, validator, launcher, mapper, clock, workload, egressExecutions, null);
+        this(controlPlane, validator, launcher, mapper, clock, workload, egressExecutions, false);
     }
 
     /**
      * The full form: a runner that can also deliver inert tenant source.
      *
-     * @param sourceStagingRoot where this host may stage tenant source, or null when it stages none. Operator
+     * @param deliversTenantSource whether this deployment carries source into its sandboxes. Operator
      *     configuration, never tenant-selected and never derived from anything a request carried.
      */
     public ExecutionLoop(
@@ -116,7 +123,7 @@ public final class ExecutionLoop {
             Clock clock,
             SyntheticProbe workload,
             EgressExecutions egressExecutions,
-            java.nio.file.Path sourceStagingRoot) {
+            boolean deliversTenantSource) {
         this.controlPlane = controlPlane;
         this.validator = validator;
         this.launcher = launcher;
@@ -124,25 +131,7 @@ public final class ExecutionLoop {
         this.clock = clock;
         this.workload = workload;
         this.egressExecutions = egressExecutions;
-        this.sourceStagingRoot = sourceStagingRoot;
-    }
-
-    /**
-     * Removes tenant source that outlived the execution it belonged to.
-     *
-     * <p>Failure here is deliberately not fatal. Stale bytes on a host are a hygiene problem; refusing to
-     * execute because a cleaner could not run would convert it into an availability problem, and the next
-     * execution on this host will try again.
-     */
-    private void reclaimAbandonedSource() {
-        if (sourceStagingRoot == null) {
-            return;
-        }
-        try {
-            new StaleSourceReconciler(sourceStagingRoot).reclaim(clock.instant());
-        } catch (RuntimeException ignored) {
-            // Reported by the next pass rather than failing an execution that is otherwise authorized.
-        }
+        this.deliversTenantSource = deliversTenantSource;
     }
 
     /**
@@ -154,11 +143,13 @@ public final class ExecutionLoop {
     public ExecutionReport execute(UUID runId, UUID attemptId, int assignmentEpoch)
             throws ControlPlaneUnavailable {
 
-        // 0. TENANT SOURCE A CRASHED RUNNER LEFT ON THIS HOST. Every ordinary path removes a bundle when its
-        //    execution ends, but a host that lost power mid-run cannot have taken that path. Reclaiming here
-        //    rather than from a timer means the mechanism runs on the same code path executions run on: it
-        //    cannot rot unnoticed behind a scheduler nobody starts in production.
-        reclaimAbandonedSource();
+        // NO STALE-SOURCE RECONCILIATION, because there is no longer anything on this host to reconcile.
+        //
+        // KAAS-18 staged bundles in a directory and needed a reclaimer for the ones a crashed host left
+        // behind. Source now travels from memory into the sandbox's own filesystem and dies with the
+        // container, so the orphan class this used to sweep no longer exists. The reclaimer was deleted
+        // rather than left running over a directory nothing writes to: a cleaner with nothing to clean is a
+        // mechanism that cannot be observed to work.
 
         // 1. AUTHORITY, revalidated now. The claim that won this assignment may be seconds or minutes old, and
         //    the run may have been cancelled or the lease lost since. Nothing is provisioned before this.
@@ -284,21 +275,36 @@ public final class ExecutionLoop {
      * disk. Authority is re-read immediately before the write, so a worker fenced during PROVISIONING does
      * not leave source on a host it no longer serves.
      */
-    SourceStaging materialiseSource(SourceBundle bundle, ExecutionAuthority authority) {
+    SandboxSecurityProfile.SourceDelivery frameSource(SourceBundle bundle, ExecutionAuthority authority) {
         if (bundle == null) {
             return null;
         }
         if (authority.lost()) {
             throw new SourceBundleRejected(
-                    SourceBundleRejected.Reason.AUTHORITY_LOST, "Authority ended before source reached the host.");
+                    SourceBundleRejected.Reason.AUTHORITY_LOST, "Authority ended before source was framed.");
         }
-        return SourceStaging.materialise(sourceStagingRoot, bundle);
+        // NO SILENT DELIVERY ONTO A BOUNDARY THIS RUNTIME CANNOT CLOSE.
+        //
+        // The hardened source filesystem is a tmpfs the bootstrap remounts read-only from inside the sandbox.
+        // The mediating runtime permits that because its sentry implements mount; the baseline runtime refuses
+        // it outright, measured. A worker on the baseline runtime that framed the bundle anyway would build a
+        // container, hand it tenant bytes, and then discover it could not close the filesystem around them.
+        //
+        // Refused here instead, before a container exists. The failure names the runtime rather than the
+        // bundle, because there is nothing wrong with the bundle.
+        if (launcher.profile().runtime() != ExecutionRuntimeType.GVISOR) {
+            throw new SourceBundleRejected(
+                    SourceBundleRejected.Reason.RUNTIME_CANNOT_ENFORCE,
+                    "This runtime cannot enforce a hardened source filesystem.");
+        }
+        return new SandboxSecurityProfile.SourceDelivery(SourceFrame.of(bundle), SourceBundleContract.SOURCE_FILESYSTEM_BYTES);
     }
+
 
     SourceBundle redeemSource(
             ValidatedCommand command, String capabilityToken, ExecutionAuthority authority) {
-        if (sourceStagingRoot == null) {
-            // This deployment stages no source. The sandbox runs exactly as it did before, which is what
+        if (!deliversTenantSource) {
+            // This deployment carries no source. The sandbox runs exactly as it did before, which is what
             // every gate and probe suite in this repository still does.
             return null;
         }
@@ -477,25 +483,26 @@ public final class ExecutionLoop {
                     "This worker instantiates a different sandbox runtime than the command authorizes.");
         }
 
-        // 4b. INERT TENANT SOURCE, obtained and staged before any sandbox exists.
+        // 4b. INERT TENANT SOURCE, framed for a channel rather than written to this host.
         //
-        // PROVISIONING work, placed here deliberately: the phase is already announced, so the phase
-        // deadline and the authority monitor both cover everything below, and a crash leaves resources a
-        // reconciler knows to look for. Preparing tenant bytes before any lifecycle owned them would be the
-        // one shape that leaves source on a host nothing is accountable for.
+        // KAAS-18 staged the bundle in a directory and mounted it. That mount reached a mediated sandbox as a
+        // 9p filesystem carrying `ro` and nothing else, so an executable file on it executed, and the whole of
+        // KAAS-19 exists to replace it. The bytes now go from memory, through the container's standard input,
+        // into a filesystem the sandbox creates for itself and then closes -- and never touch a disk on the
+        // way.
         //
-        // try-with-resources, so the bytes live exactly as long as this block. Every exit -- a refused
-        // bundle, a lost authority, a failed launch, a timeout, a thrown anything -- removes them, rather
-        // than each branch remembering to.
+        // Two things follow, both worth stating because they are absences rather than additions. There is no
+        // staging directory, so there is no stale-staging class for a reconciler to own. And there is no host
+        // mount of tenant source anywhere in the sandbox, so there is no weaker second copy for a future
+        // engine to find.
         SandboxOutcome outcome;
         String egressDetail = null;
-        try (SourceStaging staging = materialiseSource(redeemedSource, authority)) {
+        try {
+            SandboxSecurityProfile.SourceDelivery delivery = frameSource(redeemedSource, authority);
             // The launcher that will actually run the workload. Derived from the configured one, so it
             // differs in exactly one respect: it carries this execution's source. A separate launcher built
             // from scratch could differ in others without anybody noticing.
-            SandboxLauncher workloadLauncher = staging == null
-                    ? launcher
-                    : launcher.withSource(staging.root());
+            SandboxLauncher workloadLauncher = delivery == null ? launcher : launcher.withSource(delivery);
             if (ALLOWLIST.equals(command.networkPolicyType())) {
                 // Refused, never degraded. The command validator already refuses an allowlist this host cannot
                 // enforce, so arriving here without a mechanism or without egress material is a wiring mistake
@@ -536,7 +543,7 @@ public final class ExecutionLoop {
                     // mechanism built, so the networked profile keeps every property it already had and gains
                     // exactly one -- rather than being rebuilt and quietly differing somewhere else.
                     outcome = runWorkload(
-                            staging == null ? egress.launcher() : egress.launcher().withSource(staging.root()),
+                            delivery == null ? egress.launcher() : egress.launcher().withSource(delivery),
                             SyntheticProbe.WORKLOAD_EGRESS,
                             expected,
                             runId,

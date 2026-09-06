@@ -42,4 +42,16 @@ public final class SourceBundleContract {
 
     /** The subdirectory every tenant file lives under, so a logical path cannot collide with the manifest. */
     public static final String FILES_DIRECTORY = "files";
+
+    /**
+     * The size of the sandbox-private filesystem the source is written into.
+     *
+     * <p>The aggregate ceiling plus a bounded allowance for directory entries, the manifest and the
+     * filesystem's own overhead. It is a real limit rather than a formality: the filesystem is memory inside
+     * the sandbox, and a bundle that does not fit fails the bootstrap's write instead of growing without end.
+     *
+     * <p>It does not replace the transport and aggregate bounds. Those refuse an oversized bundle before a
+     * container exists, and they are what should actually fire; this is the last layer.
+     */
+    public static final long SOURCE_FILESYSTEM_BYTES = MAX_TOTAL_BYTES + (4L * 1024 * 1024);
 }

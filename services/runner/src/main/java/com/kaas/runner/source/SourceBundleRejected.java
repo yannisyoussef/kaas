@@ -25,6 +25,16 @@ public final class SourceBundleRejected extends RuntimeException {
         TOO_LARGE,
         /** The control plane refused the redemption, or could not be reached. */
         NOT_REDEEMABLE,
+        /**
+         * This worker's runtime cannot enforce the source filesystem's boundary.
+         *
+         * <p>Refused before a container exists rather than attempted and failed. The hardened source
+         * filesystem is built by remounting a tmpfs read-only from inside the sandbox, and that is permitted
+         * by the mediating runtime and refused by the baseline one — measured, both ways. A worker that tried
+         * anyway would produce a sandbox with tenant bytes on a filesystem whose flags nobody could
+         * establish, which is the state this whole slice exists to make unreachable.
+         */
+        RUNTIME_CANNOT_ENFORCE,
         /** Authority ended while the bundle was being obtained or staged. */
         AUTHORITY_LOST,
         /** The bundle could not be staged on this host. */

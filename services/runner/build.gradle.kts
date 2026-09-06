@@ -142,7 +142,9 @@ val strongRuntimeTest = tasks.register<Test>("strongRuntimeTest") {
         includeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeAuthorityRevocationTests")
         // Source delivery under the mediating runtime. Named explicitly for the same reason: the gate asserts
         // which suites produced its evidence, and a glob would let this drop out silently.
-        includeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeSourceDeliveryTests")
+        // The mediated source filesystem. Named explicitly for the same reason as its neighbours: the gate
+        // asserts which suites produced its evidence, and a glob would let a renamed class drop out silently.
+        includeTestsMatching("com.kaas.runner.sandbox.MediatedSourceFilesystemBoundaryTests")
     }
 }
 
@@ -156,7 +158,7 @@ tasks.named<Test>("test") {
         // itself when its subject is absent reports the same green as one that proved something.
         excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeBoundaryTests")
         excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeAuthorityRevocationTests")
-        excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeSourceDeliveryTests")
+        excludeTestsMatching("com.kaas.runner.sandbox.MediatedSourceFilesystemBoundaryTests")
     }
 }
 

@@ -174,7 +174,7 @@ class SecurityGateRedPathTests {
         }
 
         @Override
-        public SandboxLauncher withSource(java.nio.file.Path sourceMount) {
+        public SandboxLauncher withSource(SandboxSecurityProfile.SourceDelivery delivery) {
             // These launch no real sandbox, so there is nothing for a source mount to change.
             return this;
         }

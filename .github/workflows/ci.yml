@@ -568,7 +568,7 @@ jobs:
             exit 1
           fi
           for suite in StrongRuntimeBoundaryTests StrongRuntimeAuthorityRevocationTests \
-                       StrongRuntimeSourceDeliveryTests; do
+                       MediatedSourceFilesystemBoundaryTests; do
             if ! ls "$results" | grep -q "$suite"; then
               echo "$suite did not run." >&2
               exit 1
@@ -593,19 +593,47 @@ jobs:
           # Read back the properties the gate depends on, from what the sandbox reported rather than from the
           # test's own summary of it.
           grep -q '^source_verification=VALID$' "$evidence"
+          grep -q '^source_filesystem=tmpfs$' "$evidence"
+
+          # THE THREE THE FILESYSTEM ENFORCES.
           grep -q '^source_mount_ro=true$' "$evidence"
+          grep -q '^source_mount_noexec=true$' "$evidence"
+          grep -q '^source_mount_nosuid=true$' "$evidence"
           grep -q '^source_write_refused=true$' "$evidence"
-          grep -q '^source_exec_refused=true$' "$evidence"
+          grep -q '^source_remount_refused=true$' "$evidence"
+
+          # AND THE CONTROL THAT MAKES noexec MEAN SOMETHING. An identical, genuinely executable fixture on a
+          # permissive filesystem in the same sandbox. Without the first line the second is consistent with a
+          # file that was never runnable, which is the ambiguity KAAS-18 ended on.
+          grep -q '^exec_control=EXECUTED$' "$evidence"
+          grep -q '^exec_hardened=REFUSED$' "$evidence"
+
+          # nosuid, reported and unobservable. This runtime performs no setuid transition on ANY filesystem --
+          # measured, while the baseline runtime escalates in the identical test -- so the flag has no red
+          # path here. If the control ever escalates, the runtime changed and the claim needs redoing.
+          grep -q '^suid_control=NOT_ESCALATED$' "$evidence"
+          grep -q '^suid_hardened=REFUSED$' "$evidence"
           grep -q '^source_setuid_files=0$' "$evidence"
+
+          # THE GAP THIS SLICE DID NOT CLOSE, recorded as a fact rather than as an omission. gVisor does not
+          # implement MS_NODEV: the flag is absent from every tmpfs measured, and a device node on one still
+          # behaves as a device. If this line ever changes, the runtime gained it and
+          # docs/security/mediated-source-filesystem.md must be re-adjudicated.
+          grep -q '^source_mount_nodev=false$' "$evidence"
           grep -q '^source_irregular_entries=0$' "$evidence"
-          # AND THE GAP, recorded as a fact rather than as an omission. If this line ever changes, the mediated
-          # boundary improved and docs/security/tenant-source-delivery.md must be re-adjudicated.
-          grep -q '^source_mount_noexec=false$' "$evidence"
+
+          # THE CONSUMER KEEPS NOTHING FROM CONSTRUCTION. The bootstrap held CAP_SYS_ADMIN to close the
+          # filesystem; this is read out of /proc by the process that would eventually run tenant content.
+          grep -q '^final_consumer_capabilities=EMPTY$' "$evidence"
+          grep -q '^source_ingress_visible=0$' "$evidence"
 
       # Tenant bytes are the one thing in this repository that must not survive the job that used them.
       - name: Confirm no tenant source outlived the gate
         run: |
           set -euo pipefail
+          # There is no host staging any more -- source travels from memory into the sandbox's own filesystem
+          # and dies with the container -- so this asserts an absence that should now be structural rather
+          # than swept. A directory appearing here would mean a host copy came back.
           stale=$(find /tmp "$RUNNER_TEMP" -maxdepth 1 -type d -name 'kaas-*source*' 2>/dev/null | wc -l | tr -d ' ')
           echo "stale_source_dirs=$stale"
           if [ "$stale" -ne 0 ]; then

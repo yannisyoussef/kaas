@@ -54,5 +54,5 @@ public interface SandboxLauncher {
      * respect. A caller assembling a second launcher from scratch could differ in others -- a runtime, a
      * generation, an image -- and the difference would not be visible at the call site.
      */
-    SandboxLauncher withSource(java.nio.file.Path sourceMount);
+    SandboxLauncher withSource(SandboxSecurityProfile.SourceDelivery delivery);
 }

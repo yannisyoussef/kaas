@@ -55,7 +55,30 @@ public record SandboxSecurityProfile(
          * <p>Null for every sandbox that carries no source, which is every probe this repository runs outside
          * a tenant assignment.
          */
-        java.nio.file.Path sourceMount) {
+        SourceDelivery sourceDelivery) {
+
+    /**
+     * How tenant source reaches this sandbox, when it does at all.
+     *
+     * <p>A record with one number, and that is the point: everything else about source delivery is a platform
+     * constant compiled into the launcher and the bootstrap. There is no field here for a host path, a mount
+     * option, a target, an image or a command, because a caller that could name any of those would be
+     * choosing the boundary rather than running behind it.
+     *
+     * @param frame the framed bundle, delivered on standard input to the bootstrap. Bytes, never a path and
+     *     never an argument.
+     * @param filesystemBytes the size of the private filesystem the source is written into. Bounded because
+     *     it is memory: an unbounded tmpfs full of tenant bytes is a memory-exhaustion primitive with extra
+     *     steps.
+     */
+    public record SourceDelivery(byte[] frame, long filesystemBytes) {
+        public SourceDelivery {
+            java.util.Objects.requireNonNull(frame, "Source delivery carries a framed bundle.");
+            if (filesystemBytes <= 0) {
+                throw new IllegalArgumentException("A source filesystem is bounded.");
+            }
+        }
+    }
 
     /** The only user a sandbox ever runs as: nobody, with no supplementary groups. */
     public static final String NOBODY = "65534:65534";
@@ -253,10 +276,10 @@ public record SandboxSecurityProfile(
                 // The runtime is carried through unchanged. A networked derivative is the SAME boundary with a
                 // peer added; deriving it from a different runtime would silently be a different boundary.
                 base.runtime(),
-                // And so is the source mount, for the same reason. Previous slices found the networked
-                // derivative losing a property the deny-all profile had; a source mount lost here would mean
-                // an allowlist execution ran with no source rather than failing.
-                base.sourceMount());
+                // And so is the source delivery, for the same reason. Previous slices found the networked
+                // derivative losing a property the deny-all profile had; a delivery lost here would mean an
+                // allowlist execution ran with no source rather than failing.
+                base.sourceDelivery());
     }
 
     /** The baseline profile, under the standard OCI runtime. */
@@ -279,11 +302,16 @@ public record SandboxSecurityProfile(
      * one component and cannot quietly differ in another. The version string is unchanged: the security
      * profile is the same profile, and the evidence gathered under it describes the same boundary.
      *
-     * @param sourceMount a platform-owned host directory. Never derived from tenant input.
+     * <p>What changes with a delivery attached is larger than it looks and is documented in ADR-031: the
+     * container's first process becomes a platform-owned bootstrap holding the capability needed to close the
+     * source filesystem behind itself. Every control this profile declares is observed of the CONSUMER, after
+     * that capability is gone, which is the only process a future engine would ever be.
+     *
+     * @param delivery the framed bundle and the size of the filesystem it is written into. Platform-owned.
      */
     public static SandboxSecurityProfile withSource(
-            SandboxSecurityProfile base, java.nio.file.Path sourceMount) {
-        java.util.Objects.requireNonNull(sourceMount, "A source-bearing profile names its staging directory.");
+            SandboxSecurityProfile base, SourceDelivery delivery) {
+        java.util.Objects.requireNonNull(delivery, "A source-bearing profile carries its delivery.");
         return new SandboxSecurityProfile(
                 base.version(),
                 base.imageReference(),
@@ -304,7 +332,7 @@ public record SandboxSecurityProfile(
                 base.maximumLogBytes(),
                 base.environment(),
                 base.runtime(),
-                sourceMount);
+                delivery);
     }
 
     public static SandboxSecurityProfile version1(

@@ -59,6 +59,25 @@ public enum SyntheticProbe {
      */
     WORKLOAD_SOURCE_VERIFY(List.of("sourceverify")),
 
+    /**
+     * Measures what the source filesystem enforces, against fixtures the production format cannot express.
+     *
+     * <p>It exists because KAAS-18 could not tell two explanations apart. Production source is always
+     * {@code 0444}, so "the filesystem refused the execution" and "the file was not executable" produce
+     * exactly the same result, and only one of them is a boundary. Telling them apart needs a file that IS
+     * executable on the filesystem under test, and an identical one on a filesystem that permits execution.
+     *
+     * <p>Those fixtures are planted by a separate binary that runs before the bootstrap and is named by this
+     * constant and nothing else. It is not reachable from the delivery path: an execution carrying tenant
+     * source runs {@link #WORKLOAD_SOURCE_VERIFY}, which plants nothing and whose filesystem holds only what
+     * the bundle carried. Asserted structurally rather than left as a convention.
+     *
+     * <p>Nothing here weakens the production format. It still carries a path and bytes, still cannot express
+     * a mode, and the materialiser still writes files nothing can execute — the fixtures exist so that
+     * statement stops being the only thing standing between tenant bytes and execution.
+     */
+    SOURCE_BOUNDARY(List.of("sourceboundary"), "/source-boundary-fixture"),
+
     // The two below are not security probes. Every value above exists to attack the sandbox's own
     // confinement and prove it holds; these two are the platform's synthetic WORKLOAD, and they are what a
     // run actually executes in this slice. They live in the same enumeration because they run through the
@@ -134,13 +153,31 @@ public enum SyntheticProbe {
     WORKLOAD_EGRESS(List.of("workload", "egress"));
 
     private final List<String> arguments;
+    private final String bootstrapOverride;
 
     SyntheticProbe(List<String> arguments) {
+        this(arguments, null);
+    }
+
+    SyntheticProbe(List<String> arguments, String bootstrapOverride) {
         this.arguments = List.copyOf(arguments);
+        this.bootstrapOverride = bootstrapOverride;
     }
 
     /** The fixed argument vector. Immutable, server-owned, and never derived from an input. */
     public List<String> arguments() {
         return arguments;
+    }
+
+    /**
+     * The program that runs before the bootstrap for this probe, or null for every probe that has none.
+     *
+     * <p>Null for all but one, and it stays that way. A source-carrying execution runs the bootstrap directly;
+     * the single override exists so the boundary measurement can plant fixtures the production format cannot
+     * express, and it is reachable only by naming that constant. Nothing on the delivery path names it, and a
+     * structural test asserts as much rather than trusting the convention.
+     */
+    public String bootstrapOverride() {
+        return bootstrapOverride;
     }
 }

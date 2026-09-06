@@ -47,6 +47,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <grp.h>
 #include <unistd.h>
 
 /* Platform constants. None of these is ever read from the stream. */
@@ -56,7 +57,10 @@
 #define FORMAT_VERSION   "kaas.source-bundle.v1"
 #define VERIFIER         "/probe.sh"
 #define SHELL            "/bin/sh"
+/* The verifier modes this build will hand over to. A closed list checked by exact comparison, so the word
+ * that reaches the verifier is one of these two literals and never a string that arrived from anywhere. */
 #define VERIFIER_MODE    "sourceverify"
+#define BOUNDARY_MODE    "sourceboundary"
 #define SANDBOX_UID      65534
 #define SANDBOX_GID      65534
 
@@ -247,7 +251,7 @@ static void drop_all_privilege(void) {
 
 /* ------------------------------------------------------------------ main */
 
-int main(void) {
+int main(int argc, char **argv) {
     /* The source root exists as an empty tmpfs mounted by the launcher. Nothing here creates or chooses it. */
     if (mkdir(FILES_DIR, 0755) != 0 && errno != EEXIST) {
         fail("STAGING");
@@ -389,9 +393,16 @@ int main(void) {
      * that came from the stream. The verifier runs unprivileged, on the frozen filesystem, and is what
      * actually reports what the sandbox can see.
      */
-    char *const argv[] = {(char *) SHELL, (char *) VERIFIER, (char *) VERIFIER_MODE, NULL};
+    /* The mode word, matched against a closed list rather than passed through. argv reaches this program
+     * from the probe enumeration, which is server-side and fixed; comparing it here means the string handed
+     * to the verifier is one of two compile-time literals whatever argv actually contained. */
+    const char *mode = VERIFIER_MODE;
+    if (argc > 1 && argv[1] != NULL && strcmp(argv[1], BOUNDARY_MODE) == 0) {
+        mode = BOUNDARY_MODE;
+    }
+    char *const handover[] = {(char *) SHELL, (char *) VERIFIER, (char *) mode, NULL};
     char *const envp[] = {NULL};
-    execve(SHELL, argv, envp);
+    execve(SHELL, handover, envp);
     fail("HANDOFF");
     return 0;
 }
