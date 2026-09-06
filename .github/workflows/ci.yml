@@ -626,6 +626,10 @@ jobs:
           # filesystem; this is read out of /proc by the process that would eventually run tenant content.
           grep -q '^final_consumer_capabilities=EMPTY$' "$evidence"
           grep -q '^source_ingress_visible=0$' "$evidence"
+          # NoNewPrivs is not observable under this runtime, which is the same absence KAAS-17 recorded for
+          # the NO_NEW_PRIVILEGES control. Asserted as unsupported rather than dropped, so a runtime that
+          # gains it fails here and the claim gets upgraded rather than quietly assumed.
+          grep -q '^source_no_new_privileges=unsupported$' "$evidence"
 
       # Tenant bytes are the one thing in this repository that must not survive the job that used them.
       - name: Confirm no tenant source outlived the gate

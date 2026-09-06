@@ -183,7 +183,11 @@ class MediatedSourceFilesystemBoundaryTests {
         var observations = deliver(Map.of("features/a.feature", "Feature: a\n".getBytes(StandardCharsets.UTF_8)));
 
         assertThat(observations).containsEntry("final_consumer_capabilities", "EMPTY");
-        assertThat(observations).containsEntry("source_no_new_privileges", "true");
+        // NoNewPrivs is not observable under this runtime -- /proc/self/status carries no such line -- which
+        // is the same absence KAAS-17 recorded when it left NO_NEW_PRIVILEGES as UNSUPPORTED here. The
+        // bootstrap does set it; what cannot be done is see it. Asserted as unsupported rather than quietly
+        // dropped, so a runtime that starts exposing it fails this and the claim gets upgraded honestly.
+        assertThat(observations).containsEntry("source_no_new_privileges", "unsupported");
         assertThat(observations).containsEntry("source_consumer_uid", "65534");
         assertThat(observations).containsEntry("source_consumer_gid", "65534");
         // And the capability it would need to undo the freeze is gone with the rest.

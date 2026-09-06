@@ -391,7 +391,14 @@ sourceverify|sourceboundary)
     # bounding set has not dropped its privilege; it has put it down within reach.
     caps=$(awk '/^Cap(Inh|Prm|Eff|Bnd|Amb):/ {gsub(/^0+/, "", $2); if ($2 != "") nonzero = 1} END {print nonzero ? "PRESENT" : "EMPTY"}' /proc/self/status 2>/dev/null)
     emit final_consumer_capabilities "${caps:-UNKNOWN}"
-    emit source_no_new_privileges "$(awk '/^NoNewPrivs:/ {print ($2 == 1) ? "true" : "false"}' /proc/self/status 2>/dev/null || echo unknown)"
+    # NoNewPrivs, WHERE THE RUNTIME EXPOSES IT.
+    #
+    # The mediating runtime does not: /proc/self/status carries no such line, which is the same absence
+    # KAAS-17 recorded when it left NO_NEW_PRIVILEGES as UNSUPPORTED for this runtime rather than inventing a
+    # pass. The bootstrap does set PR_SET_NO_NEW_PRIVS; what cannot be done is observe it here, and an empty
+    # reading is reported as unsupported rather than as false -- those are different facts.
+    nnp=$(awk '/^NoNewPrivs:/ {print ($2 == 1) ? "true" : "false"}' /proc/self/status 2>/dev/null)
+    emit source_no_new_privileges "${nnp:-unsupported}"
 
     # THE MOUNT, READ FROM BOTH OPTION NAMESPACES.
     #
@@ -414,8 +421,14 @@ sourceverify|sourceboundary)
     # NO INGRESS. There must be exactly one tenant source filesystem reachable from here, and it must be the
     # hardened one. A weaker second copy would make everything above cosmetic, because hostile code does not
     # use the path it was meant to.
-    emit source_mounts_visible "$(awk '$2 ~ /^\/kaas\/source/' /proc/self/mounts 2>/dev/null | wc -l | tr -d ' ')"
-    emit source_ingress_visible "$(awk '$3 == "9p"' /proc/self/mounts 2>/dev/null | wc -l | tr -d ' ')"
+    emit source_mounts_visible "$(awk '$2 ~ /^\/kaas/' /proc/self/mounts 2>/dev/null | wc -l | tr -d ' ')"
+    # ANY SOURCE VIEW THAT IS NOT THE HARDENED ONE.
+    #
+    # Counted as mounts under /kaas that are not tmpfs, rather than as 9p mounts anywhere: under the mediating
+    # runtime the container's own root filesystem is gofer-backed 9p, so counting 9p mounts counted the rootfs
+    # and reported an ingress that does not exist. A check whose answer does not depend on the hazard is not
+    # evidence, and this one was measuring the wrong thing entirely.
+    emit source_ingress_visible "$(awk '$2 ~ /^\/kaas/ && $3 != "tmpfs"' /proc/self/mounts 2>/dev/null | wc -l | tr -d ' ')"
 
     # WRITE REFUSAL, OBSERVED. A mount that reports ro and accepts a write is a mount that reports.
     if echo probe 2>/dev/null > "$root/kaas-write-probe"; then

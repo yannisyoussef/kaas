@@ -55,9 +55,14 @@ class SourceBootstrapTests {
         // would satisfy all of them. This is the same frame shape with nothing wrong with it.
         var observations = run(frame(entry("features/a.feature", "Feature: a\n"), true, true));
 
-        assertThat(observations)
-                .as("what the bootstrap reported: %s", observations)
-                .doesNotContainKey("bootstrap_failure");
+        // Accepted means the FRAME was accepted. The freeze that follows needs the mediating runtime, and
+        // this suite deliberately runs everywhere, so on a host whose runtime cannot remount the filesystem
+        // the bootstrap reports FREEZE -- which is the mechanism failing closed, not the frame being refused.
+        // Asserting the absence of any failure at all would have made this suite runtime-dependent for no
+        // reason, and it did: it failed in the ordinary gate while passing on the development machine.
+        assertThat(observations.get("bootstrap_failure"))
+                .as("the frame itself must be accepted: %s", observations)
+                .isIn(null, "FREEZE");
     }
 
     @Test

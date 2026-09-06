@@ -36,9 +36,13 @@ class SourceBoundaryStructureTests {
                 .containsExactly("frame", "filesystemBytes");
 
         String launcher = Files.readString(source("sandbox/DockerSandboxLauncher.java"));
-        // The mount options are a literal. Not built from a variable, not read from configuration, not
-        // assembled from anything the profile carries beyond a size.
-        assertThat(launcher).contains("\"rw,noexec,nosuid,nodev,size=\"");
+        // The SOURCE filesystem's options, matched together with the size that identifies which mount they
+        // belong to. Asserting the option string alone was vacuous and a mutation found it: the same literal
+        // appears on the /tmp and /dev/shm lines, so weakening the source mount to rw,exec,suid,dev left the
+        // assertion satisfied by a completely unrelated mount.
+        assertThat(launcher)
+                .as("the source filesystem's own options, not some other mount's")
+                .contains("\"rw,noexec,nosuid,nodev,size=\" + profile.sourceDelivery().filesystemBytes()");
         // And the source filesystem is a tmpfs the sandbox owns, never a host directory bound in. The mount
         // that KAAS-18 used carried `ro` and nothing else under the mediating runtime.
         assertThat(launcher)
