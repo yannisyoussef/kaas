@@ -144,7 +144,17 @@ class MediatedSourceFilesystemBoundaryTests {
                 .as("if this ever escalates, the runtime changed and nosuid needs a real red path")
                 .containsEntry("suid_control", "NOT_ESCALATED");
         assertThat(observations).containsEntry("suid_hardened", "REFUSED");
-        assertThat(observations).containsEntry("source_setuid_files", "0");
+
+        // The setuid count is asserted of a DELIVERY, not of this measurement. The boundary probe plants a
+        // setuid fixture on the source filesystem deliberately -- that is the only reason it can say anything
+        // about nosuid at all -- so counting zero here would mean the fixture was not there and the two
+        // comparisons above were vacuous. What production must satisfy is that a real bundle brings none.
+        assertThat(observations)
+                .as("the measurement's own fixture must be present, or nothing above was measured")
+                .containsEntry("source_setuid_files", "1");
+        assertThat(deliver(Map.of("features/a.feature", "Feature: a\n".getBytes(StandardCharsets.UTF_8))))
+                .as("a real bundle brings no setuid material of its own")
+                .containsEntry("source_setuid_files", "0");
     }
 
     @Test
@@ -201,7 +211,7 @@ class MediatedSourceFilesystemBoundaryTests {
         // The in-sandbox verifier recomputes every digest from the final filesystem rather than trusting what
         // the runner checked before framing. This alters one entry's bytes after the frame was built, which
         // nothing in production can do, and the sandbox catches it.
-        byte[] original = "Feature: original\n".getBytes(StandardCharsets.UTF_8);
+        byte[] original = "Feature: theoriginal\n".getBytes(StandardCharsets.UTF_8);
         var expected = List.of(new SourceBundle.ExpectedEntry("features/a.feature", SourceBundle.sha256(original)));
         SourceBundle bundle = SourceBundle.verified(
                 archiveOf(new LinkedHashMap<>(Map.of("features/a.feature", original))),
@@ -210,7 +220,7 @@ class MediatedSourceFilesystemBoundaryTests {
 
         byte[] frame = SourceFrame.of(bundle);
         // Substitute the content in the frame without touching the digest that travels beside it.
-        byte[] tampered = replace(frame, original, "Feature: substitute\n".getBytes(StandardCharsets.UTF_8));
+        byte[] tampered = replace(frame, original, "Feature: SUBSTITUTED\n".getBytes(StandardCharsets.UTF_8));
 
         var observations = launch(new SandboxSecurityProfile.SourceDelivery(tampered, 8L * 1024 * 1024),
                 SyntheticProbe.WORKLOAD_SOURCE_VERIFY);
