@@ -237,7 +237,8 @@ public final class SourceBundle {
         }
     }
 
-    static String sha256(byte[] content) {
+    /** The digest of some bytes, in the one form this system exchanges. */
+    public static String sha256(byte[] content) {
         try {
             return "sha256:"
                     + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
