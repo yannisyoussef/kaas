@@ -111,8 +111,9 @@ class MediatedSourceFilesystemBoundaryTests {
         // where it must not. Without the first half the second proves only that something refused something.
         var observations = deliverWithBoundaryFixtures();
         // This case carries every key the gate reads back: the mount options, both comparisons, the
-        // capability state and the counts.
-        record(observations);
+        // capability state and the counts -- plus the same counts from an ordinary delivery, because the
+        // measurement's own fixtures make its numbers different from production's on purpose.
+        record(observations, deliver(Map.of("features/a.feature", "Feature: a\n".getBytes(StandardCharsets.UTF_8))));
 
         assertThat(observations)
                 .as("the control must actually run, or the refusal below means nothing: %s", observations)
@@ -275,7 +276,7 @@ class MediatedSourceFilesystemBoundaryTests {
      *
      * <p>Only platform-defined keys and values. No logical path, no source byte, no capability material.
      */
-    private static void record(Map<String, String> observations) {
+    private static void record(Map<String, String> observations, Map<String, String> delivery) {
         String directory = System.getenv("RUNNER_TEMP");
         if (directory == null || directory.isBlank()) {
             return; // Off CI there is no gate to read it.
@@ -296,6 +297,15 @@ class MediatedSourceFilesystemBoundaryTests {
                 evidence.append(key).append('=').append(value).append('\n');
             }
         }
+        // AND THE SAME COUNT FROM A REAL DELIVERY. The measurement above plants a setuid fixture on purpose,
+        // so its own count is one; what production has to satisfy is that a bundle brings none. Recording
+        // only one of those numbers would make the gate assert either a vacuous measurement or a false claim.
+        evidence.append("delivery_setuid_files=")
+                .append(delivery.getOrDefault("source_setuid_files", "unknown"))
+                .append('\n');
+        evidence.append("delivery_irregular_entries=")
+                .append(delivery.getOrDefault("source_irregular_entries", "unknown"))
+                .append('\n');
         try {
             java.nio.file.Files.writeString(
                     java.nio.file.Path.of(directory, "source-delivery-evidence.txt"),

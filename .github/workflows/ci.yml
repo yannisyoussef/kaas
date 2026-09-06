@@ -613,7 +613,12 @@ jobs:
           # path here. If the control ever escalates, the runtime changed and the claim needs redoing.
           grep -q '^suid_control=NOT_ESCALATED$' "$evidence"
           grep -q '^suid_hardened=REFUSED$' "$evidence"
-          grep -q '^source_setuid_files=0$' "$evidence"
+          # BOTH COUNTS, because they are different claims. The measurement plants a setuid fixture on the
+          # source filesystem deliberately -- without it the two comparisons above would be vacuous -- so its
+          # own count is one. What a real delivery must satisfy is that a bundle brings none of its own.
+          grep -q '^source_setuid_files=1$' "$evidence"
+          grep -q '^delivery_setuid_files=0$' "$evidence"
+          grep -q '^delivery_irregular_entries=0$' "$evidence"
 
           # THE GAP THIS SLICE DID NOT CLOSE, recorded as a fact rather than as an omission. gVisor does not
           # implement MS_NODEV: the flag is absent from every tmpfs measured, and a device node on one still
