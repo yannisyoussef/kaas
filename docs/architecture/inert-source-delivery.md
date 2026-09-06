@@ -21,7 +21,7 @@ ExecutionCommand
 Runner
     redeem      -- internal API, one attempt, bounded response, run must still be CLAIMED
     verify      -- against the COMMAND, never against what the response says about itself
-    stage       -- 0444 regular files under an opaque directory of the operator's staging root
+    stage       -- 0444 regular files under an opaque 0755 directory of a 0700 staging root
     mount       -- read-only bind at a fixed platform-owned container path
         |
         v

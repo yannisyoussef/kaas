@@ -32,7 +32,15 @@ Two barriers, neither of which is the mount:
 1. **The format cannot express a mode.** A bundle entry is a logical path and bytes. There is no field for a
    permission, an owner, a link target or a device number, so there is nothing for a hostile bundle to set.
 2. **The materialiser writes `0444`.** Every staged file is created read-only with no executable, setuid or
-   setgid bit, whatever the transport contained. Directories are `0700` and platform-owned.
+   setgid bit, whatever the transport contained. Directories are `0755` and platform-owned, and the staging
+   root this platform creates is `0700`.
+
+   The split is deliberate and was corrected after CI caught it. The sandbox runs as uid 65534 and does not
+   own the staging tree, so an owner-only mode makes the bundle unreadable to the only consumer it has — the
+   verifier reported a missing manifest on every mediated run. Confidentiality on the host comes from the
+   `0700` staging root instead, which is the layer that can actually provide it: everything but the container
+   must traverse that root, and the container does not, because the daemon resolves the host path as root and
+   binds the bundle directory itself.
 
 The strong-runtime gate observes the *outcome* — `source_exec_refused=true` — from inside a mediated sandbox,
 and separately records `source_mount_noexec=false`, so the weaker configuration cannot hide behind the
@@ -69,8 +77,9 @@ gap is a prerequisite for that decision, alongside the runtime-pin attestation g
    plaintext token lives in the delivery envelope and nowhere else.
 4. **Verified on the host.** The runner walks the **command's** feature list, not the archive's entry names,
    and refuses anything extra, missing, altered, oversized or unsafely named.
-5. **Staged.** Regular files at `0444` under an opaque directory of the operator's staging root, written with
-   `CREATE_NEW` so nothing existing can be followed or overwritten.
+5. **Staged.** Regular files at `0444` under an opaque directory of the operator's staging root — itself
+   `0700` when this platform creates it — written with `CREATE_NEW` so nothing existing can be followed or
+   overwritten.
 6. **Mounted.** Read-only, at a fixed platform-owned container path. Neither side of the bind derives from
    tenant input.
 7. **Re-verified inside the sandbox.** The platform's verifier re-hashes what it can actually see. This is the

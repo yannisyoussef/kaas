@@ -36,11 +36,42 @@ import java.util.UUID;
  */
 public final class SourceStaging implements AutoCloseable {
 
-    /** Read for the owner only. No group, no world, and no executable bit anywhere. */
-    private static final Set<PosixFilePermission> FILE_MODE = PosixFilePermissions.fromString("r--------");
+    /**
+     * Read-only, to everyone. No write bit and no executable bit anywhere.
+     *
+     * <p>Readable rather than owner-only, and that is a correction rather than a relaxation. The sandbox runs
+     * as uid 65534 and the staging tree is owned by the worker's user, so an owner-only mode made the bundle
+     * <em>unreadable to the only consumer it has</em>: the verifier reported a missing manifest on every
+     * mediated run. It passed locally because Docker Desktop's virtiofs squashes ownership and hid the
+     * difference entirely — a mode that looked strict and was simply broken.
+     *
+     * <p>What the mode is actually for is unchanged and is what matters at the boundary: nothing can write to
+     * a staged file, and nothing can execute one. Confidentiality on the host comes from
+     * {@link #STAGING_ROOT_MODE} below, which is the layer that can actually provide it.
+     */
+    private static final Set<PosixFilePermission> FILE_MODE = PosixFilePermissions.fromString("r--r--r--");
 
-    /** Traversable and writable only by the owner, so nothing else on the host can add to it. */
-    private static final Set<PosixFilePermission> DIRECTORY_MODE = PosixFilePermissions.fromString("rwx------");
+    /**
+     * Traversable and listable by anyone, writable only by the owner.
+     *
+     * <p>The container's uid must traverse these to reach the files, and it is not the owner. It reaches them
+     * through the bind mount rather than through the staging root, so opening these directories does not open
+     * a path for anything else on the host.
+     */
+    private static final Set<PosixFilePermission> DIRECTORY_MODE = PosixFilePermissions.fromString("rwxr-xr-x");
+
+    /**
+     * The staging root: owner only, and this is the layer that keeps tenant bytes off other host users.
+     *
+     * <p>Nothing reaches a bundle without traversing this, except the container — and the container does not
+     * traverse it at all, because the daemon resolves the host path as root and binds the bundle directory
+     * itself. So a private root and a readable bundle are not in tension: one keeps other host users out, the
+     * other lets the sandbox in, and neither weakens the other.
+     *
+     * <p>Applied only when this process creates the root. An operator who provisioned it already chose its
+     * mode, and silently rewriting an operator's decision is worse than honouring it.
+     */
+    private static final Set<PosixFilePermission> STAGING_ROOT_MODE = PosixFilePermissions.fromString("rwx------");
 
     /** Names a KaaS source bundle directory, so a reconciler can recognise one without guessing. */
     public static final String DIRECTORY_PREFIX = "kaas-source-";
@@ -63,7 +94,9 @@ public final class SourceStaging implements AutoCloseable {
         Path root = stagingRoot.resolve(DIRECTORY_PREFIX + UUID.randomUUID());
         SourceStaging staging = new SourceStaging(root);
         try {
-            Files.createDirectories(stagingRoot);
+            if (!Files.isDirectory(stagingRoot)) {
+                Files.createDirectories(stagingRoot, PosixFilePermissions.asFileAttribute(STAGING_ROOT_MODE));
+            }
             Files.createDirectory(root, PosixFilePermissions.asFileAttribute(DIRECTORY_MODE));
             Path files = root.resolve(SourceBundleContract.FILES_DIRECTORY);
             Files.createDirectory(files, PosixFilePermissions.asFileAttribute(DIRECTORY_MODE));

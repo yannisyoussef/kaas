@@ -215,8 +215,20 @@ says about itself. A refusal carries a category and never a logical path or a by
 
 An opaque `kaas-source-<uuid>` directory under the operator-configured staging root. The name carries no
 project, feature or path, because a directory listing on a shared host is readable by anyone who can list it.
-Files are `0444` regular files; directories are `0700`. Modes are platform-owned: tenant source carries bytes,
-not permissions.
+Files are `0444` regular files; the bundle's directories are `0755`; a staging root this platform creates is
+`0700`. Modes are platform-owned: tenant source carries bytes, not permissions.
+
+The split between a private root and a readable bundle is a correction CI forced, and it is worth stating
+plainly because the first version looked stricter and was simply broken. Files were `0400` and directories
+`0700`, owned by the worker's user. The sandbox runs as uid 65534 and owns none of it, so **the verifier
+reported a missing manifest on every mediated run** — the bundle was unreadable to its only consumer. It
+passed on the development platform because Docker Desktop's virtiofs squashes ownership and hides the
+difference entirely, so no local run could have found it.
+
+What the modes are for at the boundary is unchanged: nothing can write to a staged file and nothing can
+execute one. Confidentiality on the host moved to the layer that can provide it — the `0700` root, which
+everything but the container must traverse, and which the container does not traverse at all because the
+daemon resolves the host path as root and binds the bundle directory itself.
 
 ## 26. Staging cleanup and reconciliation
 
@@ -382,6 +394,8 @@ path, the probe, the contract and the CI gate. The material findings and their r
   boundary did not. Added, with a test that distinguishes it from the aggregate ceiling.
 - **`SandboxTestSupport` package visibility** blocked the mount suite; the suite was moved into the sandbox
   package where it belongs rather than the helper being widened.
+- **The staging tree was unreadable by the sandbox uid** (P0, found by CI rather than by review — the review
+  passes read the mode as strict and correct, and every local run agreed with them). §25 and §52.
 
 ## 46. Mutation evidence
 
@@ -490,20 +504,27 @@ to install a runtime into its embedded VM. Only the gate does.
 
 ## 52. GitHub Actions verification
 
-**Not yet obtained for this commit.** The branch is committed and verified locally; pushing it is what starts
-the eight jobs — `backend`, `web`, `contracts`, `infrastructure`, `synthetic-execution-pipeline`,
-`execution-egress-gate`, `hostile-execution-gate`, `strong-runtime-gate` — and the push was refused by this
-environment rather than attempted and failed.
+**Run 34007486485 on `a03ea8e`: five jobs green, three failed — and the failure was real.**
 
-This matters more here than it usually would, and it is stated rather than glossed: **the mediated mount
-evidence in §29 through §33 comes from measurements taken on earlier commits of this branch, not from this
-one.** Docker Desktop cannot register `runsc`, so no local run can produce it. Until
-`strong-runtime-gate` passes on this commit, `StrongRuntimeSourceDeliveryTests` has never executed, and the
-evidence file the gate reads back has never been written. The suite and the gate step are both written to
-fail rather than skip when the runtime or the evidence is absent, so a green job will mean the measurement
-happened — but that green does not exist yet.
+`hostile-execution-gate`, `synthetic-execution-pipeline` and `strong-runtime-gate` all failed for one cause:
+every source-delivery test reported `source_manifest=missing`. The staging tree was `0400` files under `0700`
+directories owned by the worker's user, and the sandbox runs as uid 65534, so **the bundle was unreadable to
+the only consumer it has.** Nothing was delivered on any of the three jobs.
 
-The previous commit on this branch (`b716073`) had all eight jobs green.
+It passed locally, on the full suite and on every mutation run, because Docker Desktop's virtiofs squashes
+ownership and erases the difference. No local run could have found it. This is the clearest possible instance
+of the rule that a green local build proves nothing about the mediated runtime — and it applies to the
+baseline one here too.
+
+Fixed by splitting the two jobs the mode was doing: the bundle is readable so the sandbox can read it, and
+confidentiality moved to a `0700` staging root, which is the layer that can provide it. §25 has the detail.
+`SourceStagingTests` now asserts `OTHERS_READ` on files and `OTHERS_EXECUTE` on directories, so the property
+CI caught is checkable everywhere rather than only on Linux.
+
+**The evidence in §29 through §33 is therefore from earlier commits of this branch, not from this one.** Until
+`strong-runtime-gate` passes after this fix, `StrongRuntimeSourceDeliveryTests` has still never completed a
+mediated delivery. Both the suite and the gate step fail rather than skip when the runtime or the evidence is
+absent, so a green job will mean the measurement happened — that green does not exist yet.
 
 ## 53. Required-check governance
 

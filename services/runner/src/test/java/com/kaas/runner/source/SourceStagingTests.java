@@ -32,11 +32,18 @@ import org.junit.jupiter.api.Test;
 class SourceStagingTests {
 
     @Test
-    @DisplayName("every staged file is read-only to its owner and executable to nobody")
+    @DisplayName("every staged file is readable, and writable and executable by nobody")
     void stagedFilesCarryThePlatformsMode() throws Exception {
-        // Tenant source carries bytes, not permissions. The mount under the mediating runtime does not supply
-        // noexec (see docs/security/tenant-source-delivery.md), so the absence of an executable bit here is
-        // not a belt-and-braces nicety -- it is the barrier that actually refuses execution there.
+        // TWO PROPERTIES, AND BOTH HAVE BEEN WRONG.
+        //
+        // No write bit and no executable bit is the security half. The mount under the mediating runtime does
+        // not supply noexec (see docs/security/tenant-source-delivery.md), so the absent executable bit is not
+        // a nicety there -- it is the barrier that actually refuses execution.
+        //
+        // Readable by others is the half that makes the bundle usable at all, and it was missing. The sandbox
+        // runs as uid 65534 and does not own this tree, so an owner-only mode meant the verifier found no
+        // manifest on every mediated run. It passed locally because Docker Desktop squashes ownership, so the
+        // only place it could fail was CI -- which is exactly where it did.
         Path root = Files.createTempDirectory("kaas-staging-test-");
         try (SourceStaging staging = stage(root, Map.of(
                 "features/a.feature", "Feature: a\n".getBytes(StandardCharsets.UTF_8),
@@ -48,19 +55,65 @@ class SourceStagingTests {
             }
             assertThat(files).as("the manifest and both sources").hasSize(3);
             for (Path file : files) {
-                assertThat(Files.getPosixFilePermissions(file))
-                        .as("%s", staging.root().relativize(file))
-                        .containsExactly(PosixFilePermission.OWNER_READ);
+                var mode = Files.getPosixFilePermissions(file);
+                assertThat(mode)
+                        .as("%s must be readable by the sandbox uid, which does not own it",
+                                staging.root().relativize(file))
+                        .contains(PosixFilePermission.OTHERS_READ);
+                assertThat(mode)
+                        .as("%s must be writable by nobody", staging.root().relativize(file))
+                        .doesNotContain(
+                                PosixFilePermission.OWNER_WRITE,
+                                PosixFilePermission.GROUP_WRITE,
+                                PosixFilePermission.OTHERS_WRITE);
+                assertThat(mode)
+                        .as("%s must be executable by nobody", staging.root().relativize(file))
+                        .doesNotContain(
+                                PosixFilePermission.OWNER_EXECUTE,
+                                PosixFilePermission.GROUP_EXECUTE,
+                                PosixFilePermission.OTHERS_EXECUTE);
             }
 
-            // Directories are the platform's own: traversable and writable by nobody else on the host.
-            assertThat(Files.getPosixFilePermissions(staging.root()))
+            // Directories must be traversable by the sandbox uid for the files above to be reachable at all,
+            // and writable only by the owner so nothing else on the host can add to a staged bundle.
+            List<Path> directories;
+            try (var walk = Files.walk(staging.root())) {
+                directories = walk.filter(Files::isDirectory).toList();
+            }
+            for (Path directory : directories) {
+                var mode = Files.getPosixFilePermissions(directory);
+                assertThat(mode)
+                        .as("%s must be traversable by the sandbox uid", directory.getFileName())
+                        .contains(PosixFilePermission.OTHERS_EXECUTE, PosixFilePermission.OTHERS_READ);
+                assertThat(mode)
+                        .as("%s must be writable only by its owner", directory.getFileName())
+                        .doesNotContain(PosixFilePermission.GROUP_WRITE, PosixFilePermission.OTHERS_WRITE);
+            }
+        } finally {
+            deleteRecursively(root);
+        }
+    }
+
+    @Test
+    @DisplayName("a staging root this process creates is private to its owner")
+    void aCreatedStagingRootIsPrivate() throws Exception {
+        // Where confidentiality on the host actually lives. The bundle directory is readable so the sandbox
+        // can read it; nothing else on the host reaches that directory, because everything but the container
+        // has to traverse this root -- and the container does not, since the daemon resolves the host path as
+        // root and binds the bundle directory itself.
+        Path parent = Files.createTempDirectory("kaas-staging-parent-");
+        Path root = parent.resolve("staging");
+        try (SourceStaging staging = stage(root, Map.of(
+                "features/a.feature", "Feature: a\n".getBytes(StandardCharsets.UTF_8)))) {
+            assertThat(staging.root()).exists();
+            assertThat(Files.getPosixFilePermissions(root))
+                    .as("a root this process created must not be traversable by other host users")
                     .containsExactlyInAnyOrder(
                             PosixFilePermission.OWNER_READ,
                             PosixFilePermission.OWNER_WRITE,
                             PosixFilePermission.OWNER_EXECUTE);
         } finally {
-            deleteRecursively(root);
+            deleteRecursively(parent);
         }
     }
 
