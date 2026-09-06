@@ -1,0 +1,222 @@
+# A MEASUREMENT, NOT A GATE.
+#
+# KAAS-19 has to explain why a mediated source mount carries `ro` and drops `noexec`, `nosuid` and `nodev`
+# before it changes any production code. macOS cannot register runsc, so that question can only be asked on a
+# real Linux host with the pinned runtime — which is what this workflow exists to do.
+#
+# Manual dispatch only. It is not one of the eight required checks, it does not gate anything, and it is
+# expected to be deleted once its answer is recorded in the architecture evaluation.
+name: gvisor-filesystem-experiment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      # The same pin the strong-runtime gate uses. Measuring a different build would answer a question about
+      # a runtime this repository does not run.
+      - name: Install the pinned mediating runtime
+        env:
+          GVISOR_RELEASE: "20260817"
+          RUNSC_SHA256: "048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c"
+        run: |
+          set -euo pipefail
+          url="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/$(uname -m)"
+          curl -fsSL "${url}/runsc" -o /tmp/runsc
+          echo "${RUNSC_SHA256}  /tmp/runsc" | sha256sum -c -
+          sudo install -o root -g root -m 0755 /tmp/runsc /usr/local/bin/runsc
+          runsc --version
+          sudo mkdir -p /etc/docker
+          echo '{"runtimes":{"runsc":{"path":"/usr/local/bin/runsc"}}}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          docker info --format '{{range $k,$v := .Runtimes}}{{$k}} {{end}}'
+
+      # FIXTURES THAT ACTUALLY WORK, built here rather than assumed.
+      #
+      # KAAS-15 proved a setuid claim with busybox `id`, which drops privileges on its own and would have
+      # reported the same thing whether nosuid was enforced or not. So the escalation fixture is a static C
+      # binary that prints its real and effective uid and nothing else, and every experiment below runs it on
+      # a permissive filesystem first. A fixture that cannot escalate on the control proves nothing when it
+      # fails on the hardened mount.
+      - name: Build the executable and setuid fixtures
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/fixtures
+          cat > /tmp/whoami.c <<'C'
+          #include <stdio.h>
+          #include <unistd.h>
+          int main(void) { printf("ruid=%d euid=%d\n", (int) getuid(), (int) geteuid()); return 0; }
+          C
+          gcc -static -O2 -o /tmp/fixtures/whoami /tmp/whoami.c
+          printf '#!/bin/sh\necho SCRIPT_RAN\n' > /tmp/fixtures/script.sh
+          chmod 0755 /tmp/fixtures/whoami /tmp/fixtures/script.sh
+          # The setuid copy is owned by root with the bit set. On a suid-honouring filesystem a non-root
+          # caller sees euid=0; under nosuid it sees its own uid. That difference is the whole measurement.
+          sudo cp /tmp/fixtures/whoami /tmp/fixtures/whoami-suid
+          sudo chown root:root /tmp/fixtures/whoami-suid
+          sudo chmod 4755 /tmp/fixtures/whoami-suid
+          ls -l /tmp/fixtures
+          echo "--- host control (runner uid $(id -u)):"
+          /tmp/fixtures/whoami
+          /tmp/fixtures/whoami-suid
+
+      - name: Stage a host directory the way the platform stages source
+        run: |
+          set -euo pipefail
+          sudo rm -rf /tmp/kaas-exp && mkdir -p /tmp/kaas-exp/files
+          cp /tmp/fixtures/whoami /tmp/fixtures/whoami-suid /tmp/fixtures/script.sh /tmp/kaas-exp/files/
+          echo "inert bytes" > /tmp/kaas-exp/files/plain.txt
+          sudo chown -R root:root /tmp/kaas-exp/files/whoami-suid
+          sudo chmod 4755 /tmp/kaas-exp/files/whoami-suid
+          chmod 0755 /tmp/kaas-exp /tmp/kaas-exp/files
+          ls -l /tmp/kaas-exp/files
+
+      # THE PROBE, written once and run against every candidate.
+      #
+      # It reports what the sandbox observes rather than what was requested, and it reports mountinfo's two
+      # option namespaces separately -- per-mount flags and super-block options -- because a parser that reads
+      # only one of them can call a mount hardened when it is not. That distinction is exactly what KAAS-19
+      # has to get right, so the experiment models it from the start.
+      - name: Write the observation probe
+        run: |
+          cat > /tmp/observe.sh <<'SH'
+          #!/bin/sh
+          target="${1:-/kaas/source}"
+          echo "=== target=$target"
+          echo "--- /proc/self/mounts"
+          awk -v t="$target" '$2 == t {print}' /proc/self/mounts 2>/dev/null || echo "(absent)"
+          echo "--- /proc/self/mountinfo (field 6 = per-mount flags; after '-' = fstype and super options)"
+          awk -v t="$target" '$5 == t {print}' /proc/self/mountinfo 2>/dev/null || echo "(absent)"
+          echo "--- identity"
+          id 2>/dev/null || echo "(no id)"
+          echo "--- capabilities"
+          grep -E '^Cap(Inh|Prm|Eff|Bnd|Amb)' /proc/self/status 2>/dev/null || echo "(none reported)"
+          echo "--- write"
+          if echo probe > "$target/kaas-write-probe" 2>/dev/null; then
+              echo "write=ACCEPTED"; rm -f "$target/kaas-write-probe" 2>/dev/null
+          else
+              echo "write=REFUSED"
+          fi
+          echo "--- exec (static binary)"
+          if "$target/files/whoami" 2>&1; then echo "exec_binary=EXECUTED"; else echo "exec_binary=REFUSED"; fi
+          echo "--- exec (shebang script)"
+          if "$target/files/script.sh" 2>&1; then echo "exec_script=EXECUTED"; else echo "exec_script=REFUSED"; fi
+          echo "--- setuid escalation"
+          out=$("$target/files/whoami-suid" 2>&1 || echo "refused")
+          echo "suid_output=$out"
+          case "$out" in *"euid=0"*) echo "suid=ESCALATED";; *refused*) echo "suid=REFUSED_EXEC";; *) echo "suid=NOT_ESCALATED";; esac
+          echo "--- modes as seen inside"
+          ls -l "$target/files" 2>/dev/null || echo "(unlistable)"
+          SH
+          chmod +x /tmp/observe.sh
+
+      - name: A — the current gofer bind, both runtimes
+        run: |
+          set -uo pipefail
+          for rt in runc runsc; do
+            echo "##################### A / $rt"
+            docker volume rm kaas-exp-a >/dev/null 2>&1 || true
+            docker volume create --driver local \
+              --opt type=none --opt device=/tmp/kaas-exp --opt o=bind,ro,noexec,nosuid,nodev kaas-exp-a >/dev/null
+            docker run --rm --runtime=$rt --network=none \
+              -v kaas-exp-a:/kaas/source:ro \
+              -v /tmp/observe.sh:/observe.sh:ro \
+              alpine:3.20 /observe.sh /kaas/source 2>&1 || echo "(container failed)"
+            docker volume rm kaas-exp-a >/dev/null 2>&1 || true
+          done
+
+      - name: B — a plain bind with docker's own ro, both runtimes
+        run: |
+          set -uo pipefail
+          for rt in runc runsc; do
+            echo "##################### B / $rt"
+            docker run --rm --runtime=$rt --network=none \
+              -v /tmp/kaas-exp:/kaas/source:ro \
+              -v /tmp/observe.sh:/observe.sh:ro \
+              alpine:3.20 /observe.sh /kaas/source 2>&1 || echo "(container failed)"
+          done
+
+      - name: C — a writable tmpfs asking for noexec,nosuid,nodev
+        run: |
+          set -uo pipefail
+          for rt in runc runsc; do
+            echo "##################### C / $rt"
+            docker run --rm --runtime=$rt --network=none \
+              --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
+              -v /tmp/kaas-exp:/ingress:ro \
+              -v /tmp/observe.sh:/observe.sh:ro \
+              alpine:3.20 sh -c 'mkdir -p /kaas/source/files && cp /ingress/files/* /kaas/source/files/ 2>/dev/null; /observe.sh /kaas/source' 2>&1 || echo "(container failed)"
+          done
+
+      - name: D — a writable tmpfs asking for NOTHING (the anti-vacuity control)
+        run: |
+          set -uo pipefail
+          for rt in runc runsc; do
+            echo "##################### D / $rt   (exec MUST succeed here or every REFUSED above is meaningless)"
+            docker run --rm --runtime=$rt --network=none \
+              --tmpfs /kaas/source:rw,exec,suid,dev,size=8m \
+              -v /tmp/kaas-exp:/ingress:ro \
+              -v /tmp/observe.sh:/observe.sh:ro \
+              alpine:3.20 sh -c 'mkdir -p /kaas/source/files && cp -p /ingress/files/* /kaas/source/files/ 2>/dev/null; chmod 4755 /kaas/source/files/whoami-suid 2>/dev/null; /observe.sh /kaas/source' 2>&1 || echo "(container failed)"
+          done
+
+      - name: E — a read-only tmpfs, and whether it can be asked for at all
+        run: |
+          set -uo pipefail
+          for rt in runc runsc; do
+            echo "##################### E / $rt"
+            docker run --rm --runtime=$rt --network=none \
+              --mount type=tmpfs,destination=/kaas/source,tmpfs-size=8388608,readonly \
+              -v /tmp/observe.sh:/observe.sh:ro \
+              alpine:3.20 /observe.sh /kaas/source 2>&1 || echo "(container failed)"
+          done
+
+      - name: F — can a bootstrap remount a populated tmpfs read-only, and then drop the capability
+        run: |
+          set -uo pipefail
+          for rt in runc runsc; do
+            echo "##################### F / $rt"
+            docker run --rm --runtime=$rt --network=none \
+              --cap-drop=ALL --cap-add=SYS_ADMIN \
+              --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
+              -v /tmp/kaas-exp:/ingress:ro \
+              -v /tmp/observe.sh:/observe.sh:ro \
+              alpine:3.20 sh -c '
+                mkdir -p /kaas/source/files && cp /ingress/files/* /kaas/source/files/ 2>/dev/null
+                echo "--- remount attempt"
+                if mount -o remount,ro,noexec,nosuid,nodev /kaas/source 2>&1; then echo "remount=OK"; else echo "remount=FAILED"; fi
+                /observe.sh /kaas/source' 2>&1 || echo "(container failed)"
+          done
+
+      - name: G — what the daemon actually asked the runtime for
+        run: |
+          set -uo pipefail
+          docker run -d --name kaas-exp-g --runtime=runsc --network=none \
+            -v /tmp/kaas-exp:/kaas/source:ro alpine:3.20 sleep 60 >/dev/null
+          echo "--- docker's view of the mount"
+          docker inspect kaas-exp-g --format '{{json .Mounts}}' | head -c 2000; echo
+          echo "--- the OCI bundle runsc was handed, if reachable"
+          sudo find /run/docker/runtime-runc /run/containerd -name config.json -newermt '-2 minutes' 2>/dev/null | head -5 | while read -r f; do
+            echo "=== $f"; sudo python3 -c "
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          for m in d.get('mounts',[]):
+              if 'kaas' in m.get('destination',''): print(m)
+          " "$f" 2>/dev/null || true
+          done
+          docker rm -f kaas-exp-g >/dev/null 2>&1 || true
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker ps -aq | xargs -r docker rm -f
+          docker volume ls -q --filter name=kaas-exp | xargs -r docker volume rm
