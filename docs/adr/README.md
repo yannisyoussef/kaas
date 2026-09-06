@@ -30,6 +30,7 @@
 | [029](029-continuous-execution-authority.md) | The lease bounds how long a worker may keep executing, not only what it may write: revocation stops a running sandbox, and an unrenewable lease stops it fail-closed | ACCEPTED; ADR-022 stays open |
 | [030](030-inert-tenant-source-delivery.md) | Tenant-authored bytes enter the sandbox as data — mounted read-only, hashed, compared — and are never parsed, executed or interpreted; the mediated mount does not carry `noexec`, and that gap is reported rather than downgraded | ACCEPTED; ADR-022 stays open |
 | [031](031-sandbox-private-hardened-source-filesystem.md) | The source filesystem is a sandbox-private tmpfs a trusted bootstrap populates and then freezes, with no host mount of tenant source at all: `noexec` becomes real, and `nodev` remains unimplemented by the runtime and is reported as a gap | ACCEPTED; supersedes ADR-030's mechanism; ADR-022 stays open |
+| [032](032-tenant-execution-readiness.md) | Tenant Karate is arbitrary JVM code and containment is the boundary; signed evidence binds the runtime binary (attestation v5); the missing `nodev` is accepted with tested compensating controls; one secret-free execution slice is authorized under binding restrictions | ACCEPTED; closes ADR-022's runtime prerequisite |
 
 Deferred topics without active decisions remain: concrete object-storage/upload adapter, secret **delivery**
 mechanism and a real secret provider, outbox and CREATED-run retention policy, self-service quarantine
@@ -109,5 +110,14 @@ What ADR-031 does not close: gVisor does not implement `MS_NODEV`, so the source
 flag and a device node on it would behave as a device. Three other layers stand in its place and none of them
 is the flag. **Tenant code execution remains NOT APPROVED**, blocked on that, on the KAAS-15 runtime-pin
 attestation gap, and on an adjudication no slice has yet performed.
+
+ADR-032 is the first ADR to authorize anything about tenant *code*. It does so by deciding what Karate
+actually is — an interpreter with unrestricted Java interop, verified by disassembling the artifact rather
+than by reading its documentation — and accepting that as arbitrary JVM code the sandbox must contain. It
+closes the runtime-identity gap two earlier slices carried, accepts the runtime's missing `nodev` with tested
+compensating controls, and permits exactly one secret-free execution slice under restrictions listed in
+`docs/security/tenant-execution-readiness.md`.
+
+**Secrets, artifacts and report persistence remain unadjudicated by any ADR.**
 
 `IMPLEMENTED` means verified by repository code or tooling. `PROPOSED` means design intent only. `DEFERRED` means no decision is active and implementation must not assume one.

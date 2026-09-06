@@ -73,7 +73,22 @@ public record RuntimeImplementation(String name, String version, String digest, 
      * @param runtimeName the daemon runtime name the profile requires, e.g. {@code runsc}
      */
     public static RuntimeImplementation measure(DockerClient docker, String runtimeName) {
-        Path configured = registeredPath(docker, runtimeName);
+        return measureAt(runtimeName, registeredPath(docker, runtimeName));
+    }
+
+    /**
+     * The measurement itself, given a path.
+     *
+     * <p>Split from asking the daemon on purpose, and the split is what makes the measurement testable. A
+     * mutation that replaced the whole thing with three constants — a fixed version and a digest of zeroes —
+     * survived the entire suite, because nothing could exercise the measurement without a real daemon. The
+     * two halves fail differently and are worth separating anyway: one is a question about configuration, the
+     * other is a question about a file.
+     *
+     * <p>Package-private. Nothing outside this package can name a path to measure, so there is still no way
+     * to attest to a binary other than the one the daemon registered.
+     */
+    static RuntimeImplementation measureAt(String runtimeName, Path configured) {
         Path real;
         try {
             // toRealPath resolves every symlink in the chain, so the digest below is of the file the daemon
