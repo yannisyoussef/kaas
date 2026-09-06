@@ -179,12 +179,29 @@ jobs:
           print("oversized frame bytes:", len(out))
           PY
 
+      # ROUND FOUR — THE TWO QUESTIONS ROUND THREE LEFT OPEN.
+      #
+      # Round three produced a working mechanism: bootstrap as root with SYS_ADMIN, populate a tmpfs, freeze
+      # it, drop every capability, exec the verifier as 65534. The consumer read back an entirely empty
+      # capability set, could not remount, could not write, and an executable file with mode 0555 on the
+      # hardened filesystem was REFUSED while the identical file on a permissive tmpfs RAN.
+      #
+      # Two things were not settled and both are about whether a claim is real:
+      #
+      #   nodev  — gVisor never prints it. Not on a tmpfs that asked for it, not on Docker's own read-only
+      #            tmpfs, not after the freeze; runc prints it in all three. So the question is no longer
+      #            "does it appear" but "is it honoured while unreported", and that is a behavioural question
+      #            about whether a device node on the frozen filesystem still acts like a device.
+      #
+      #   nosuid — round three's control was broken and said so. The consumer planted the fixture itself, as
+      #            an unprivileged user, which cannot set a setuid-root bit; the control could not have
+      #            escalated whatever the filesystem did. Both fixtures are now planted during construction,
+      #            while the process still has the privilege to make them real.
       - name: Write the boundary observer
         run: |
           cat > /tmp/boundary.sh <<'SH'
           #!/bin/sh
-          # Runs as the unprivileged consumer, after the freeze and after the capability drop. Everything it
-          # reports is read from the process it is actually running in.
+          # Runs as the unprivileged consumer, after the freeze and after the capability drop.
           echo "=== FINAL CONSUMER"
           echo "identity: $(id 2>&1)"
           echo "--- mounts"
@@ -193,28 +210,35 @@ jobs:
           awk '$5 ~ /^\/kaas/ {print}' /proc/self/mountinfo
           echo "--- capabilities and no-new-privs"
           grep -E '^(CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs)' /proc/self/status
-          echo "--- can the consumer remount the source writable?"
+          echo "--- remount attempt"
           if mount -o remount,rw /kaas/source 2>&1; then echo "reremount=OK <-- BAD"; else echo "reremount=REFUSED"; fi
-          echo "--- write to the hardened filesystem"
+          echo "--- write"
           if echo x > /kaas/source/write-probe 2>&1; then echo "hardened_write=ACCEPTED <-- BAD"; else echo "hardened_write=REFUSED"; fi
-          echo "--- CONTROL: an identical fixture on a permissive tmpfs"
-          printf '#!/bin/sh\necho FIXTURE_RAN\n' > /kaas/control/fixture-exec.sh 2>/dev/null
-          chmod 0555 /kaas/control/fixture-exec.sh 2>/dev/null
+          echo "--- fixtures as they actually exist"
+          ls -l /kaas/source/files/ /kaas/control/ 2>&1
+          echo "--- EXEC: control then hardened"
           if /kaas/control/fixture-exec.sh 2>&1; then echo "exec_control=EXECUTED"; else echo "exec_control=REFUSED <-- CONTROL BROKEN"; fi
-          cp /fixtures/whoami-suid /kaas/control/fixture-suid 2>/dev/null
+          if /kaas/source/files/fixture-exec.sh 2>&1; then echo "exec_hardened=EXECUTED <-- BAD"; else echo "exec_hardened=REFUSED"; fi
+          echo "--- SETUID: control then hardened, both planted while privileged"
           out=$(/kaas/control/fixture-suid 2>&1 || echo refused)
           echo "suid_control_output=$out"
           case "$out" in *"euid=0"*) echo "suid_control=ESCALATED";; *) echo "suid_control=NOT_ESCALATED <-- CONTROL BROKEN";; esac
-          echo "--- HARDENED: the same fixtures, with real modes, on the source filesystem"
-          ls -l /kaas/source/files/ 2>&1
-          if /kaas/source/files/fixture-exec.sh 2>&1; then echo "exec_hardened=EXECUTED <-- BAD"; else echo "exec_hardened=REFUSED"; fi
           out=$(/kaas/source/files/fixture-suid 2>&1 || echo refused)
           echo "suid_hardened_output=$out"
           case "$out" in *"euid=0"*) echo "suid_hardened=ESCALATED <-- BAD";; *) echo "suid_hardened=REFUSED";; esac
-          echo "--- device node creation on the hardened filesystem"
-          if mknod /kaas/source/files/dev-probe c 1 3 2>&1; then echo "mknod_hardened=CREATED <-- BAD"; else echo "mknod_hardened=REFUSED"; fi
-          echo "--- device node on the control, to see whether the attempt can succeed at all here"
-          if mknod /kaas/control/dev-probe c 1 3 2>&1; then echo "mknod_control=CREATED"; else echo "mknod_control=REFUSED"; fi
+          echo "--- NODEV: does a device node on each filesystem still act like a device?"
+          # /dev/zero is 1:5. Reading a byte from a working device node yields a NUL; on a nodev mount the
+          # open is refused. This is the only way to tell an unreported-but-honoured nodev from an absent one.
+          if dd if=/kaas/control/fixture-dev bs=1 count=1 >/dev/null 2>/dev/null; then
+            echo "dev_control=READABLE"
+          else
+            echo "dev_control=REFUSED <-- CONTROL BROKEN"
+          fi
+          if dd if=/kaas/source/files/fixture-dev bs=1 count=1 >/dev/null 2>/dev/null; then
+            echo "dev_hardened=READABLE <-- nodev NOT honoured"
+          else
+            echo "dev_hardened=REFUSED <-- nodev honoured though unreported"
+          fi
           echo "--- every mount this consumer can see"
           awk '{print $2, $3}' /proc/self/mounts | sort
           echo "--- bytes"
@@ -223,96 +247,53 @@ jobs:
           SH
           chmod +x /tmp/boundary.sh
 
-      # THE FIXTURES ARE PLANTED BY AN EXPERIMENT-ONLY SHELL, before the bootstrap freezes anything.
-      #
-      # Production has no such path and is not getting one: the bundle format carries a path and bytes and
-      # cannot express a mode. The fixtures exist so that "noexec refused it" is distinguishable from "the
-      # file was not executable", which is precisely the confusion KAAS-18 ended on.
-      # ROUND THREE — WHICH PRIVILEGE THE CONSTRUCTION PHASE ACTUALLY NEEDS.
-      #
-      # Round two failed at PRIVILEGE_DROP: setgid and setuid need CAP_SETGID and CAP_SETUID, which the run
-      # did not grant. There are two ways out and they are not equivalent.
-      #
-      #   Q asks for none of them: the launcher starts the process as the sandbox user already, so there is
-      #     no identity transition to make and SYS_ADMIN is the only extra capability in play.
-      #   R grants SETUID, SETGID and SETPCAP and starts as root, which is the shape that needs justifying.
-      #
-      # Q is the design worth having if it works, because it makes the construction phase differ from the
-      # consumer in exactly one capability. Measuring both is what makes that a finding rather than a
-      # preference.
-      - name: Q — the sandbox user throughout, with SYS_ADMIN as the only extra capability
+      # Every fixture is planted during construction, while the process still holds the privilege that makes
+      # a setuid bit and a device node real. A control planted by the unprivileged consumer is not a control.
+      - name: T — the mechanism with honest controls, both runtimes
         run: |
           set -uo pipefail
-          echo "##################### Q / runsc"
-          docker run --rm -i --runtime=runsc --network=none \
-            --user 65534:65534 \
-            --cap-drop=ALL --cap-add=SYS_ADMIN \
-            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m,mode=0755,uid=65534,gid=65534 \
-            --tmpfs /kaas/control:rw,exec,suid,dev,size=8m,mode=0777 \
-            -v /tmp/build/source-bootstrap:/bootstrap:ro \
-            -v /tmp/fixtures:/fixtures:ro \
-            -v /tmp/boundary.sh:/probe.sh:ro \
-            alpine:3.20 /bootstrap < /tmp/bundle.frame 2>&1 || echo "(container exited non-zero)"
+          for rt in runc runsc; do
+            echo "##################### T / $rt"
+            docker run --rm -i --runtime=$rt --network=none \
+              --cap-drop=ALL --cap-add=SYS_ADMIN --cap-add=SETUID --cap-add=SETGID --cap-add=SETPCAP --cap-add=MKNOD --cap-add=CHOWN --cap-add=FOWNER \
+              --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
+              --tmpfs /kaas/control:rw,exec,suid,dev,size=8m,mode=0777 \
+              -v /tmp/build/source-bootstrap:/bootstrap:ro \
+              -v /tmp/fixtures:/fixtures:ro \
+              -v /tmp/boundary.sh:/probe.sh:ro \
+              alpine:3.20 sh -c '
+                mkdir -p /kaas/source/files
+                for d in /kaas/source/files /kaas/control; do
+                  printf "#!/bin/sh\necho FIXTURE_RAN\n" > $d/fixture-exec.sh
+                  chmod 0555 $d/fixture-exec.sh
+                  cp /fixtures/whoami-suid $d/fixture-suid
+                  chown 0:0 $d/fixture-suid
+                  chmod 4755 $d/fixture-suid
+                  mknod $d/fixture-dev c 1 5 2>&1 || echo "mknod on $d failed"
+                  chmod 0444 $d/fixture-dev 2>/dev/null
+                done
+                ls -l /kaas/source/files /kaas/control
+                exec /bootstrap' < /tmp/bundle.frame 2>&1 || echo "(container exited non-zero)"
+          done
 
-      - name: Q2 — the same, with an executable and a setuid fixture on the hardened filesystem
+      - name: U — does gVisor honour MS_NODEV at all, with no freeze involved
         run: |
           set -uo pipefail
-          echo "##################### Q2 / runsc"
-          docker run --rm -i --runtime=runsc --network=none \
-            --user 0:0 \
-            --cap-drop=ALL --cap-add=SYS_ADMIN --cap-add=SETUID --cap-add=SETGID --cap-add=SETPCAP --cap-add=CHOWN --cap-add=FOWNER \
-            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
-            --tmpfs /kaas/control:rw,exec,suid,dev,size=8m,mode=0777 \
-            -v /tmp/build/source-bootstrap:/bootstrap:ro \
-            -v /tmp/fixtures:/fixtures:ro \
-            -v /tmp/boundary.sh:/probe.sh:ro \
-            alpine:3.20 sh -c '
-              mkdir -p /kaas/source/files
-              printf "#!/bin/sh\necho FIXTURE_RAN\n" > /kaas/source/files/fixture-exec.sh
-              chmod 0555 /kaas/source/files/fixture-exec.sh
-              cp /fixtures/whoami-suid /kaas/source/files/fixture-suid
-              chown 0:0 /kaas/source/files/fixture-suid
-              chmod 4755 /kaas/source/files/fixture-suid
-              exec /bootstrap' < /tmp/bundle.frame 2>&1 || echo "(container exited non-zero)"
-
-      - name: R — root plus the identity capabilities, the fallback shape
-        run: |
-          set -uo pipefail
-          echo "##################### R / runsc"
-          docker run --rm -i --runtime=runsc --network=none \
-            --cap-drop=ALL --cap-add=SYS_ADMIN --cap-add=SETUID --cap-add=SETGID --cap-add=SETPCAP \
-            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
-            --tmpfs /kaas/control:rw,exec,suid,dev,size=8m,mode=0777 \
-            -v /tmp/build/source-bootstrap:/bootstrap:ro \
-            -v /tmp/fixtures:/fixtures:ro \
-            -v /tmp/boundary.sh:/probe.sh:ro \
-            alpine:3.20 /bootstrap < /tmp/bundle.frame 2>&1 || echo "(container exited non-zero)"
-
-      - name: S — the negative controls for the mechanism as a whole
-        run: |
-          set -uo pipefail
-          echo "##################### S1 / runsc  (no SYS_ADMIN: the freeze must fail and nothing may be ready)"
-          docker run --rm -i --runtime=runsc --network=none \
-            --user 65534:65534 --cap-drop=ALL \
-            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m,mode=0755,uid=65534,gid=65534 \
-            -v /tmp/build/source-bootstrap:/bootstrap:ro \
-            -v /tmp/boundary.sh:/probe.sh:ro \
-            alpine:3.20 /bootstrap < /tmp/bundle.frame 2>&1 | head -8 || echo "(exited non-zero)"
-          echo "##################### S2 / runsc  (a frame that does not fit)"
-          docker run --rm -i --runtime=runsc --network=none \
-            --user 65534:65534 --cap-drop=ALL --cap-add=SYS_ADMIN \
-            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m,mode=0755,uid=65534,gid=65534 \
-            -v /tmp/build/source-bootstrap:/bootstrap:ro \
-            -v /tmp/boundary.sh:/probe.sh:ro \
-            alpine:3.20 /bootstrap < /tmp/big.frame 2>&1 | head -8 || echo "(exited non-zero)"
-          echo "##################### S3 / runsc  (a truncated frame)"
-          head -c 40 /tmp/bundle.frame > /tmp/short.frame
-          docker run --rm -i --runtime=runsc --network=none \
-            --user 65534:65534 --cap-drop=ALL --cap-add=SYS_ADMIN \
-            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m,mode=0755,uid=65534,gid=65534 \
-            -v /tmp/build/source-bootstrap:/bootstrap:ro \
-            -v /tmp/boundary.sh:/probe.sh:ro \
-            alpine:3.20 /bootstrap < /tmp/short.frame 2>&1 | head -8 || echo "(exited non-zero)"
+          for rt in runc runsc; do
+            echo "##################### U / $rt   (plain tmpfs, nodev requested, no remount)"
+            docker run --rm --runtime=$rt --network=none \
+              --cap-drop=ALL --cap-add=MKNOD \
+              --tmpfs /kaas/nodev:rw,noexec,nosuid,nodev,size=8m \
+              --tmpfs /kaas/dev:rw,exec,suid,dev,size=8m \
+              alpine:3.20 sh -c '
+                echo "nodev mount: $(awk "\$2==\"/kaas/nodev\"" /proc/self/mounts)"
+                echo "dev   mount: $(awk "\$2==\"/kaas/dev\"" /proc/self/mounts)"
+                mknod /kaas/nodev/zero c 1 5 && echo "mknod_on_nodev=CREATED" || echo "mknod_on_nodev=REFUSED"
+                mknod /kaas/dev/zero c 1 5 && echo "mknod_on_dev=CREATED" || echo "mknod_on_dev=REFUSED"
+                dd if=/kaas/dev/zero bs=1 count=1 >/dev/null 2>/dev/null && echo "read_dev=OK" || echo "read_dev=REFUSED"
+                dd if=/kaas/nodev/zero bs=1 count=1 >/dev/null 2>/dev/null && echo "read_nodev=OK <-- NOT honoured" || echo "read_nodev=REFUSED <-- honoured"
+              ' 2>&1 || echo "(container failed)"
+          done
 
       - name: Clean up
         if: always()
