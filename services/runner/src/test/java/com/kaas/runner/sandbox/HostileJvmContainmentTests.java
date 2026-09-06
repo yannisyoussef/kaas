@@ -93,6 +93,9 @@ class HostileJvmContainmentTests {
         // cannot express a device node. Each of those is asserted elsewhere; this asks the question from the
         // attacker's side, with a real JVM, against a real delivered bundle.
         var observations = runWithSource(SyntheticProbe.HOSTILE_JVM);
+        // This case carries both halves of what the gate reads back: the source-filesystem attempts, which
+        // need a delivered bundle, and the containment observations, which do not.
+        record(run(SyntheticProbe.HOSTILE_JVM), observations);
 
         assertThat(observations)
                 .as("a device node on the source filesystem is what nodev would have prevented: %s", observations)
@@ -170,6 +173,53 @@ class HostileJvmContainmentTests {
         assertThat(Integer.parseInt(observations.get("jvm_threads_started")))
                 .as("the PID ceiling bounds Java threads: %s", observations.get("jvm_thread_limit"))
                 .isLessThan(200);
+    }
+
+    /**
+     * Writes what the JVM observed where the gate can read it back.
+     *
+     * <p>Platform-defined keys and platform-defined values. The environment is deliberately absent: the suite
+     * asserts what its NAMES do not contain, and writing them into a CI log would publish whatever a future
+     * defect had put there.
+     */
+    private static void record(Map<String, String> containment, Map<String, String> withSource) {
+        String directory = System.getenv("RUNNER_TEMP");
+        if (directory == null || directory.isBlank()) {
+            return; // Off CI there is no gate to read it.
+        }
+        StringBuilder evidence = new StringBuilder();
+        evidence.append("java_capabilities=").append(containment.get("jvm_capabilities")).append('\n');
+        evidence.append("java_no_new_privs=").append(containment.get("jvm_no_new_privs")).append('\n');
+        evidence.append("java_source_write=").append(withSource.get("jvm_source_write")).append('\n');
+        evidence.append("java_source_exec=").append(withSource.get("jvm_source_exec")).append('\n');
+        evidence.append("java_source_chmod=").append(withSource.get("jvm_source_chmod")).append('\n');
+        evidence.append("java_remount=").append(withSource.get("jvm_remount")).append('\n');
+        evidence.append("java_mknod=").append(withSource.get("jvm_mknod")).append('\n');
+        evidence.append("java_tmp_write=").append(containment.get("jvm_tmp_write")).append('\n');
+        evidence.append("java_tmp_exec=").append(containment.get("jvm_tmp_exec")).append('\n');
+        evidence.append("java_dns=").append(containment.get("jvm_dns")).append('\n');
+        evidence.append("java_raw_direct_egress=")
+                .append("true".equals(containment.get("jvm_raw_socket_public"))
+                                || "true".equals(containment.get("jvm_raw_socket_metadata"))
+                        ? "true"
+                        : "false")
+                .append('\n');
+        evidence.append("java_docker_socket=").append(containment.get("jvm_docker_socket")).append('\n');
+        evidence.append("java_child_spawned=").append(containment.get("jvm_child_spawn")).append('\n');
+        evidence.append("java_threads_started=").append(containment.get("jvm_threads_started")).append('\n');
+        evidence.append("java_threads_bounded=")
+                .append(Integer.parseInt(containment.getOrDefault("jvm_threads_started", "999")) < 200)
+                .append('\n');
+        try {
+            java.nio.file.Files.writeString(
+                    java.nio.file.Path.of(directory, "hostile-jvm-evidence.txt"),
+                    evidence.toString(),
+                    StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (java.io.IOException unwritable) {
+            throw new java.io.UncheckedIOException(unwritable);
+        }
     }
 
     private Map<String, String> run(SyntheticProbe probe) {

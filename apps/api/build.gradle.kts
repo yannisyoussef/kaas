@@ -73,6 +73,12 @@ val verifySandboxSecurityAttestation = tasks.register<JavaExec>("verifySandboxSe
         providers.gradleProperty("kaasAttestationProfileVersion").orNull?.let {
             systemProperty("kaas.attestation.verify.profile-version", it)
         }
+        // The runtime binaries the caller accepts. Omitted means "whatever this document measured", which is
+        // a reporting default and not a policy: it lets an operator ask everything-except-the-implementation.
+        // A deployment that configures none accepts none.
+        providers.gradleProperty("kaasAttestationRuntimeImplementations").orNull?.let {
+            systemProperty("kaas.attestation.verify.runtime-implementations", it)
+        }
     }
 }
 

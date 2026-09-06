@@ -515,6 +515,40 @@ jobs:
           grep -q "^mandatoryControls=$expected" "$RUNNER_TEMP/mediated-verification.txt"
           grep -q '^controlsNotPassing=\[\]' "$RUNNER_TEMP/mediated-verification.txt"
 
+          # WHICH BINARY THE EVIDENCE DESCRIBES, and whether the control plane actually checks it.
+          #
+          # The producer measured the runtime from the daemon's own registration; there is no option that
+          # sets these, so what the document says is what was on disk. This reads them back and compares the
+          # digest against the file this job installed, because a producer that measured the wrong binary
+          # would be confident evidence about a program the daemon will never run.
+          grep -q '^runtimeImplementationName=runsc$' "$RUNNER_TEMP/mediated-verification.txt"
+          installed=$(sha256sum /usr/local/bin/runsc | cut -d" " -f1)
+          grep -q "^runtimeImplementationDigest=sha256:$installed$" "$RUNNER_TEMP/mediated-verification.txt"
+          grep -q '^runtimeImplementationVersion=runsc version' "$RUNNER_TEMP/mediated-verification.txt"
+          echo "runtime_name=runsc"
+          echo "runtime_sha256=$installed"
+          echo "runtime_version=$(runsc --version | head -1)"
+          echo "attestation_verification=VALID"
+
+          # AND THE INVARIANT THAT MAKES ANY OF IT WORTH SIGNING: evidence for one runtime binary must not
+          # authorize execution under another.
+          #
+          # Everything else is held constant -- same daemon, same profile, same key, same subject, same
+          # controls, same document -- and only the accepted implementation is changed to a different digest.
+          # If this authorized, then replacing runsc would leave every existing attestation valid, which is
+          # exactly the gap KAAS-20 exists to close.
+          if ./gradlew :apps:api:verifySandboxSecurityAttestation --no-daemon -q \
+              -PkaasAttestationDocument="$RUNNER_TEMP/mediated-attestation.json" \
+              -PkaasAttestationTrustedKeys="kaas-test-key-1=$public" \
+              -PkaasAttestationRuntimeSubjects=kaas.runtime.github-actions \
+              -PkaasAttestationProfileVersion=kaas.sandbox.gvisor.v1 \
+              -PkaasAttestationRuntimeImplementations="sha256:$(printf 'b%.0s' $(seq 64))" \
+              | grep -q '^authorizes=true'; then
+            echo "Evidence for one runtime binary authorized execution under another." >&2
+            exit 1
+          fi
+          echo "runtime_change_invalidates_evidence=true"
+
           # AND THE NEGATIVE. The same authentic document must NOT authorize a deployment running the
           # baseline: evidence for one boundary is not evidence for the other.
           if ./gradlew :apps:api:verifySandboxSecurityAttestation --no-daemon -q \
@@ -563,12 +597,12 @@ jobs:
           echo "executed=$executed skipped=$skipped"
           # Zero skips is the load-bearing half. A suite that skipped itself because the runtime was absent is
           # exactly the outcome this job exists to make impossible.
-          if [ "$executed" -lt 12 ] || [ "$skipped" -ne 0 ]; then
-            echo "Expected at least 12 executed tests and no skips." >&2
+          if [ "$executed" -lt 19 ] || [ "$skipped" -ne 0 ]; then
+            echo "Expected at least 19 executed tests and no skips." >&2
             exit 1
           fi
           for suite in StrongRuntimeBoundaryTests StrongRuntimeAuthorityRevocationTests \
-                       MediatedSourceFilesystemBoundaryTests; do
+                       MediatedSourceFilesystemBoundaryTests HostileJvmContainmentTests; do
             if ! ls "$results" | grep -q "$suite"; then
               echo "$suite did not run." >&2
               exit 1
@@ -635,6 +669,41 @@ jobs:
           # the NO_NEW_PRIVILEGES control. Asserted as unsupported rather than dropped, so a runtime that
           # gains it fails here and the claim gets upgraded rather than quietly assumed.
           grep -q '^source_no_new_privileges=unsupported$' "$evidence"
+
+      # WHAT THE BOUNDARY DOES WHEN THE WORKLOAD IS A JVM.
+      #
+      # Every other hostile probe here is a shell script. The engine that would run tenant code is a JVM, and
+      # Karate 2.1.2 resolves Java.type to Class.forName with no allowlist -- so tenant source is arbitrary
+      # JVM code and this is the posture that actually matters.
+      - name: Report the hostile JVM containment evidence
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/hostile-jvm-evidence.txt"
+          if [ ! -f "$evidence" ]; then
+            echo "The hostile JVM suite produced no evidence file; it cannot have run a JVM." >&2
+            exit 1
+          fi
+          cat "$evidence"
+          # The process a future engine would be, read out of its own /proc.
+          grep -q '^java_capabilities=EMPTY$' "$evidence"
+          grep -q '^java_no_new_privs=1$' "$evidence"
+          # The source filesystem, attacked from Java rather than from shell.
+          grep -q '^java_source_write=false$' "$evidence"
+          grep -q '^java_source_exec=false$' "$evidence"
+          grep -q '^java_remount=false$' "$evidence"
+          # THE COMPENSATING CONTROL FOR THE MISSING nodev, from the attacker's side.
+          grep -q '^java_mknod=false$' "$evidence"
+          # Generated code: the write must succeed and the execution must not, or noexec on /kaas/source
+          # would be irrelevant to a workload that writes its own program.
+          grep -q '^java_tmp_write=true$' "$evidence"
+          grep -q '^java_tmp_exec=false$' "$evidence"
+          # Raw Java networking, ignoring any engine's own HTTP client.
+          grep -q '^java_raw_direct_egress=false$' "$evidence"
+          grep -q '^java_dns=false$' "$evidence"
+          # Not findings, recorded because the model says so: arbitrary code may spawn and thread, and the
+          # profile must bound it.
+          grep -q '^java_child_spawned=true$' "$evidence"
+          grep -qE '^java_threads_bounded=true$' "$evidence"
 
       # Tenant bytes are the one thing in this repository that must not survive the job that used them.
       - name: Confirm no tenant source outlived the gate
