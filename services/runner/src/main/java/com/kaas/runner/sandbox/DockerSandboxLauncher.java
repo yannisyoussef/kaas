@@ -180,6 +180,25 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                 .withRuntime(profile.runtime().daemonRuntimeName())
                 .withAutoRemove(false);
 
+        if (profile.sourceMount() != null) {
+            // INERT TENANT SOURCE, READ-ONLY.
+            //
+            // Both sides of this bind are platform-owned: the host side is an opaque directory under the
+            // operator's staging root, and the container side is a fixed constant. No tenant byte contributes
+            // to either, which is what keeps "source is data" true at the mount as well as in the format.
+            //
+            // Read-only is measured rather than assumed -- see the mount evidence in
+            // docs/security/tenant-source-delivery.md, which also records, honestly, that noexec does NOT
+            // survive onto a gofer-backed mount under the mediating runtime. That gap is why the materialiser
+            // writes every file without an executable bit and why the format cannot express one, and it is
+            // reported rather than papered over.
+            hostConfig.withMounts(java.util.List.of(new com.github.dockerjava.api.model.Mount()
+                    .withType(com.github.dockerjava.api.model.MountType.BIND)
+                    .withSource(profile.sourceMount().toAbsolutePath().toString())
+                    .withTarget(com.kaas.runner.source.SourceBundleContract.CONTAINER_PATH)
+                    .withReadOnly(true)));
+        }
+
         CreateContainerResponse created = createOrRefuse(hostConfig, request);
         return created.getId();
     }

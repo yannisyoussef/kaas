@@ -262,7 +262,8 @@ class StrongRuntimeBoundaryTests {
                 base.maximumOutputBytes(),
                 base.maximumLogBytes(),
                 base.environment(),
-                base.runtime());
+                base.runtime(),
+                base.sourceMount());
 
         SandboxOutcome outcome = SandboxTestSupport.launcher(withCeiling, GENERATION)
                 .run(new SandboxLaunchRequest(

@@ -110,6 +110,47 @@ public final class ControlPlaneClient {
         }
     }
 
+    /**
+     * Exchanges a source capability for the bytes it authorizes, bounded while reading.
+     *
+     * <p>One attempt. A redemption consumes a bounded number of tries and must not be retried blindly by a
+     * transport layer that does not know that.
+     *
+     * <p>The ceiling is enforced on what actually arrives, not on {@code Content-Length}: a peer can send a
+     * wrong length, no length, or more bytes than it declared, and the only number that bounds this host's
+     * memory is the one counted here. Reading stops the moment the ceiling is passed.
+     *
+     * <p>The capability token travels in a header and is never logged, never persisted, and never placed in a
+     * URL where it would reach an access log.
+     */
+    public byte[] redeemSourceBundle(String capabilityToken, long maximumBytes) throws ControlPlaneUnavailable {
+        HttpRequest request = HttpRequest.newBuilder(baseUri.resolve("/internal/v1/source-bundles"))
+                .timeout(requestTimeout)
+                .header("Authorization", authorization)
+                .header("X-KaaS-Source-Capability", capabilityToken)
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+        try {
+            HttpResponse<java.io.InputStream> response =
+                    http.send(request, HttpResponse.BodyHandlers.ofInputStream());
+            try (java.io.InputStream body = response.body()) {
+                if (response.statusCode() != 200) {
+                    return null;
+                }
+                byte[] bytes = body.readNBytes((int) Math.min(maximumBytes + 1, Integer.MAX_VALUE));
+                if (bytes.length > maximumBytes) {
+                    throw new ControlPlaneUnavailable("A source bundle exceeded its ceiling.", null);
+                }
+                return bytes;
+            }
+        } catch (java.io.IOException transport) {
+            throw new ControlPlaneUnavailable("The source bundle could not be retrieved.", transport);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new ControlPlaneUnavailable("Interrupted while retrieving a source bundle.", interrupted);
+        }
+    }
+
     /** Revalidates this assignment's authority and returns a fresh command. */
     public Response authorize(UUID runId, UUID attemptId, String body) throws ControlPlaneUnavailable {
         return post(

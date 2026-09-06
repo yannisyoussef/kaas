@@ -275,32 +275,32 @@ class HostileExecutionBoundaryTests {
         // validation is something you can forget to call and a constructor is not.
         assertThatThrownBy(() -> new SandboxSecurityProfile(
                         "weak", PINNED, SandboxSecurityProfile.NOBODY, true, true, List.of("ALL"), List.of(),
-                        "bridge", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER))
+                        "bridge", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER, null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("no network");
         assertThatThrownBy(() -> new SandboxSecurityProfile(
                         "weak", PINNED, SandboxSecurityProfile.NOBODY, false, true, List.of("ALL"), List.of(),
-                        "none", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER))
+                        "none", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER, null))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new SandboxSecurityProfile(
                         "weak", PINNED, "0:0", true, true, List.of("ALL"), List.of(), "none",
-                        1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER))
+                        1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER, null))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new SandboxSecurityProfile(
                         "weak", PINNED, SandboxSecurityProfile.NOBODY, true, true, List.of("ALL"),
-                        List.of("SYS_ADMIN"), "none", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER))
+                        List.of("SYS_ADMIN"), "none", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER, null))
                 .isInstanceOf(IllegalArgumentException.class);
         // Swap must be pinned to the memory limit, or a workload evades the ceiling by swapping past it.
         assertThatThrownBy(() -> new SandboxSecurityProfile(
                         "weak", PINNED, SandboxSecurityProfile.NOBODY, true, true, List.of("ALL"), List.of(),
-                        "none", 1024, 4096, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER))
+                        "none", 1024, 4096, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER, null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Swap");
         // A tag is a mutable pointer to executable code. A probe image that can be substituted reports
         // whatever its substitute likes, which would invalidate every behavioural claim the gate makes.
         assertThatThrownBy(() -> new SandboxSecurityProfile(
                         "weak", "busybox:latest", SandboxSecurityProfile.NOBODY, true, true, List.of("ALL"),
-                        List.of(), "none", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER))
+                        List.of(), "none", 1, 1, 1, 1, 1, 1, Duration.ofSeconds(1), 1, 1, Map.of(), ExecutionRuntimeType.DOCKER, null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("digest");
     }

@@ -44,7 +44,18 @@ public record SandboxSecurityProfile(
          * profile version is derived from it, so an attestation gathered under one runtime cannot vouch for a
          * sandbox under another.
          */
-        ExecutionRuntimeType runtime) {
+        ExecutionRuntimeType runtime,
+        /**
+         * The host directory holding this execution's inert tenant source, or null when there is none.
+         *
+         * <p>A host path, and platform-owned in every part: the staging root is operator configuration and the
+         * directory beneath it is an opaque identifier. No tenant byte contributes to it. It is mounted
+         * read-only at a fixed container path that is likewise never derived from tenant input.
+         *
+         * <p>Null for every sandbox that carries no source, which is every probe this repository runs outside
+         * a tenant assignment.
+         */
+        java.nio.file.Path sourceMount) {
 
     /** The only user a sandbox ever runs as: nobody, with no supplementary groups. */
     public static final String NOBODY = "65534:65534";
@@ -241,7 +252,11 @@ public record SandboxSecurityProfile(
                 Map.copyOf(environment),
                 // The runtime is carried through unchanged. A networked derivative is the SAME boundary with a
                 // peer added; deriving it from a different runtime would silently be a different boundary.
-                base.runtime());
+                base.runtime(),
+                // And so is the source mount, for the same reason. Previous slices found the networked
+                // derivative losing a property the deny-all profile had; a source mount lost here would mean
+                // an allowlist execution ran with no source rather than failing.
+                base.sourceMount());
     }
 
     /** The baseline profile, under the standard OCI runtime. */
@@ -257,6 +272,41 @@ public record SandboxSecurityProfile(
      * the version string, because the same control can be enforced by different mechanisms and observed
      * through different evidence, and an assessment must not be transferable between them.
      */
+    /**
+     * The same profile, carrying one execution's inert tenant source.
+     *
+     * <p>Derived rather than constructed, so a source-bearing sandbox differs from an ordinary one in exactly
+     * one component and cannot quietly differ in another. The version string is unchanged: the security
+     * profile is the same profile, and the evidence gathered under it describes the same boundary.
+     *
+     * @param sourceMount a platform-owned host directory. Never derived from tenant input.
+     */
+    public static SandboxSecurityProfile withSource(
+            SandboxSecurityProfile base, java.nio.file.Path sourceMount) {
+        java.util.Objects.requireNonNull(sourceMount, "A source-bearing profile names its staging directory.");
+        return new SandboxSecurityProfile(
+                base.version(),
+                base.imageReference(),
+                base.runAsUser(),
+                base.readOnlyRootFilesystem(),
+                base.noNewPrivileges(),
+                base.droppedCapabilities(),
+                base.addedCapabilities(),
+                base.networkMode(),
+                base.memoryLimitBytes(),
+                base.memorySwapLimitBytes(),
+                base.cpuQuotaMicroseconds(),
+                base.cpuPeriodMicroseconds(),
+                base.pidsLimit(),
+                base.temporaryFilesystemBytes(),
+                base.wallClockTimeout(),
+                base.maximumOutputBytes(),
+                base.maximumLogBytes(),
+                base.environment(),
+                base.runtime(),
+                sourceMount);
+    }
+
     public static SandboxSecurityProfile version1(
             String imageReference, ExecutionRuntimeType runtime) {
         return new SandboxSecurityProfile(
@@ -286,6 +336,9 @@ public record SandboxSecurityProfile(
                 // An explicit allowlist built from nothing, never the host environment with secrets removed
                 // afterwards. Subtraction requires knowing every name worth removing, which nobody does.
                 Map.of("KAAS_SANDBOX", "1", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
-                runtime);
+                runtime,
+                // No source. Every profile that carries one is derived from this, so a sandbox with tenant
+                // bytes is always the explicit case rather than the default.
+                null);
     }
 }

@@ -1,0 +1,17 @@
+{
+  "$comment": "The bounds of an inert tenant source bundle. Two modules must agree on these and neither may import the other: apps/api assembles and digests the bundle, services/runner independently re-verifies it before anything is mounted. A contract test on each side asserts its own constants equal this file, so a limit relaxed on one side without the other fails the build rather than silently admitting a bundle the other would refuse.",
+  "formatVersion": "kaas.source-bundle.v1",
+  "$limitsComment": "Platform-owned, never tenant-controlled. maxEntries is the sealed snapshot's selection ceiling; maxTotalBytes bounds the whole bundle because a run may select many features and a per-feature bound alone does not stop aggregate exhaustion; maxEntryBytes independently corroborates the per-FeatureRevision ceiling at delivery, so a corrupted internal response cannot hand over an oversized entry merely because the database normally prevents one; maxPathLength bounds a logical path.",
+  "limits": {
+    "maxEntries": 1000,
+    "maxTotalBytes": 67108864,
+    "maxEntryBytes": 1048576,
+    "maxPathLength": 512
+  },
+  "$mountComment": "Where the bundle appears inside the sandbox, and what the sandbox must observe about it. The path is platform-owned and fixed: it is never derived from tenant input. See docs/security/tenant-source-delivery.md for which of these flags are enforced by the mount under which runtime, which is not uniform and is not claimed to be.",
+  "mount": {
+    "containerPath": "/kaas/source",
+    "manifestName": "manifest.tsv",
+    "filesDirectory": "files"
+  }
+}

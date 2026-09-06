@@ -306,6 +306,96 @@ sleep)
     sleep "${2:-3600}"
     emit sleep_completed true
     ;;
+sourceverify)
+    # THE PLATFORM'S SOURCE VERIFIER. It reads tenant bytes and hashes them. It does not interpret them.
+    #
+    # Every file is an opaque byte sequence here. There is no parser, no syntax check, no include resolution
+    # and no evaluation of any kind -- not because those would be hard, but because this slice delivers source
+    # as DATA and an engine is a different decision with a different adjudication.
+    #
+    # THE AUTHORITATIVE CHECK IS THIS ONE. The runner already verified the bundle before staging it, and that
+    # verification describes bytes on the host at a moment that has passed. This recomputes the digests from
+    # the files the sandbox ACTUALLY SEES, which is the only view that can still be true when the workload
+    # runs.
+    emit_tooling sha256sum awk
+    root=/kaas/source
+    manifest="$root/manifest.tsv"
+
+    if [ ! -f "$manifest" ]; then
+        emit source_manifest missing
+        emit workload_outcome FAILED
+        exit 0
+    fi
+
+    # What the sandbox observes about its own mount. Reported rather than asserted here: the gate decides
+    # what is required, and a probe that judged its own boundary would be marking its own work.
+    mountline=$(awk '$2 == "/kaas/source" {print $4; exit}' /proc/self/mounts 2>/dev/null || true)
+    emit source_mount_options "${mountline:-absent}"
+    emit source_mount_ro "$(case ",${mountline}," in *,ro,*) echo true;; *) echo false;; esac)"
+    emit source_mount_noexec "$(case ",${mountline}," in *,noexec,*) echo true;; *) echo false;; esac)"
+    emit source_mount_nosuid "$(case ",${mountline}," in *,nosuid,*) echo true;; *) echo false;; esac)"
+    emit source_mount_nodev "$(case ",${mountline}," in *,nodev,*) echo true;; *) echo false;; esac)"
+
+    # WRITE REFUSAL, OBSERVED. A mount that reports ro and accepts a write is a mount that reports.
+    if echo probe 2>/dev/null > "$root/kaas-write-probe"; then
+        emit source_write_refused false
+        rm -f "$root/kaas-write-probe" 2>/dev/null
+    else
+        emit source_write_refused true
+    fi
+
+    # No setuid or setgid anywhere under the source root. The bundle format cannot express a mode and the
+    # materialiser writes none, so this is the observation that both are true of what actually arrived.
+    emit source_setuid_files "$(find "$root" \( -perm -4000 -o -perm -2000 \) -type f 2>/dev/null | wc -l | tr -d ' ')"
+    # Nothing but regular files and directories. A symlink, device node, socket or FIFO under here would mean
+    # something other than the materialiser created it.
+    emit source_irregular_entries "$(find "$root" ! -type f ! -type d 2>/dev/null | wc -l | tr -d ' ')"
+
+    format=$(awk 'NR==1 {print $1}' "$manifest")
+    expected_digest=$(awk 'NR==1 {print $2}' "$manifest")
+    expected_count=$(awk 'NR==1 {print $3}' "$manifest")
+    emit source_format "$format"
+    emit source_entry_count "$expected_count"
+
+    # Every entry the manifest names, hashed from the mounted file. A path in the manifest that is not there,
+    # or whose bytes differ, fails -- and so does a file present under the root that the manifest never named.
+    mismatches=0
+    checked=0
+    while IFS="$(printf '\t')" read -r path digest size; do
+        [ -z "$path" ] && continue
+        file="$root/files/$path"
+        if [ ! -f "$file" ]; then
+            mismatches=$((mismatches + 1))
+            continue
+        fi
+        actual="sha256:$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
+        actual_size=$(wc -c < "$file" 2>/dev/null | tr -d ' ')
+        if [ "$actual" != "$digest" ] || [ "$actual_size" != "$size" ]; then
+            mismatches=$((mismatches + 1))
+        fi
+        checked=$((checked + 1))
+    done <<MANIFEST
+$(tail -n +2 "$manifest")
+MANIFEST
+
+    present=$(find "$root/files" -type f 2>/dev/null | wc -l | tr -d ' ')
+    emit source_entries_verified "$checked"
+    emit source_entries_present "$present"
+    emit source_entry_mismatches "$mismatches"
+
+    # ONE BIT LEAVES THIS SANDBOX. Every observation above is diagnostic; the authoritative outcome is a
+    # platform-defined PASS or FAIL, and no tenant filename or source byte appears in either.
+    if [ "$mismatches" -eq 0 ] \
+        && [ "$checked" = "$expected_count" ] \
+        && [ "$present" = "$expected_count" ] \
+        && [ "$format" = "kaas.source-bundle.v1" ]; then
+        emit workload_identity KAAS_SYNTHETIC_V1
+        emit workload_outcome PASSED
+    else
+        emit workload_identity KAAS_SYNTHETIC_V1
+        emit workload_outcome FAILED
+    fi
+    ;;
 hostileoutput)
     # OUTPUT SHAPED LIKE AN ATTACK ON THE READER, not on the sandbox.
     #

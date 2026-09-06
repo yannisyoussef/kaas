@@ -46,6 +46,19 @@ public enum SyntheticProbe {
      */
     HOSTILE_OUTPUT(List.of("hostileoutput")),
 
+    /**
+     * Verifies inert tenant source from inside the sandbox, against the manifest mounted with it.
+     *
+     * <p>The platform's own verifier, and the only executable that ever sees tenant bytes. It reads every
+     * file as an opaque byte sequence and hashes it. It does not parse them, does not look for a syntax, does
+     * not resolve anything they mention, and cannot: the whole implementation is a shell script in this
+     * repository that runs {@code sha256sum} over each path the manifest names.
+     *
+     * <p>Its arguments are fixed here like every other probe's. Nothing a tenant supplies reaches its command
+     * line, its environment, or the path it reads from.
+     */
+    WORKLOAD_SOURCE_VERIFY(List.of("sourceverify")),
+
     // The two below are not security probes. Every value above exists to attack the sandbox's own
     // confinement and prove it holds; these two are the platform's synthetic WORKLOAD, and they are what a
     // run actually executes in this slice. They live in the same enumeration because they run through the

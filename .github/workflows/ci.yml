@@ -472,45 +472,6 @@ jobs:
             exit 1
           fi
 
-      # TEMPORARY INVESTIGATION ROUND 2 — removed once the mechanism is chosen.
-      #
-      # Round 1 measured that the `local` volume driver's bind flags are honoured by runc and DROPPED by
-      # gVisor's gofer: the mount listed only `ro` and a script on it executed. That is the STOP condition in
-      # KAAS-17's requirement 1, so before declaring it a blocker this establishes whether gVisor honours
-      # these flags AT ALL when they reach it, and by which mechanism they can be made to.
-      - name: Measure how the mediating runtime honours mount flags
-        run: |
-          set -euo pipefail
-          probe() {
-            label="$1"; shift
-            echo "===== $label"
-            docker run --rm --runtime=runsc --network=none "$@" alpine:3.20 sh -c '
-              cp /bin/busybox /kaas/source/runnable 2>/dev/null || true
-              chmod 4755 /kaas/source/runnable 2>/dev/null || true
-              grep " /kaas/source " /proc/self/mounts || echo "(not listed)"
-              printf "#!/bin/sh\necho EXECUTED\n" > /kaas/source/x.sh 2>/dev/null && chmod 755 /kaas/source/x.sh 2>/dev/null
-              (/kaas/source/x.sh 2>/dev/null) || echo "exec refused"
-              ls -l /kaas/source/runnable 2>/dev/null | head -1 || true
-            ' || echo "RUN FAILED"
-          }
-
-          # 1. A tmpfs the runtime implements itself, with the flags requested through Docker.
-          probe "tmpfs with noexec,nosuid,nodev" --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m
-          # 2. The same tmpfs WITHOUT the flags, so the first result is attributable to the flags.
-          probe "tmpfs with no flags" --tmpfs /kaas/source:rw,size=8m
-
-          # 3. Does the gofer honour a setuid bit at all? If it does not, `nosuid` on that mount is moot;
-          #    if it does, its absence is a real gap.
-          staging=$(mktemp -d /tmp/kaas-suid-probe-XXXXXX); chmod 0755 "$staging"
-          cp /bin/busybox "$staging/id"; chmod 4755 "$staging/id"; chown 0:0 "$staging/id" 2>/dev/null || true
-          echo "===== setuid on a gofer bind mount under runsc"
-          docker run --rm --runtime=runsc --network=none --user 65534:65534 \
-            -v "$staging":/kaas/source:ro alpine:3.20 sh -c '
-              grep " /kaas/source " /proc/self/mounts || echo "(not listed)"
-              echo "effective uid via a setuid copy: $(/kaas/source/id -u 2>&1 | head -1)"
-            ' || echo "RUN FAILED"
-          rm -rf "$staging"
-
       # THE PRODUCTION PATH, under the mediating runtime, end to end.
       #
       # Everything else about this runtime is exercised by suites that build their own profile. This runs the
