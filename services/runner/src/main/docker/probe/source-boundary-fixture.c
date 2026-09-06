@@ -30,7 +30,11 @@
 #include <unistd.h>
 
 #define SOURCE_FILES  "/kaas/source/files"
-#define CONTROL_ROOT  "/kaas/control"
+/* Under /tmp, because the container's root filesystem is read-only and /kaas exists only as the mount point
+ * for the source filesystem. /tmp is a writable tmpfs the profile already provides -- and it is mounted
+ * noexec, which is why a fresh tmpfs is mounted OVER this directory rather than the fixtures being written
+ * into /tmp directly. The control has to permit execution or it is not a control. */
+#define CONTROL_ROOT  "/tmp/kaas-control"
 #define BOOTSTRAP     "/source-bootstrap"
 #define SETUID_SEED   "/fixture-setuid"
 

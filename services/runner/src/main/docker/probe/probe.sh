@@ -339,7 +339,7 @@ sourceverify|sourceboundary)
         # Without the control half, "the hardened filesystem refused it" would be equally consistent with the
         # filesystem enforcing noexec and with the file simply not being runnable. KAAS-18 ended on exactly that
         # ambiguity.
-        control=/kaas/control
+        control=/tmp/kaas-control
 
         if [ -x "$control/fixture-exec.sh" ] && "$control/fixture-exec.sh" >/dev/null 2>&1; then
             emit exec_control EXECUTED

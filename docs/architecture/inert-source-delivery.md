@@ -1,3 +1,10 @@
+> **Superseded by [`mediated-source-filesystem.md`](mediated-source-filesystem.md) (ADR-031).**
+>
+> The delivery mechanism described below — a host staging directory bound into the sandbox — no longer
+> exists. It was replaced because the mount it produced under the mediating runtime carried `ro` and nothing
+> else, so an executable file on it would have run. This document is kept because it is what KAAS-18 built and
+> what its report describes; it is not a description of the present.
+
 # Inert source delivery
 
 How tenant-authored bytes move from a sealed database row into a sandbox, and where each property is enforced.

@@ -1,3 +1,10 @@
+> **Superseded by [`mediated-source-filesystem.md`](mediated-source-filesystem.md) (ADR-031).**
+>
+> The `noexec` gap this document records was closed by replacing the mechanism, not by re-reading the
+> measurement. Tenant source now lives on a sandbox-private tmpfs that a trusted bootstrap populates and then
+> freezes, and there is no host mount of tenant source at all. This document is kept as the record of what
+> KAAS-18 measured and concluded; the current boundary is described in the document above.
+
 # Tenant source delivery
 
 What happens to a tenant's bytes between the database and a sandbox, what is enforced along the way, and —

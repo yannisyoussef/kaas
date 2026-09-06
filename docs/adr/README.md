@@ -29,6 +29,7 @@
 | [022](022-hostile-execution-boundary-and-synthetic-probe.md) *(amended)* | The hostile-content runtime prerequisite is satisfied **for the mediated runtime**, permitting inert tenant-byte delivery only | AMENDED 2026-09-05; execution still not approved |
 | [029](029-continuous-execution-authority.md) | The lease bounds how long a worker may keep executing, not only what it may write: revocation stops a running sandbox, and an unrenewable lease stops it fail-closed | ACCEPTED; ADR-022 stays open |
 | [030](030-inert-tenant-source-delivery.md) | Tenant-authored bytes enter the sandbox as data — mounted read-only, hashed, compared — and are never parsed, executed or interpreted; the mediated mount does not carry `noexec`, and that gap is reported rather than downgraded | ACCEPTED; ADR-022 stays open |
+| [031](031-sandbox-private-hardened-source-filesystem.md) | The source filesystem is a sandbox-private tmpfs a trusted bootstrap populates and then freezes, with no host mount of tenant source at all: `noexec` becomes real, and `nodev` remains unimplemented by the runtime and is reported as a gap | ACCEPTED; supersedes ADR-030's mechanism; ADR-022 stays open |
 
 Deferred topics without active decisions remain: concrete object-storage/upload adapter, secret **delivery**
 mechanism and a real secret provider, outbox and CREATED-run retention policy, self-service quarantine
@@ -97,5 +98,16 @@ was not downgraded**: `noexec` is not carried onto a gofer-backed bind under the
 is refused instead by the absence of an executable bit, and both facts are asserted in CI in the direction
 each is actually true. **Tenant code execution remains NOT APPROVED**, blocked on that gap, on the KAAS-15
 runtime-pin attestation gap, and on an adjudication ADR-030 does not perform.
+
+ADR-031 closes the gap ADR-030 recorded, and only that gap. Tenant source now lives on a filesystem that
+refuses to execute it — proven against a file that is genuinely executable and demonstrably runs on a
+permissive mount in the same sandbox — rather than on one that would execute it if the file happened to be
+marked executable. **ADR-030 is not rewritten**: its mechanism was implemented, its measurement was correct,
+and its verdict was that the boundary was not closed. That remains the history.
+
+What ADR-031 does not close: gVisor does not implement `MS_NODEV`, so the source filesystem carries no such
+flag and a device node on it would behave as a device. Three other layers stand in its place and none of them
+is the flag. **Tenant code execution remains NOT APPROVED**, blocked on that, on the KAAS-15 runtime-pin
+attestation gap, and on an adjudication no slice has yet performed.
 
 `IMPLEMENTED` means verified by repository code or tooling. `PROPOSED` means design intent only. `DEFERRED` means no decision is active and implementation must not assume one.

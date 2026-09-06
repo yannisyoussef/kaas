@@ -76,12 +76,17 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
             if (authority.lost()) {
                 throw new AuthorityLostException(authority.lostReason());
             }
-            docker.startContainerCmd(containerId).exec();
-            // THE ONLY CHANNEL TENANT SOURCE TRAVELS ON, and it opens after the container is running because
-            // there is nothing to write into before that. The bootstrap blocks on its first read, so the
-            // ordering is not a race: it waits for this, not the other way round.
-            deliverSource(containerId);
-            outcome = observe(containerId, startedAt, authority);
+            // THE ONLY CHANNEL TENANT SOURCE TRAVELS ON, and the attach happens BEFORE the start.
+            //
+            // Measured the other way round first: attaching after starting left the bootstrap blocked on a
+            // read that never completed, and every source-carrying sandbox died at its wall-clock deadline
+            // with no observations at all. The daemon pumps an attached stream, and a stream attached to a
+            // container that is already running past its first read is a stream nothing is waiting for.
+            try (SourceDelivery delivery = attachSource(containerId)) {
+                docker.startContainerCmd(containerId).exec();
+                delivery.await();
+                outcome = observe(containerId, startedAt, authority);
+            }
         } catch (RuntimeException failure) {
             outcome = new SandboxOutcome(
                     Optional.empty(),
@@ -274,26 +279,74 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
      * <p>Nothing is read back here. The bootstrap's own report and everything the verifier observes arrive
      * through the ordinary output collector, bounded and sanitised like every other byte the sandbox prints.
      */
-    private void deliverSource(String containerId) {
+    private SourceDelivery attachSource(String containerId) {
         SandboxSecurityProfile.SourceDelivery delivery = profile.sourceDelivery();
         if (delivery == null) {
-            return;
+            return SourceDelivery.none();
         }
-        try (var stdin = new java.io.ByteArrayInputStream(delivery.frame());
-                var attached = docker.attachContainerCmd(containerId)
-                        .withStdIn(stdin)
-                        .withFollowStream(false)
-                        .withStdOut(false)
-                        .withStdErr(false)
-                        .exec(new ResultCallback.Adapter<Frame>())) {
-            attached.awaitCompletion(SOURCE_DELIVERY_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            throw new SandboxSourceDeliveryException("Interrupted while delivering source to the sandbox.");
-        } catch (java.io.IOException | RuntimeException failure) {
+        try {
+            var stdin = new java.io.ByteArrayInputStream(delivery.frame());
+            var attached = docker.attachContainerCmd(containerId)
+                    .withStdIn(stdin)
+                    .withFollowStream(true)
+                    .withStdOut(false)
+                    .withStdErr(false)
+                    .exec(new ResultCallback.Adapter<Frame>());
+            return new SourceDelivery(attached);
+        } catch (RuntimeException failure) {
             // The category travels; the bundle does not. A message carrying a length or a path would be
             // tenant-derived detail in a launcher log.
             throw new SandboxSourceDeliveryException("The source bundle could not be delivered to the sandbox.");
+        }
+    }
+
+    /**
+     * One handover of the framed bundle, held open across the container's start.
+     *
+     * <p>{@link AutoCloseable} so the stream is released on every path — including a launch that threw before
+     * the bootstrap ever read anything — rather than depending on each branch remembering to.
+     */
+    private static final class SourceDelivery implements AutoCloseable {
+        private final ResultCallback.Adapter<Frame> attached;
+
+        private SourceDelivery(ResultCallback.Adapter<Frame> attached) {
+            this.attached = attached;
+        }
+
+        static SourceDelivery none() {
+            return new SourceDelivery(null);
+        }
+
+        /**
+         * Waits for the bytes to have been handed over.
+         *
+         * <p>A timeout here is not fatal on its own. The bootstrap is what decides whether it received a whole
+         * bundle — it reads a trailer and refuses a short stream — so the authoritative answer comes from the
+         * sandbox's own report rather than from how long the daemon took to drain a pipe.
+         */
+        void await() {
+            if (attached == null) {
+                return;
+            }
+            try {
+                attached.awaitCompletion(
+                        SOURCE_DELIVERY_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new SandboxSourceDeliveryException("Interrupted while delivering source to the sandbox.");
+            }
+        }
+
+        @Override
+        public void close() {
+            if (attached == null) {
+                return;
+            }
+            try {
+                attached.close();
+            } catch (java.io.IOException | RuntimeException ignored) {
+                // The container's outcome is what matters; a stream that failed to close is not a result.
+            }
         }
     }
 
