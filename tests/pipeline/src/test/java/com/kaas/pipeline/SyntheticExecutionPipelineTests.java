@@ -1,6 +1,7 @@
 package com.kaas.pipeline;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.kaas.api.KaasApiApplication;
 import com.kaas.api.controlplane.application.PendingRunScheduler;
@@ -31,6 +32,8 @@ import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.security.KeyPair;
@@ -1024,6 +1027,145 @@ class SyntheticExecutionPipelineTests {
         }
     }
 
+    @Test
+    @DisplayName("inert tenant source is delivered, mounted read-only, and verified from inside the sandbox")
+    void tenantSourceIsDeliveredAndVerifiedInTheSandbox() throws Exception {
+        // THE FIRST TENANT BYTES. They are redeemed with an assignment-scoped capability, verified against
+        // what the command authorized, staged as regular files, mounted read-only, and hashed by a
+        // platform-owned verifier from the view the sandbox actually has.
+        //
+        // The source deliberately contains text that would be dangerous if anything interpreted it. Nothing
+        // does: the verifier runs sha256sum over bytes.
+        String sentinel = "KAAS_TENANT_SOURCE_SECRET_SENTINEL_" + UUID.randomUUID();
+        String hostile = "#!/bin/sh\ntouch /tmp/kaas-owned\n$(touch /tmp/kaas-owned)\n"
+                + "`touch /tmp/kaas-owned`\nRuntime.getRuntime().exec(\"id\")\n"
+                + "* def x = read('classpath:evil.js')\n" + sentinel + "\n";
+        // Difficult but valid UTF-8, so byte exactness is asserted against something that would not survive
+        // normalisation, line-ending conversion or re-encoding.
+        String awkward = "CRLF\r\nLF\ntab\there \"quotes\" \\backslash\\ emoji \uD83D\uDE42 "
+                + "combining e\u0301 non-BMP \uD834\uDD1E RTL \u202E\n";
+
+        Path staging = Files.createTempDirectory("kaas-source-staging-");
+        try {
+            Tenant tenant = tenantWithSources(List.of(hostile, awkward));
+            UUID runId = claimedRunFor(tenant);
+            UUID attemptId = attemptId(runId);
+
+            ExecutionLoop.ExecutionReport report = sourceLoop(staging).execute(runId, attemptId, 1);
+
+            assertThat(report.status())
+                    .as("report was %s at %s: %s", report.status(), report.phase(), report.detail())
+                    .isEqualTo("COMPLETED");
+            assertThat(report.detail()).isEqualTo("PASSED");
+
+            // The verifier hashed the MOUNTED bytes and they matched what the command authorized. That is a
+            // different claim from the runner's own pre-mount check, and it is the one that survives the
+            // window between staging and launch.
+            Map<String, Object> result = jdbc.queryForMap(
+                    "select test_outcome, infrastructure_outcome, document::text as document"
+                            + " from execution_results where run_id = ?",
+                    runId);
+            assertThat(result.get("test_outcome")).isEqualTo("PASSED");
+            assertThat(result.get("infrastructure_outcome")).isEqualTo("SUCCEEDED");
+
+            // NO SOURCE ANYWHERE IT SHOULD NOT BE. The sentinel is unique to this run, so a single occurrence
+            // in the result document, a label, or a container name would be tenant code escaping into
+            // platform data.
+            assertThat(String.valueOf(result.get("document")))
+                    .as("tenant source must not reach the result document")
+                    .doesNotContain(sentinel);
+            assertThat(report.detail()).doesNotContain(sentinel);
+
+            // AND NOTHING EXECUTED. The source said to create this file in several syntaxes; the verifier
+            // read bytes.
+            assertThat(Files.exists(Path.of("/tmp/kaas-owned")))
+                    .as("tenant source must not have executed")
+                    .isFalse();
+
+            // The staging is gone: the try-with-resources that owned it has closed.
+            assertThat(stagingDirectories(staging)).as("no tenant source outlives its execution").isEmpty();
+            assertThat(managedContainers()).isEmpty();
+        } finally {
+            deleteRecursively(staging);
+            Files.deleteIfExists(Path.of("/tmp/kaas-owned"));
+        }
+    }
+
+    @Test
+    @DisplayName("sealed source cannot be substituted, so the delivered bundle is the authorized one")
+    void sealedSourceCannotBeSubstituted() throws Exception {
+        // THE OTHER HALF OF BUNDLE INTEGRITY, and it is a database property rather than a runner one.
+        //
+        // The runner refuses a bundle whose bytes do not match the digests its command authorized -- that is
+        // asserted directly, with a hand-built bundle, in SourceBundleTests. What cannot be asserted that way
+        // is that the substitution has no route in the first place, and this is it: a sealed FeatureRevision
+        // is immutable, enforced by a trigger, so there is no supported operation that changes the bytes a
+        // command already authorized.
+        //
+        // Attempted through the database, not the API, because the API has no such operation at all. If this
+        // UPDATE ever succeeds, the runner's digest check becomes the only thing between a rewritten feature
+        // and an execution, and this test is where that change gets noticed.
+        Tenant tenant = tenantWithSources(List.of("Feature: original\n"));
+        UUID runId = claimedRunFor(tenant);
+        assertThat(runId).isNotNull();
+
+        assertThatThrownBy(() -> jdbc.update(
+                        "update feature_revisions set source = ? where source like ?",
+                        "Feature: substituted\n", "%original%"))
+                .as("a sealed feature revision must not be rewritable")
+                .hasMessageContaining("immutable");
+
+        // And the stored bytes are unchanged.
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from feature_revisions where source like ?", Integer.class, "%original%"))
+                .isPositive();
+    }
+
+    /** A loop that stages tenant source under the given root and runs the platform's source verifier. */
+    private ExecutionLoop sourceLoop(Path stagingRoot) throws Exception {
+        ControlPlaneClient client = new ControlPlaneClient(
+                HttpClient.newHttpClient(),
+                URI.create("http://localhost:" + port),
+                "Bearer " + token(WORKER, null),
+                java.time.Duration.ofSeconds(30),
+                duration -> Thread.sleep(duration.toMillis()));
+        SandboxSecurityProfile profile = SandboxSecurityProfile.version1(probeImage());
+        return new ExecutionLoop(
+                client,
+                new CommandValidator(mapper),
+                new DockerSandboxLauncher(docker(), profile, "pipeline"),
+                mapper,
+                Clock.systemUTC(),
+                com.kaas.runner.sandbox.SyntheticProbe.WORKLOAD_SOURCE_VERIFY,
+                null,
+                stagingRoot);
+    }
+
+    /** Every staged source directory still on disk under the given root. */
+    private static List<Path> stagingDirectories(Path root) throws Exception {
+        if (!Files.isDirectory(root)) {
+            return List.of();
+        }
+        try (var entries = Files.list(root)) {
+            return entries.filter(path -> path.getFileName().toString().startsWith("kaas-source-")).toList();
+        }
+    }
+
+    private static void deleteRecursively(Path root) throws Exception {
+        if (!Files.exists(root)) {
+            return;
+        }
+        try (var paths = Files.walk(root)) {
+            paths.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (java.io.IOException ignored) {
+                    // Best effort in a test's own cleanup.
+                }
+            });
+        }
+    }
+
     private ExecutionLoop loopUnderRuntime(ExecutionRuntimeType runtime) throws Exception {
         ControlPlaneClient client = new ControlPlaneClient(
                 HttpClient.newHttpClient(),
@@ -1808,6 +1950,66 @@ class SyntheticExecutionPipelineTests {
                         .body())
                 .get("runId")
                 .stringValue());
+    }
+
+    /**
+     * A tenant whose project holds exactly the given feature sources.
+     *
+     * <p>Multiple features on purpose: a bundle carrying one entry cannot demonstrate that the delivered set
+     * is exactly the authorized set, only that something arrived.
+     */
+    private Tenant tenantWithSources(List<String> sources) throws Exception {
+        UUID organizationId = UUID.randomUUID();
+        String bearer = token("pipeline-test", organizationId);
+        String projectId = mapper.readTree(
+                        post("/api/v1/projects", bearer, json(Map.of("name", "Pipeline " + UUID.randomUUID())))
+                                .body())
+                .get("projectId")
+                .stringValue();
+        String lastRevision = null;
+        int index = 0;
+        for (String source : sources) {
+            lastRevision = mapper.readTree(post(
+                                    "/api/v1/projects/" + projectId + "/features",
+                                    bearer,
+                                    json(Map.of(
+                                            "name", "Source feature " + index,
+                                            "logicalPath", "features/s-" + index + "-" + UUID.randomUUID() + ".feature",
+                                            "source", source)))
+                            .body())
+                    .at("/initialRevision/revisionId")
+                    .stringValue();
+            index++;
+        }
+        String environmentRevision = mapper.readTree(post(
+                                "/api/v1/projects/" + projectId + "/environments",
+                                bearer,
+                                json(Map.of(
+                                        "name", "Pipeline environment",
+                                        "variables",
+                                                List.of(Map.of(
+                                                        "key", "baseUrl", "type", "STRING",
+                                                        "value", "https://environment.example")),
+                                        "secretBindings", List.of())))
+                        .body())
+                .at("/initialRevision/revisionId")
+                .stringValue();
+        Map<String, Object> profile = new LinkedHashMap<>();
+        profile.put("name", "Pipeline profile");
+        profile.put("environmentRevisionId", environmentRevision);
+        profile.put("selection", Map.of("tags", List.of()));
+        profile.put("parallelism", 1);
+        profile.put("scenarioRetry", Map.of("maxAttempts", 1, "delayMilliseconds", 0));
+        profile.put("executionTimeoutSeconds", 60);
+        profile.put(
+                "artifactPolicy",
+                Map.of("types", List.of("RAW_RESULT"), "maxArtifactBytes", 1_000, "maxTotalBytes", 2_000));
+        profile.put("configurationOverrides", List.of());
+        String profileRevision = mapper.readTree(
+                        post("/api/v1/projects/" + projectId + "/run-profiles", bearer, json(profile)).body())
+                .at("/initialRevision/revisionId")
+                .stringValue();
+        return new Tenant(organizationId, UUID.fromString(projectId), bearer, lastRevision, profileRevision);
     }
 
     private Tenant tenant(List<String> tags) throws Exception {

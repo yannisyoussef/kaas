@@ -120,7 +120,17 @@ public class SourceCapabilityService {
         List<SourceBundlePolicy.BundleEntry> entries = sources.stream()
                 .map(source -> new SourceBundlePolicy.BundleEntry(
                         source.logicalPath(),
-                        source.sourceSha256(),
+                        // PREFIXED, like every other digest this system exchanges.
+                        //
+                        // This read returns the raw column, and the bundle digest computed from it therefore
+                        // differed from the one the ExecutionCommand carries -- which is computed from
+                        // SnapshotFeature.sourceDigest, and that IS prefixed. Two authoritative descriptions
+                        // of the same bundle, disagreeing.
+                        //
+                        // Nothing noticed until a worker actually redeemed a bundle and compared it against
+                        // the command that authorized it: every such comparison would have failed, and the
+                        // only reason it had not is that nothing had ever made one.
+                        prefixed(source.sourceSha256()),
                         source.source().getBytes(StandardCharsets.UTF_8)))
                 .toList();
         byte[] archive = SourceBundlePolicy.archive(entries);
@@ -136,6 +146,11 @@ public class SourceCapabilityService {
                 .addKeyValue("bundleDigest", digest)
                 .log("Released the pinned source bundle for an active assignment");
         return new Redemption(Optional.of(new Bundle(archive, digest)), Optional.empty());
+    }
+
+    /** The digest form every other part of this system exchanges. */
+    private static String prefixed(String hex) {
+        return hex != null && hex.startsWith("sha256:") ? hex : "sha256:" + hex;
     }
 
     private Redemption refused(ExecutionDenial denial) {

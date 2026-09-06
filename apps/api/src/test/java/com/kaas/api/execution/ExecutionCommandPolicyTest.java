@@ -158,7 +158,7 @@ class ExecutionCommandPolicyTest {
                                 UUID.fromString("3f8a2b10-0000-4000-8000-0000000000f2"),
                                 1,
                                 "features/login.feature",
-                                "4".repeat(64)))),
+                                "sha256:" + "4".repeat(64)))),
                 List.of(),
                 new ExecutionCommand.NetworkPolicyReference(
                         UUID.fromString("00000000-0000-4000-8000-00000000d001"),

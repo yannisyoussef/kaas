@@ -230,17 +230,47 @@ public final class ExecutionLoop {
     }
 
     /**
-     * Redeems the authorized source bundle and stages it, or returns null when this deployment stages none.
+     * Redeems the authorized source bundle and verifies it, or returns null when this deployment stages none.
      *
-     * <p>Authority is re-read before the bundle is fetched and again before it is written, because obtaining
-     * and materialising tenant source is execution work: a worker that lost its assignment mid-redemption must
-     * not finish preparing bytes for a run it no longer owns.
+     * <h2>Why this happens while the run is still CLAIMED</h2>
+     *
+     * <p>Not a choice: a source capability is redeemable only while the run is {@code CLAIMED}, which is the
+     * lifecycle the control plane has enforced since capabilities existed. Redeeming after PROVISIONING is
+     * announced is refused, and the honest response to that is to redeem before it rather than to widen the
+     * window on the control-plane side for a worker's convenience.
+     *
+     * <p>What happens here is a bounded transfer and pure computation. Nothing is written to this host:
+     * materialisation waits until PROVISIONING is announced, so no tenant byte reaches a disk before a phase
+     * deadline and a reconciler are accountable for it.
+     *
+     * <p>Authority is re-read before the bundle is fetched and again after it arrives, because obtaining
+     * tenant source is execution work: a worker that lost its assignment mid-redemption must not go on to
+     * prepare bytes for a run it no longer owns.
      *
      * <p>What is verified here is verified against the COMMAND -- its bundle digest and its exact feature
      * list -- and not against anything the response says about itself. A control-plane defect must not become
      * source substitution.
      */
-    private SourceStaging stageSource(
+    /**
+     * Writes the verified bundle to this host, under a phase that owns it.
+     *
+     * <p>Separate from redemption because they happen in different lifecycle states and fail differently:
+     * redemption is a bounded network transfer that leaves nothing behind, and this puts tenant bytes on a
+     * disk. Authority is re-read immediately before the write, so a worker fenced during PROVISIONING does
+     * not leave source on a host it no longer serves.
+     */
+    private SourceStaging materialiseSource(SourceBundle bundle, ExecutionAuthority authority) {
+        if (bundle == null) {
+            return null;
+        }
+        if (authority.lost()) {
+            throw new SourceBundleRejected(
+                    SourceBundleRejected.Reason.AUTHORITY_LOST, "Authority ended before source was staged.");
+        }
+        return SourceStaging.materialise(sourceStagingRoot, bundle);
+    }
+
+    private SourceBundle redeemSource(
             ValidatedCommand command, String capabilityToken, ExecutionAuthority authority) {
         if (sourceStagingRoot == null) {
             // This deployment stages no source. The sandbox runs exactly as it did before, which is what
@@ -279,7 +309,7 @@ public final class ExecutionLoop {
             throw new SourceBundleRejected(
                     SourceBundleRejected.Reason.AUTHORITY_LOST, "Authority ended before source was staged.");
         }
-        return SourceStaging.materialise(sourceStagingRoot, bundle);
+        return bundle;
     }
 
     /** The policy type whose executions run behind a proxy. Every other type uses the no-network path. */
@@ -350,6 +380,22 @@ public final class ExecutionLoop {
             ExecutionAuthority authority)
             throws ControlPlaneUnavailable {
 
+        // 2b. THE AUTHORIZED SOURCE, redeemed while the run is still CLAIMED.
+        //
+        // Placed here because the capability's own rule puts it here: redemption requires a CLAIMED run, and
+        // announcing PROVISIONING first would make every redemption fail. Nothing is written yet -- the bytes
+        // are bounded, in memory, and verified against the command before a phase owns any file.
+        SourceBundle redeemedSource;
+        try {
+            redeemedSource = redeemSource(command, sourceCapabilityToken, authority);
+        } catch (SourceBundleRejected rejected) {
+            // Refused before any phase advance, so there is no phase to fail and nothing to clean up. The
+            // category travels; a logical path or a byte of source does not.
+            return infrastructureFailure(
+                    runId, attemptId, assignmentEpoch,
+                    "The authorized source bundle was refused (" + rejected.reason() + ").");
+        }
+
         // 3. PROVISIONING, announced before the sandbox exists. Announcing afterwards would leave a window in
         //    which a container is running and no deadline covers it.
         Instant provisioningStartedAt = clock.instant();
@@ -418,7 +464,7 @@ public final class ExecutionLoop {
         // than each branch remembering to.
         SandboxOutcome outcome;
         String egressDetail = null;
-        try (SourceStaging staging = stageSource(command, sourceCapabilityToken, authority)) {
+        try (SourceStaging staging = materialiseSource(redeemedSource, authority)) {
             // The launcher that will actually run the workload. Derived from the configured one, so it
             // differs in exactly one respect: it carries this execution's source. A separate launcher built
             // from scratch could differ in others without anybody noticing.

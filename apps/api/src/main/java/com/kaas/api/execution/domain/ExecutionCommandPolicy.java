@@ -94,7 +94,10 @@ public final class ExecutionCommandPolicy {
                 update(sha, feature.featureId().toString());
                 update(sha, feature.revisionId().toString());
                 update(sha, feature.logicalPath());
-                update(sha, feature.sourceDigest());
+                // The bare hex, matching the worker's own recomputation, which strips the prefix before
+                // digesting. The two sides must agree on the exact bytes fed to SHA-256, and the prefix is a
+                // presentation detail of the field rather than part of its value.
+                update(sha, stripSha256(feature.sourceDigest()));
             }
 
             // WHICH secret each key resolves to, not merely which keys exist. Covering the binding key alone
@@ -204,7 +207,10 @@ public final class ExecutionCommandPolicy {
                     node.put("featureId", feature.featureId().toString());
                     node.put("revisionId", feature.revisionId().toString());
                     node.put("logicalPath", feature.logicalPath());
-                    node.put("contentDigest", "sha256:" + feature.sourceDigest());
+                    // Already prefixed. It used to be assembled here, which meant the value inside the record
+                    // and the value in the document were different strings -- and the bundle digest computed
+                    // from one did not match a digest computed from the other.
+                    node.put("contentDigest", feature.sourceDigest());
                 });
 
         ArrayNode secrets = root.putArray("secretCapabilities");
@@ -268,6 +274,11 @@ public final class ExecutionCommandPolicy {
     }
 
     /** Feature list access used by the digest, kept here so callers cannot pass an unsorted view by accident. */
+    /** A digest without its algorithm prefix. */
+    private static String stripSha256(String digest) {
+        return digest != null && digest.startsWith("sha256:") ? digest.substring("sha256:".length()) : digest;
+    }
+
     public static List<SnapshotFeature> canonicalFeatures(List<SnapshotFeature> features) {
         return features.stream().sorted(Comparator.comparing(SnapshotFeature::logicalPath)).toList();
     }

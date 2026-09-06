@@ -89,7 +89,13 @@ class JdbcExecutionAuthorizationRepository implements ExecutionAuthorizationRepo
                         resultSet.getObject("feature_revision_id", UUID.class),
                         resultSet.getLong("revision_number"),
                         resultSet.getString("logical_path"),
-                        resultSet.getString("source_sha256")),
+                        // PREFIXED, because that is what the type means everywhere else.
+                        //
+                        // This read returned the bare column while the run-intent repository returned the
+                        // prefixed form for the same field of the same record. One domain type, two meanings,
+                        // decided by whichever repository had loaded it -- and the bundle digest computed here
+                        // therefore did not match the one computed from the command's own features.
+                        "sha256:" + resultSet.getString("source_sha256")),
                 organizationId,
                 projectId,
                 runId);
