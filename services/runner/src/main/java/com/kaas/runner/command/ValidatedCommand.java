@@ -37,4 +37,24 @@ public record ValidatedCommand(
          * daemon executes, which is a larger privilege than anything else a command carries.
          */
         String sandboxRuntime,
-        List<String> tags) {}
+        List<String> tags,
+        /**
+         * The bundle identity the command authorizes, and the exact features it must contain.
+         *
+         * <p>Identity and digests only. There is no source content here and there cannot be: this record is
+         * what the execution loop holds, and a field carrying tenant bytes would mean the loop had them to
+         * pass somewhere. What it carries is enough to REFUSE a bundle that is not the authorized one, which
+         * is the whole of its job.
+         */
+        SourceBundleAuthorization sourceBundle) {
+
+    /** What the command says the bundle must be. Covered by the command digest, like every other field. */
+    public record SourceBundleAuthorization(String contentDigest, List<Feature> features) {
+        public SourceBundleAuthorization {
+            features = List.copyOf(features);
+        }
+    }
+
+    /** One authorized feature: where its bytes go and what they must hash to. */
+    public record Feature(String featureId, String revisionId, String logicalPath, String contentDigest) {}
+}

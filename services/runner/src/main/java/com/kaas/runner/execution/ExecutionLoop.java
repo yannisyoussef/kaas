@@ -19,6 +19,10 @@ import com.kaas.runner.authority.ExecutionAuthorityMonitor;
 import com.kaas.runner.authority.HeartbeatRenewal;
 import com.kaas.runner.authority.MonotonicClock;
 import com.kaas.runner.sandbox.SandboxSecurityProfile;
+import com.kaas.runner.source.SourceBundle;
+import com.kaas.runner.source.SourceBundleContract;
+import com.kaas.runner.source.SourceBundleRejected;
+import com.kaas.runner.source.SourceStaging;
 import com.kaas.runner.sandbox.SyntheticProbe;
 import java.time.Clock;
 import java.time.Duration;
@@ -62,6 +66,9 @@ public final class ExecutionLoop {
      */
     private final EgressExecutions egressExecutions;
 
+    /** Where this host stages tenant source, or null when it stages none. Platform-owned in every part. */
+    private final java.nio.file.Path sourceStagingRoot;
+
     public ExecutionLoop(
             ControlPlaneClient controlPlane,
             CommandValidator validator,
@@ -91,6 +98,24 @@ public final class ExecutionLoop {
             Clock clock,
             SyntheticProbe workload,
             EgressExecutions egressExecutions) {
+        this(controlPlane, validator, launcher, mapper, clock, workload, egressExecutions, null);
+    }
+
+    /**
+     * The full form: a runner that can also deliver inert tenant source.
+     *
+     * @param sourceStagingRoot where this host may stage tenant source, or null when it stages none. Operator
+     *     configuration, never tenant-selected and never derived from anything a request carried.
+     */
+    public ExecutionLoop(
+            ControlPlaneClient controlPlane,
+            CommandValidator validator,
+            SandboxLauncher launcher,
+            ObjectMapper mapper,
+            Clock clock,
+            SyntheticProbe workload,
+            EgressExecutions egressExecutions,
+            java.nio.file.Path sourceStagingRoot) {
         this.controlPlane = controlPlane;
         this.validator = validator;
         this.launcher = launcher;
@@ -98,6 +123,7 @@ public final class ExecutionLoop {
         this.clock = clock;
         this.workload = workload;
         this.egressExecutions = egressExecutions;
+        this.sourceStagingRoot = sourceStagingRoot;
     }
 
     /**
@@ -122,6 +148,7 @@ public final class ExecutionLoop {
         //    whose security-relevant instructions it may be about to skip.
         ValidatedCommand command;
         EgressPlan plan;
+        String sourceToken;
         try {
             JsonNode envelope = mapper.readTree(authorization.body());
             JsonNode document = envelope.get("command");
@@ -136,6 +163,12 @@ public final class ExecutionLoop {
             // state on every request, so a destination altered in transit is refused there. What the command
             // DOES bind, and what the validator already checked, is the policy's revision id and digest.
             plan = egressPlan(envelope);
+            // Read from the ENVELOPE, never from the command. Capabilities rotate on every delivery, so a
+            // token inside an immutable document would be stale from the second request onward -- and a
+            // bearer credential inside a digested document is a credential in every log that records the
+            // document. It exists in this variable and nowhere else.
+            JsonNode token = envelope.get("sourceCapabilityToken");
+            sourceToken = token == null || !token.isString() ? null : token.stringValue();
         } catch (CommandRejected rejected) {
             return ExecutionReport.rejected(rejected.getMessage());
         } catch (RuntimeException unreadable) {
@@ -173,7 +206,7 @@ public final class ExecutionLoop {
                 SAFETY_MARGIN,
                 INITIAL_AUTHORITY_BUDGET,
                 "kaas-authority-" + runId)) {
-            return execute(runId, attemptId, assignmentEpoch, command, plan, authority);
+            return execute(runId, attemptId, assignmentEpoch, command, plan, sourceToken, authority);
         }
     }
 
@@ -194,6 +227,59 @@ public final class ExecutionLoop {
             UUID runId,
             ExecutionAuthority authority) {
         return sandboxes.run(new SandboxLaunchRequest(probe, profileVersion, runId), authority);
+    }
+
+    /**
+     * Redeems the authorized source bundle and stages it, or returns null when this deployment stages none.
+     *
+     * <p>Authority is re-read before the bundle is fetched and again before it is written, because obtaining
+     * and materialising tenant source is execution work: a worker that lost its assignment mid-redemption must
+     * not finish preparing bytes for a run it no longer owns.
+     *
+     * <p>What is verified here is verified against the COMMAND -- its bundle digest and its exact feature
+     * list -- and not against anything the response says about itself. A control-plane defect must not become
+     * source substitution.
+     */
+    private SourceStaging stageSource(
+            ValidatedCommand command, String capabilityToken, ExecutionAuthority authority) {
+        if (sourceStagingRoot == null) {
+            // This deployment stages no source. The sandbox runs exactly as it did before, which is what
+            // every gate and probe suite in this repository still does.
+            return null;
+        }
+        if (capabilityToken == null || capabilityToken.isBlank()) {
+            throw new SourceBundleRejected(
+                    SourceBundleRejected.Reason.NOT_REDEEMABLE, "The delivery carried no source capability.");
+        }
+        if (authority.lost()) {
+            throw new SourceBundleRejected(
+                    SourceBundleRejected.Reason.AUTHORITY_LOST, "Authority ended before source was obtained.");
+        }
+        byte[] archive;
+        try {
+            archive = controlPlane.redeemSourceBundle(capabilityToken, SourceBundleContract.MAX_TOTAL_BYTES);
+        } catch (ControlPlaneUnavailable unavailable) {
+            throw new SourceBundleRejected(
+                    SourceBundleRejected.Reason.NOT_REDEEMABLE, "The source bundle could not be redeemed.");
+        }
+        if (archive == null) {
+            // The control plane refused the capability -- expired, fenced, cancelled, superseded, or for a
+            // different assignment. Which one is its business; from here it is simply not redeemable.
+            throw new SourceBundleRejected(
+                    SourceBundleRejected.Reason.NOT_REDEEMABLE, "The source capability was refused.");
+        }
+        var expected = command.sourceBundle().features().stream()
+                .map(feature -> new SourceBundle.ExpectedEntry(feature.logicalPath(), feature.contentDigest()))
+                .toList();
+        SourceBundle bundle =
+                SourceBundle.verified(archive, expected, command.sourceBundle().contentDigest());
+        if (authority.lost()) {
+            // Checked again, after the transfer and before anything is written. The window between the two
+            // is exactly as long as the transfer, which is bounded, and nothing is on the host yet.
+            throw new SourceBundleRejected(
+                    SourceBundleRejected.Reason.AUTHORITY_LOST, "Authority ended before source was staged.");
+        }
+        return SourceStaging.materialise(sourceStagingRoot, bundle);
     }
 
     /** The policy type whose executions run behind a proxy. Every other type uses the no-network path. */
@@ -260,6 +346,7 @@ public final class ExecutionLoop {
             int assignmentEpoch,
             ValidatedCommand command,
             EgressPlan plan,
+            String sourceCapabilityToken,
             ExecutionAuthority authority)
             throws ControlPlaneUnavailable {
 
@@ -319,68 +406,103 @@ public final class ExecutionLoop {
                     "This worker instantiates a different sandbox runtime than the command authorizes.");
         }
 
+        // 4b. INERT TENANT SOURCE, obtained and staged before any sandbox exists.
+        //
+        // PROVISIONING work, placed here deliberately: the phase is already announced, so the phase
+        // deadline and the authority monitor both cover everything below, and a crash leaves resources a
+        // reconciler knows to look for. Preparing tenant bytes before any lifecycle owned them would be the
+        // one shape that leaves source on a host nothing is accountable for.
+        //
+        // try-with-resources, so the bytes live exactly as long as this block. Every exit -- a refused
+        // bundle, a lost authority, a failed launch, a timeout, a thrown anything -- removes them, rather
+        // than each branch remembering to.
         SandboxOutcome outcome;
         String egressDetail = null;
-        if (ALLOWLIST.equals(command.networkPolicyType())) {
-            // Refused, never degraded. The command validator already refuses an allowlist this host cannot
-            // enforce, so arriving here without a mechanism or without egress material is a wiring mistake
-            // rather than a state a control plane can produce — and a wiring mistake that silently ran the
-            // execution with no network would be an allowlist that permits everything and delivers nothing,
-            // reported as a completed run.
-            //
-            // REPORTED, not merely returned. By this point the run is in RUNNING and the control plane is
-            // holding a phase deadline against it. Returning quietly would leave it there until a reconciler
-            // reclaimed it and recorded a timeout — a failure the worker observed within milliseconds and
-            // then discarded, which is precisely the bug the infrastructure-failure endpoint exists to end.
-            if (egressExecutions == null) {
-                return infrastructureFailure(
-                        runId, attemptId, assignmentEpoch,
-                        "This runner has no egress mechanism for an allowlist.");
-            }
-            if (plan == null) {
-                return infrastructureFailure(
-                        runId, attemptId, assignmentEpoch,
-                        "An allowlist authorization carried no egress material.");
-            }
-            // The profile the sandbox will run under has to be the networked derivative of the profile the
-            // command was authorized under. Checked rather than assumed: a launcher configured against some
-            // other profile would run the execution anyway, and the evidence would then name a policy that
-            // did not produce it. Checked here, after the mechanism exists but before any sandbox does, so a
-            // mismatch costs a network and a proxy rather than an untrusted container.
-            String expected = SandboxSecurityProfile.networkedVersionOf(command.sandboxProfileVersion());
-            try (EgressExecution egress = egressExecutions.start(runId, plan)) {
-                if (!expected.equals(egress.profileVersion())) {
+        try (SourceStaging staging = stageSource(command, sourceCapabilityToken, authority)) {
+            // The launcher that will actually run the workload. Derived from the configured one, so it
+            // differs in exactly one respect: it carries this execution's source. A separate launcher built
+            // from scratch could differ in others without anybody noticing.
+            SandboxLauncher workloadLauncher = staging == null
+                    ? launcher
+                    : launcher.withSource(staging.root());
+            if (ALLOWLIST.equals(command.networkPolicyType())) {
+                // Refused, never degraded. The command validator already refuses an allowlist this host cannot
+                // enforce, so arriving here without a mechanism or without egress material is a wiring mistake
+                // rather than a state a control plane can produce — and a wiring mistake that silently ran the
+                // execution with no network would be an allowlist that permits everything and delivers nothing,
+                // reported as a completed run.
+                //
+                // REPORTED, not merely returned. By this point the run is in RUNNING and the control plane is
+                // holding a phase deadline against it. Returning quietly would leave it there until a reconciler
+                // reclaimed it and recorded a timeout — a failure the worker observed within milliseconds and
+                // then discarded, which is precisely the bug the infrastructure-failure endpoint exists to end.
+                if (egressExecutions == null) {
                     return infrastructureFailure(
                             runId, attemptId, assignmentEpoch,
-                            "The egress sandbox profile is not the one this command authorized.");
+                            "This runner has no egress mechanism for an allowlist.");
                 }
-                // The egress workload, not the configured one. Which workload an allowlist execution runs is
-                // a property of the policy rather than of this runner's configuration: an allowlist run whose
-                // workload never touched the network would complete successfully having demonstrated nothing.
+                if (plan == null) {
+                    return infrastructureFailure(
+                            runId, attemptId, assignmentEpoch,
+                            "An allowlist authorization carried no egress material.");
+                }
+                // The profile the sandbox will run under has to be the networked derivative of the profile the
+                // command was authorized under. Checked rather than assumed: a launcher configured against some
+                // other profile would run the execution anyway, and the evidence would then name a policy that
+                // did not produce it. Checked here, after the mechanism exists but before any sandbox does, so a
+                // mismatch costs a network and a proxy rather than an untrusted container.
+                String expected = SandboxSecurityProfile.networkedVersionOf(command.sandboxProfileVersion());
+                try (EgressExecution egress = egressExecutions.start(runId, plan)) {
+                    if (!expected.equals(egress.profileVersion())) {
+                        return infrastructureFailure(
+                                runId, attemptId, assignmentEpoch,
+                                "The egress sandbox profile is not the one this command authorized.");
+                    }
+                    // The egress workload, not the configured one. Which workload an allowlist execution runs is
+                    // a property of the policy rather than of this runner's configuration: an allowlist run whose
+                    // workload never touched the network would complete successfully having demonstrated nothing.
+                    // The egress launcher carrying this execution's source. Derived from the one the egress
+                    // mechanism built, so the networked profile keeps every property it already had and gains
+                    // exactly one -- rather than being rebuilt and quietly differing somewhere else.
+                    outcome = runWorkload(
+                            staging == null ? egress.launcher() : egress.launcher().withSource(staging.root()),
+                            SyntheticProbe.WORKLOAD_EGRESS,
+                            expected,
+                            runId,
+                            authority);
+                    if (!egress.proxyIsRunning()) {
+                        // CONSERVATIVE, and deliberately unconditional. The sandbox may have produced a
+                        // perfectly well-formed result before the proxy died, and that result is still evidence
+                        // gathered while the execution's only egress peer was going away. Nothing has been
+                        // submitted yet, so nothing trustworthy is being discarded — and reporting a test outcome
+                        // from an execution whose enforcement point vanished mid-run would be the platform
+                        // blaming a tenant for its own failure.
+                        egressDetail = "The egress proxy did not survive the execution ("
+                                + EgressFailure.EGRESS_PROXY_DIED + ").";
+                    }
+                } catch (EgressProxyStartFailed cannotStart) {
+                    // NO SANDBOX WAS CREATED. There is no degraded mode: an allowlist execution without a proxy
+                    // is an execution with no enforcement, and the truthful outcome is an infrastructure failure.
+                    // The category travels; the cause does not, because a daemon error carries socket paths,
+                    // host directories, and image references.
+                    return infrastructureFailure(
+                            runId, attemptId, assignmentEpoch,
+                            "The egress mechanism could not be started (" + cannotStart.failure() + ").");
+                }
+            } else {
                 outcome = runWorkload(
-                        egress.launcher(), SyntheticProbe.WORKLOAD_EGRESS, expected, runId, authority);
-                if (!egress.proxyIsRunning()) {
-                    // CONSERVATIVE, and deliberately unconditional. The sandbox may have produced a
-                    // perfectly well-formed result before the proxy died, and that result is still evidence
-                    // gathered while the execution's only egress peer was going away. Nothing has been
-                    // submitted yet, so nothing trustworthy is being discarded — and reporting a test outcome
-                    // from an execution whose enforcement point vanished mid-run would be the platform
-                    // blaming a tenant for its own failure.
-                    egressDetail = "The egress proxy did not survive the execution ("
-                            + EgressFailure.EGRESS_PROXY_DIED + ").";
-                }
-            } catch (EgressProxyStartFailed cannotStart) {
-                // NO SANDBOX WAS CREATED. There is no degraded mode: an allowlist execution without a proxy
-                // is an execution with no enforcement, and the truthful outcome is an infrastructure failure.
-                // The category travels; the cause does not, because a daemon error carries socket paths,
-                // host directories, and image references.
-                return infrastructureFailure(
-                        runId, attemptId, assignmentEpoch,
-                        "The egress mechanism could not be started (" + cannotStart.failure() + ").");
+                        workloadLauncher, workload, command.sandboxProfileVersion(), runId, authority);
             }
-        } else {
-            outcome = runWorkload(
-                    launcher, workload, command.sandboxProfileVersion(), runId, authority);
+        } catch (SourceBundleRejected rejected) {
+            // Refused BEFORE a sandbox exists. The run fails as INFRASTRUCTURE rather than as a test: no
+            // tenant assertion ran, and recording a test failure for a delivery defect would blame a tenant
+            // for the platform.
+            //
+            // The category travels and nothing else does. A logical path or a fragment of source in this
+            // message would be tenant content in a control-plane log.
+            return infrastructureFailure(
+                    runId, attemptId, assignmentEpoch,
+                    "The authorized source bundle was refused (" + rejected.reason() + ").");
         }
         // ABSENT OR INCOMPLETE EVIDENCE IS AN INFRASTRUCTURE FAILURE, NOT A TEST RESULT.
         //

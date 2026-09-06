@@ -52,6 +52,12 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
     }
 
     @Override
+    public SandboxLauncher withSource(java.nio.file.Path sourceMount) {
+        return new DockerSandboxLauncher(
+                docker, SandboxSecurityProfile.withSource(profile, sourceMount), generation);
+    }
+
+    @Override
     public SandboxOutcome run(SandboxLaunchRequest request, ExecutionAuthority authority) {
         if (!profile.version().equals(request.profileVersion())) {
             // A request naming a profile this launcher does not hold is refused rather than silently run under

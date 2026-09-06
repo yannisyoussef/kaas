@@ -278,7 +278,28 @@ public final class CommandValidator {
                 networkType,
                 text(sandbox, "profileVersion"),
                 text(sandbox, "sandboxRuntime"),
-                Collections.unmodifiableList(tags));
+                Collections.unmodifiableList(tags),
+                sourceBundleAuthorization(root));
+    }
+
+    /**
+     * What the command authorizes the source bundle to be.
+     *
+     * <p>Read from the same document the digest above was recomputed over, so these values are covered by the
+     * integrity check the worker performs for itself rather than accepted on the control plane's word.
+     */
+    private static ValidatedCommand.SourceBundleAuthorization sourceBundleAuthorization(JsonNode root)
+            throws CommandRejected {
+        JsonNode bundle = object(root, "sourceBundle");
+        List<ValidatedCommand.Feature> features = new ArrayList<>();
+        for (JsonNode feature : bundle.get("features")) {
+            features.add(new ValidatedCommand.Feature(
+                    text(feature, "featureId"),
+                    text(feature, "revisionId"),
+                    text(feature, "logicalPath"),
+                    text(feature, "contentDigest")));
+        }
+        return new ValidatedCommand.SourceBundleAuthorization(text(bundle, "contentDigest"), features);
     }
 
     /**

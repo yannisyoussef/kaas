@@ -46,4 +46,13 @@ public interface SandboxLauncher {
 
     /** The profile every sandbox this launcher creates is bound to. */
     SandboxSecurityProfile profile();
+
+    /**
+     * The same launcher, whose sandboxes also carry one execution's inert tenant source.
+     *
+     * <p>Derived rather than constructed, so a source-bearing launcher differs from this one in exactly one
+     * respect. A caller assembling a second launcher from scratch could differ in others -- a runtime, a
+     * generation, an image -- and the difference would not be visible at the call site.
+     */
+    SandboxLauncher withSource(java.nio.file.Path sourceMount);
 }

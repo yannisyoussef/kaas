@@ -174,6 +174,12 @@ class SecurityGateRedPathTests {
         }
 
         @Override
+        public SandboxLauncher withSource(java.nio.file.Path sourceMount) {
+            // These launch no real sandbox, so there is nothing for a source mount to change.
+            return this;
+        }
+
+        @Override
         public SandboxOutcome run(SandboxLaunchRequest request, ExecutionAuthority authority) {
             SyntheticProbe probe = request.probe();
             boolean timedOut = probe == SyntheticProbe.SLEEP;

@@ -35,41 +35,77 @@ class SourceNonUseTests {
             "source", "bundle", "feature", "gherkin", "script", "content", "body", "payload");
 
     @Test
-    @DisplayName("a validated command carries no feature source, bundle, or content of any kind")
-    void theCommandTheLoopHoldsCarriesNoSource() {
-        RecordComponent[] components = ValidatedCommand.class.getRecordComponents();
+    @DisplayName("a validated command names the source bundle but carries none of its bytes")
+    void theCommandNamesSourceWithoutCarryingIt() {
+        // THIS INVARIANT CHANGED, DELIBERATELY, AND NARROWED RATHER THAN LOOSENED.
+        //
+        // The command used to mention nothing about source at all. It now names the bundle it authorizes --
+        // its digest, and each feature's identity, logical path and content digest -- because the runner must
+        // be able to REFUSE a bundle that is not the authorized one, and it cannot do that without knowing
+        // what the authorized one is.
+        //
+        // What it must never carry is content. A name check would not express that: `sourceBundle` is a
+        // perfectly good field name for a record of digests. So this asserts the shape instead -- every value
+        // reachable from the command is an identifier, a path, a digest, a number or a flag, and nothing
+        // anywhere is a byte carrier.
+        assertNoContentCarriers(ValidatedCommand.class, new java.util.HashSet<>());
 
-        // Anti-vacuity: if this ever reflects over an empty or unrelated type, the loop below proves nothing.
-        assertThat(components)
-                .as("ValidatedCommand must actually have components for this test to mean anything")
-                .hasSizeGreaterThan(10);
-
-        for (RecordComponent component : components) {
-            String name = component.getName().toLowerCase(Locale.ROOT);
-            assertThat(SOURCE_BEARING)
-                    .as("ValidatedCommand.%s looks like it carries tenant content into the executor",
-                            component.getName())
-                    .noneMatch(name::contains);
-            // Every component is a scalar identity, instant, or enumeration-like string. A collection of
-            // objects would be the shape source content arrives in.
-            assertThat(component.getType())
-                    .as("ValidatedCommand.%s must be a simple value, not a structure that could hold content",
-                            component.getName())
-                    .isIn(java.util.UUID.class, String.class, long.class, int.class,
-                            java.time.Instant.class, List.class);
-        }
-
-        // The one collection it does carry is tags, and tags are selection labels rather than content.
-        assertThat(Arrays.stream(components)
-                        .filter(component -> component.getType() == List.class)
+        // And the bundle's per-feature shape is exactly identity plus digest.
+        assertThat(Arrays.stream(ValidatedCommand.Feature.class.getRecordComponents())
                         .map(RecordComponent::getName)
                         .toList())
-                .containsExactly("tags");
+                .containsExactly("featureId", "revisionId", "logicalPath", "contentDigest");
+    }
+
+    /**
+     * Walks a record's components and refuses any type that could hold file content.
+     *
+     * <p>Recursive, because a byte array nested inside a nested record is still a byte array reaching the
+     * execution loop. Types outside this repository's own packages are not descended into: the check is about
+     * what this codebase declares, and {@code String} has no components worth walking.
+     */
+    private static void assertNoContentCarriers(Class<?> type, java.util.Set<Class<?>> seen) {
+        if (!seen.add(type) || !type.isRecord()) {
+            return;
+        }
+        for (RecordComponent component : type.getRecordComponents()) {
+            Class<?> componentType = component.getType();
+            assertThat(componentType.isArray() && componentType.getComponentType() == byte.class)
+                    .as("%s.%s is a byte array, which is source content reaching the executor",
+                            type.getSimpleName(), component.getName())
+                    .isFalse();
+            assertThat(java.io.InputStream.class.isAssignableFrom(componentType)
+                            || java.nio.ByteBuffer.class.isAssignableFrom(componentType)
+                            || java.io.Reader.class.isAssignableFrom(componentType))
+                    .as("%s.%s could stream source content into the executor",
+                            type.getSimpleName(), component.getName())
+                    .isFalse();
+            if (componentType.getName().startsWith("com.kaas.")) {
+                assertNoContentCarriers(componentType, seen);
+            }
+            // Generic element types too: a List<byte[]> is a byte array behind one level of indirection.
+            if (component.getGenericType() instanceof java.lang.reflect.ParameterizedType parameterized) {
+                for (var argument : parameterized.getActualTypeArguments()) {
+                    if (argument instanceof Class<?> element) {
+                        assertThat(element.isArray() && element.getComponentType() == byte.class)
+                                .as("%s.%s holds byte arrays", type.getSimpleName(), component.getName())
+                                .isFalse();
+                        if (element.getName().startsWith("com.kaas.")) {
+                            assertNoContentCarriers(element, seen);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @Test
-    @DisplayName("the runner's control-plane client cannot fetch a source bundle")
-    void theClientOffersNoWayToFetchSource() {
+    @DisplayName("the client can redeem exactly one authorized bundle, and cannot browse source")
+    void theClientOffersOnlyCapabilityBoundRedemption() {
+        // THIS INVARIANT CHANGED, DELIBERATELY. Until this slice the runner had no way to fetch tenant source
+        // at all, and that absence was the property. Source delivery replaces it with a narrower one: the
+        // runner may spend a capability it was issued for one assignment, and has no other way to reach
+        // source of any kind.
         List<String> methods = Arrays.stream(ControlPlaneClient.class.getDeclaredMethods())
                 .filter(method -> java.lang.reflect.Modifier.isPublic(method.getModifiers()))
                 .map(Method::getName)
@@ -77,43 +113,51 @@ class SourceNonUseTests {
 
         assertThat(methods)
                 .as("the client must expose the calls this slice actually makes")
-                .contains("authorize", "advancePhase", "submitResult");
+                .contains("authorize", "advancePhase", "submitResult", "redeemSourceBundle");
 
-        // The source-bundle endpoint exists on the control plane and this client has no method for it. That is
-        // the point: the capability to redeem a bundle is issued, and the runner has nowhere to spend it.
-        for (String method : methods) {
-            String name = method.toLowerCase(Locale.ROOT);
-            assertThat(SOURCE_BEARING)
-                    .as("ControlPlaneClient.%s would give the executor a way to fetch tenant content", method)
-                    .noneMatch(name::contains);
-        }
+        // Exactly one source-bearing method, and it is the capability redemption. Anything else -- a fetch by
+        // feature, by revision, by run -- would be a browsing API, which is what the worker must not have.
+        List<String> sourceBearing = methods.stream()
+                .filter(method -> {
+                    String name = method.toLowerCase(Locale.ROOT);
+                    return SOURCE_BEARING.stream().anyMatch(name::contains);
+                })
+                .toList();
+        assertThat(sourceBearing)
+                .as("the only way to reach source must be redeeming the capability the command carried")
+                .containsExactly("redeemSourceBundle");
     }
 
     @Test
-    @DisplayName("nothing in the execution package mentions the source-bundle endpoint or its capability header")
-    void theExecutionPathNamesNoSourceEndpoint() throws Exception {
-        // The endpoint and its header are strings, so a dependency rule would not catch them — a single
-        // hand-written path would be enough to reach the bundle. This reads the compiled classes' constant
-        // pools by proxy: the source files themselves.
+    @DisplayName("the source endpoint is named in one place, and never in the execution path")
+    void theSourceEndpointIsNamedOnlyWhereItIsRedeemed() throws Exception {
+        // The endpoint and its header are strings, so a dependency rule would not catch them -- one
+        // hand-written path anywhere would be another way to reach the bundle. This reads the sources.
         var root = java.nio.file.Path.of("src", "main", "java", "com", "kaas", "runner");
-        var executionSources = java.nio.file.Files.walk(root.toFile().isDirectory()
+        var sources = java.nio.file.Files.walk(root.toFile().isDirectory()
                         ? root
                         : java.nio.file.Path.of("services", "runner", "src", "main", "java", "com", "kaas", "runner"))
                 .filter(path -> path.toString().endsWith(".java"))
                 .toList();
 
-        assertThat(executionSources)
-                .as("this test must actually be reading the runner's sources")
-                .hasSizeGreaterThan(10);
+        assertThat(sources).as("this test must actually be reading the runner's sources").hasSizeGreaterThan(10);
 
-        for (var path : executionSources) {
-            String body = java.nio.file.Files.readString(path);
-            assertThat(body)
-                    .as("%s references the source-bundle endpoint", path.getFileName())
-                    .doesNotContain("/source-bundles");
-            assertThat(body)
-                    .as("%s references the source capability header", path.getFileName())
-                    .doesNotContain("X-KaaS-Source-Capability");
-        }
+        List<String> naming = sources.stream()
+                .filter(path -> {
+                    try {
+                        String body = java.nio.file.Files.readString(path);
+                        return body.contains("/source-bundles") || body.contains("X-KaaS-Source-Capability");
+                    } catch (java.io.IOException unreadable) {
+                        return false;
+                    }
+                })
+                .map(path -> path.getFileName().toString())
+                .toList();
+
+        // One file: the client that redeems. The execution package holds the token and hands it to that
+        // client; it does not know how to spend it itself, which keeps the number of places that could grow a
+        // second source path at one.
+        assertThat(naming).containsExactly("ControlPlaneClient.java");
     }
+
 }
