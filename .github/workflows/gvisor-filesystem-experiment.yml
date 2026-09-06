@@ -8,8 +8,13 @@
 # expected to be deleted once its answer is recorded in the architecture evaluation.
 name: gvisor-filesystem-experiment
 
+# Dispatch would be tidier, but a workflow only becomes dispatchable once it exists on the default branch,
+# and this one is temporary. Scoped to its own path so iterating on the experiment runs it and pushing
+# anything else does not.
 on:
-  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/gvisor-filesystem-experiment.yml
 
 permissions:
   contents: read
