@@ -249,51 +249,62 @@ jobs:
 
       # Every fixture is planted during construction, while the process still holds the privilege that makes
       # a setuid bit and a device node real. A control planted by the unprivileged consumer is not a control.
-      - name: T — the mechanism with honest controls, both runtimes
+      # ROUND FIVE — IS THE NOSUID CLAIM OBSERVABLE AT ALL UNDER THIS RUNTIME?
+      #
+      # Round four's setuid control failed again, and the reason is the bootstrap's own hardening: it sets
+      # PR_SET_NO_NEW_PRIVS before handing over, which forbids every setuid transition for the consumer and
+      # all its descendants. So the control could not escalate no matter what the mount said, and a control
+      # that cannot fire is not a control.
+      #
+      # Worth recording plainly, because it invalidates something read too quickly earlier: round one's
+      # `suid=ESCALATED` was vacuous. That container ran as root, so `euid=0` was its starting state and not
+      # a transition. Nothing so far has actually shown gVisor honouring a setuid bit.
+      #
+      # This round asks that question directly and with nothing else in the way: a genuinely setuid-root
+      # binary, on a permissive tmpfs, executed by an unprivileged user in a process that has NOT set
+      # no-new-privs. If it does not escalate here, then nosuid is unobservable under this runtime and the
+      # report has to say so rather than claim an enforcement nobody demonstrated.
+      - name: V — can a setuid binary escalate under gVisor at all
         run: |
           set -uo pipefail
           for rt in runc runsc; do
-            echo "##################### T / $rt"
-            docker run --rm -i --runtime=$rt --network=none \
-              --cap-drop=ALL --cap-add=SYS_ADMIN --cap-add=SETUID --cap-add=SETGID --cap-add=SETPCAP --cap-add=MKNOD --cap-add=CHOWN --cap-add=FOWNER \
-              --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
-              --tmpfs /kaas/control:rw,exec,suid,dev,size=8m,mode=0777 \
-              -v /tmp/build/source-bootstrap:/bootstrap:ro \
-              -v /tmp/fixtures:/fixtures:ro \
-              -v /tmp/boundary.sh:/probe.sh:ro \
-              alpine:3.20 sh -c '
-                mkdir -p /kaas/source/files
-                for d in /kaas/source/files /kaas/control; do
-                  printf "#!/bin/sh\necho FIXTURE_RAN\n" > $d/fixture-exec.sh
-                  chmod 0555 $d/fixture-exec.sh
-                  cp /fixtures/whoami-suid $d/fixture-suid
-                  chown 0:0 $d/fixture-suid
-                  chmod 4755 $d/fixture-suid
-                  mknod $d/fixture-dev c 1 5 2>&1 || echo "mknod on $d failed"
-                  chmod 0444 $d/fixture-dev 2>/dev/null
-                done
-                ls -l /kaas/source/files /kaas/control
-                exec /bootstrap' < /tmp/bundle.frame 2>&1 || echo "(container exited non-zero)"
-          done
-
-      - name: U — does gVisor honour MS_NODEV at all, with no freeze involved
-        run: |
-          set -uo pipefail
-          for rt in runc runsc; do
-            echo "##################### U / $rt   (plain tmpfs, nodev requested, no remount)"
+            echo "##################### V / $rt"
             docker run --rm --runtime=$rt --network=none \
-              --cap-drop=ALL --cap-add=MKNOD \
-              --tmpfs /kaas/nodev:rw,noexec,nosuid,nodev,size=8m \
-              --tmpfs /kaas/dev:rw,exec,suid,dev,size=8m \
+              --cap-drop=ALL --cap-add=SETUID --cap-add=SETGID --cap-add=CHOWN --cap-add=FOWNER \
+              --tmpfs /kaas/suid:rw,exec,suid,size=8m,mode=0777 \
+              --tmpfs /kaas/nosuid:rw,exec,nosuid,size=8m,mode=0777 \
+              -v /tmp/fixtures:/fixtures:ro \
               alpine:3.20 sh -c '
-                echo "nodev mount: $(awk "\$2==\"/kaas/nodev\"" /proc/self/mounts)"
-                echo "dev   mount: $(awk "\$2==\"/kaas/dev\"" /proc/self/mounts)"
-                mknod /kaas/nodev/zero c 1 5 && echo "mknod_on_nodev=CREATED" || echo "mknod_on_nodev=REFUSED"
-                mknod /kaas/dev/zero c 1 5 && echo "mknod_on_dev=CREATED" || echo "mknod_on_dev=REFUSED"
-                dd if=/kaas/dev/zero bs=1 count=1 >/dev/null 2>/dev/null && echo "read_dev=OK" || echo "read_dev=REFUSED"
-                dd if=/kaas/nodev/zero bs=1 count=1 >/dev/null 2>/dev/null && echo "read_nodev=OK <-- NOT honoured" || echo "read_nodev=REFUSED <-- honoured"
+                echo "suid mount:   $(awk "\$2==\"/kaas/suid\"" /proc/self/mounts)"
+                echo "nosuid mount: $(awk "\$2==\"/kaas/nosuid\"" /proc/self/mounts)"
+                for d in /kaas/suid /kaas/nosuid; do
+                  cp /fixtures/whoami-suid $d/f
+                  chown 0:0 $d/f
+                  chmod 4755 $d/f
+                done
+                ls -l /kaas/suid/f /kaas/nosuid/f
+                echo "as root, suid fs:   $(/kaas/suid/f)"
+                # The measurement. An unprivileged user, no no-new-privs anywhere, one variable between the
+                # two filesystems: whether the mount carries nosuid.
+                echo "as nobody, suid fs:   $(su -s /bin/sh nobody -c /kaas/suid/f 2>&1)"
+                echo "as nobody, nosuid fs: $(su -s /bin/sh nobody -c /kaas/nosuid/f 2>&1)"
               ' 2>&1 || echo "(container failed)"
           done
+
+      - name: W — and does no-new-privs alone stop it, with the mount held constant
+        run: |
+          set -uo pipefail
+          echo "##################### W / runsc  (same permissive mount, no-new-privs on)"
+          docker run --rm --runtime=runsc --network=none \
+            --security-opt=no-new-privileges:true \
+            --cap-drop=ALL --cap-add=SETUID --cap-add=SETGID --cap-add=CHOWN --cap-add=FOWNER \
+            --tmpfs /kaas/suid:rw,exec,suid,size=8m,mode=0777 \
+            -v /tmp/fixtures:/fixtures:ro \
+            alpine:3.20 sh -c '
+              cp /fixtures/whoami-suid /kaas/suid/f; chown 0:0 /kaas/suid/f; chmod 4755 /kaas/suid/f
+              grep NoNewPrivs /proc/self/status
+              echo "as nobody, suid fs, nnp set: $(su -s /bin/sh nobody -c /kaas/suid/f 2>&1)"
+            ' 2>&1 || echo "(container failed)"
 
       - name: Clean up
         if: always()
