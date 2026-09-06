@@ -169,9 +169,15 @@ jobs:
 
           echo
           echo "===== F05  the executable control fixture is made non-executable"
+          #
+          # The mode is set twice on purpose -- once at creation and once after closing, because a creation
+          # mode is filtered through the umask -- so a mutation that changes only one of them changes nothing.
+          # A first attempt did exactly that and the control kept running; the fixture's chmod is what this
+          # has to break, and getting that wrong is how a mutation reports a survivor that is really a
+          # mistake in the mutation.
           if mutate F05 "$probe/source-boundary-fixture.c" \
-              "O_WRONLY | O_CREAT | O_TRUNC, 0555" \
-              "O_WRONLY | O_CREAT | O_TRUNC, 0444"; then
+              "    chmod(path, 0555);" \
+              "    chmod(path, 0444);"; then
             out=$(observe /source-boundary-fixture sourceboundary)
             echo "$out" | grep -E 'exec_control|exec_hardened' | sed 's/^/      /'
             if echo "$out" | grep -q '^exec_control=EXECUTED$'; then
