@@ -21,9 +21,10 @@ ready.
 
 **Verdict: SOURCE DELIVERY BLOCKED BY BOUNDARY GAP.**
 
-One caveat on the evidence, stated at the top because it changes how the rest should be read: the mediated
-mount measurements were taken on earlier commits of this branch, and `strong-runtime-gate` has not yet run on
-this one. See §52.
+All eight CI jobs are green on this commit, and the mediated mount measurements in §29 through §33 were made
+by that run rather than inherited from an earlier one. The route there is itself part of the evidence: the
+first attempt failed three jobs because the staged bundle was unreadable to the sandbox uid — a defect no
+local run could reproduce. See §52.
 
 ## 2. Starting commit
 
@@ -260,6 +261,10 @@ fail for an unrelated reason.
 | filesystem | `ext4` | `9p` (gofer) |
 | options carried | `ro,nosuid,nodev,noexec` | `ro` |
 | an executable script in the mount | refused | **executed** |
+
+Confirmed on the final commit, from inside a mediated sandbox: the mount arrives as
+`ro,trans=fd,...,directfs` — a gofer-backed 9p mount carrying `ro` alone, with `noexec`, `nosuid` and `nodev`
+all requested and all absent (§52).
 
 A second round established that gVisor honours `noexec` and `nosuid` on **tmpfs** by default — the no-flags
 control behaved identically, so the flags were not what produced it — and that tmpfs cannot be populated from
@@ -521,10 +526,35 @@ confidentiality moved to a `0700` staging root, which is the layer that can prov
 `SourceStagingTests` now asserts `OTHERS_READ` on files and `OTHERS_EXECUTE` on directories, so the property
 CI caught is checkable everywhere rather than only on Linux.
 
-**The evidence in §29 through §33 is therefore from earlier commits of this branch, not from this one.** Until
-`strong-runtime-gate` passes after this fix, `StrongRuntimeSourceDeliveryTests` has still never completed a
-mediated delivery. Both the suite and the gate step fail rather than skip when the runtime or the evidence is
-absent, so a green job will mean the measurement happened — that green does not exist yet.
+**Run 34032963361 on `a6f33ef`: all eight jobs green,** and this is the first run in which
+`StrongRuntimeSourceDeliveryTests` completed a mediated delivery at all — 12 executed, 0 skipped. What the
+sandbox reported, read back by the gate rather than summarised by the test:
+
+```
+source_verification=VALID
+source_mount_options=ro,trans=fd,rfdno=5,wfdno=5,aname=/,dfltuid=4294967294,dfltgid=4294967294,
+                     dcache=1000,cache=remote_revalidating,disable_fifo_open,directfs
+source_mount_ro=true
+source_mount_noexec=false
+source_mount_nosuid=false
+source_mount_nodev=false
+source_write_refused=true
+source_exec_refused=true
+source_setuid_files=0
+source_irregular_entries=0
+source_entries_verified=1
+source_entry_mismatches=0
+stale_source_dirs=0
+containers=0 networks=0 runsc_processes=0
+```
+
+That options string is the gap in its rawest form: a 9p gofer mount (`trans=fd`, `directfs`) carrying `ro`
+and nothing else. `noexec`, `nosuid` and `nodev` were requested and are absent. Execution is nonetheless
+refused — `source_exec_refused=true` — by the barrier that does hold: the format cannot express a mode and the
+materialiser writes no executable bit.
+
+Every measurement in §29 through §33 is therefore confirmed on this commit rather than inherited from an
+earlier one.
 
 ## 53. Required-check governance
 
