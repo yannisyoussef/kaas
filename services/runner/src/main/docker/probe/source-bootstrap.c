@@ -210,14 +210,22 @@ static void drop_all_privilege(void) {
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
         fail("PRIVILEGE_DROP");
     }
-    if (setgroups(0, NULL) != 0 && errno != EPERM) {
-        fail("PRIVILEGE_DROP");
-    }
-    if (setgid(SANDBOX_GID) != 0) {
-        fail("PRIVILEGE_DROP");
-    }
-    if (setuid(SANDBOX_UID) != 0) {
-        fail("PRIVILEGE_DROP");
+    /* The identity transition, and only when there is one to make.
+     *
+     * The launcher starts this process as the sandbox user already, so ordinarily there is nothing to change
+     * and asking for the change would mean asking for CAP_SETUID and CAP_SETGID that the construction phase
+     * does not otherwise need. Requesting privilege in order to give it up is a bad trade, so the transition
+     * runs only in the case where the process really is somebody else. */
+    if (getuid() != SANDBOX_UID || getgid() != SANDBOX_GID) {
+        if (setgroups(0, NULL) != 0 && errno != EPERM) {
+            fail("PRIVILEGE_DROP");
+        }
+        if (setgid(SANDBOX_GID) != 0) {
+            fail("PRIVILEGE_DROP");
+        }
+        if (setuid(SANDBOX_UID) != 0) {
+            fail("PRIVILEGE_DROP");
+        }
     }
     /* Belt and braces on the permitted/effective/inheritable sets. After setuid from root these are already
      * cleared, but this program must not depend on that being true of every kernel it meets. */
@@ -230,7 +238,8 @@ static void drop_all_privilege(void) {
     if (syscall(SYS_capset, &header, data) != 0 && errno != EPERM) {
         fail("PRIVILEGE_DROP");
     }
-    /* And prove the caller cannot climb back: regaining root must fail from here. */
+    /* And prove the caller cannot climb back. Reported as a failure rather than trusted, because a process
+     * that can still become root has not dropped anything -- it has merely stopped using what it holds. */
     if (setuid(0) == 0) {
         fail("PRIVILEGE_RETAINED");
     }

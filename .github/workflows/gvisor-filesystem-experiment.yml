@@ -228,65 +228,93 @@ jobs:
       # Production has no such path and is not getting one: the bundle format carries a path and bytes and
       # cannot express a mode. The fixtures exist so that "noexec refused it" is distinguishable from "the
       # file was not executable", which is precisely the confusion KAAS-18 ended on.
-      - name: M — the full mechanism, with executable and setuid fixtures on the hardened filesystem
+      # ROUND THREE — WHICH PRIVILEGE THE CONSTRUCTION PHASE ACTUALLY NEEDS.
+      #
+      # Round two failed at PRIVILEGE_DROP: setgid and setuid need CAP_SETGID and CAP_SETUID, which the run
+      # did not grant. There are two ways out and they are not equivalent.
+      #
+      #   Q asks for none of them: the launcher starts the process as the sandbox user already, so there is
+      #     no identity transition to make and SYS_ADMIN is the only extra capability in play.
+      #   R grants SETUID, SETGID and SETPCAP and starts as root, which is the shape that needs justifying.
+      #
+      # Q is the design worth having if it works, because it makes the construction phase differ from the
+      # consumer in exactly one capability. Measuring both is what makes that a finding rather than a
+      # preference.
+      - name: Q — the sandbox user throughout, with SYS_ADMIN as the only extra capability
         run: |
           set -uo pipefail
-          for rt in runc runsc; do
-            echo "##################### M / $rt"
-            docker run --rm -i --runtime=$rt --network=none \
-              --cap-drop=ALL --cap-add=SYS_ADMIN --cap-add=MKNOD --cap-add=CHOWN --cap-add=FOWNER \
-              --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
-              --tmpfs /kaas/control:rw,exec,suid,dev,size=8m \
-              -v /tmp/build/source-bootstrap:/bootstrap:ro \
-              -v /tmp/fixtures:/fixtures:ro \
-              -v /tmp/boundary.sh:/probe.sh:ro \
-              alpine:3.20 sh -c '
-                mkdir -p /kaas/source/files
-                printf "#!/bin/sh\necho FIXTURE_RAN\n" > /kaas/source/files/fixture-exec.sh
-                chmod 0555 /kaas/source/files/fixture-exec.sh
-                cp /fixtures/whoami-suid /kaas/source/files/fixture-suid
-                chown 0:0 /kaas/source/files/fixture-suid
-                chmod 4755 /kaas/source/files/fixture-suid
-                exec /bootstrap' < /tmp/bundle.frame 2>&1 || echo "(container exited non-zero)"
-          done
-
-      - name: N — the production bootstrap alone, no fixtures, under gVisor
-        run: |
-          set -uo pipefail
-          echo "##################### N / runsc"
+          echo "##################### Q / runsc"
           docker run --rm -i --runtime=runsc --network=none \
+            --user 65534:65534 \
             --cap-drop=ALL --cap-add=SYS_ADMIN \
-            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
-            --tmpfs /kaas/control:rw,exec,suid,dev,size=8m \
+            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m,mode=0755,uid=65534,gid=65534 \
+            --tmpfs /kaas/control:rw,exec,suid,dev,size=8m,mode=0777 \
             -v /tmp/build/source-bootstrap:/bootstrap:ro \
             -v /tmp/fixtures:/fixtures:ro \
             -v /tmp/boundary.sh:/probe.sh:ro \
             alpine:3.20 /bootstrap < /tmp/bundle.frame 2>&1 || echo "(container exited non-zero)"
 
-      - name: O — a legal frame that does not fit the filesystem
+      - name: Q2 — the same, with an executable and a setuid fixture on the hardened filesystem
         run: |
           set -uo pipefail
-          echo "##################### O / runsc"
+          echo "##################### Q2 / runsc"
           docker run --rm -i --runtime=runsc --network=none \
-            --cap-drop=ALL --cap-add=SYS_ADMIN \
+            --user 0:0 \
+            --cap-drop=ALL --cap-add=SYS_ADMIN --cap-add=SETUID --cap-add=SETGID --cap-add=SETPCAP --cap-add=CHOWN --cap-add=FOWNER \
             --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
+            --tmpfs /kaas/control:rw,exec,suid,dev,size=8m,mode=0777 \
             -v /tmp/build/source-bootstrap:/bootstrap:ro \
+            -v /tmp/fixtures:/fixtures:ro \
             -v /tmp/boundary.sh:/probe.sh:ro \
-            alpine:3.20 /bootstrap < /tmp/big.frame 2>&1 | head -25 || echo "(container exited non-zero)"
+            alpine:3.20 sh -c '
+              mkdir -p /kaas/source/files
+              printf "#!/bin/sh\necho FIXTURE_RAN\n" > /kaas/source/files/fixture-exec.sh
+              chmod 0555 /kaas/source/files/fixture-exec.sh
+              cp /fixtures/whoami-suid /kaas/source/files/fixture-suid
+              chown 0:0 /kaas/source/files/fixture-suid
+              chmod 4755 /kaas/source/files/fixture-suid
+              exec /bootstrap' < /tmp/bundle.frame 2>&1 || echo "(container exited non-zero)"
 
-      - name: P — no CAP_SYS_ADMIN at all, so the freeze is the thing that fails
+      - name: R — root plus the identity capabilities, the fallback shape
         run: |
           set -uo pipefail
-          echo "##################### P / runsc  (the negative control for the whole mechanism)"
+          echo "##################### R / runsc"
           docker run --rm -i --runtime=runsc --network=none \
-            --cap-drop=ALL \
+            --cap-drop=ALL --cap-add=SYS_ADMIN --cap-add=SETUID --cap-add=SETGID --cap-add=SETPCAP \
             --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m \
+            --tmpfs /kaas/control:rw,exec,suid,dev,size=8m,mode=0777 \
+            -v /tmp/build/source-bootstrap:/bootstrap:ro \
+            -v /tmp/fixtures:/fixtures:ro \
+            -v /tmp/boundary.sh:/probe.sh:ro \
+            alpine:3.20 /bootstrap < /tmp/bundle.frame 2>&1 || echo "(container exited non-zero)"
+
+      - name: S — the negative controls for the mechanism as a whole
+        run: |
+          set -uo pipefail
+          echo "##################### S1 / runsc  (no SYS_ADMIN: the freeze must fail and nothing may be ready)"
+          docker run --rm -i --runtime=runsc --network=none \
+            --user 65534:65534 --cap-drop=ALL \
+            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m,mode=0755,uid=65534,gid=65534 \
             -v /tmp/build/source-bootstrap:/bootstrap:ro \
             -v /tmp/boundary.sh:/probe.sh:ro \
-            alpine:3.20 /bootstrap < /tmp/bundle.frame 2>&1 | head -15 || echo "(container exited non-zero)"
+            alpine:3.20 /bootstrap < /tmp/bundle.frame 2>&1 | head -8 || echo "(exited non-zero)"
+          echo "##################### S2 / runsc  (a frame that does not fit)"
+          docker run --rm -i --runtime=runsc --network=none \
+            --user 65534:65534 --cap-drop=ALL --cap-add=SYS_ADMIN \
+            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m,mode=0755,uid=65534,gid=65534 \
+            -v /tmp/build/source-bootstrap:/bootstrap:ro \
+            -v /tmp/boundary.sh:/probe.sh:ro \
+            alpine:3.20 /bootstrap < /tmp/big.frame 2>&1 | head -8 || echo "(exited non-zero)"
+          echo "##################### S3 / runsc  (a truncated frame)"
+          head -c 40 /tmp/bundle.frame > /tmp/short.frame
+          docker run --rm -i --runtime=runsc --network=none \
+            --user 65534:65534 --cap-drop=ALL --cap-add=SYS_ADMIN \
+            --tmpfs /kaas/source:rw,noexec,nosuid,nodev,size=8m,mode=0755,uid=65534,gid=65534 \
+            -v /tmp/build/source-bootstrap:/bootstrap:ro \
+            -v /tmp/boundary.sh:/probe.sh:ro \
+            alpine:3.20 /bootstrap < /tmp/short.frame 2>&1 | head -8 || echo "(exited non-zero)"
 
       - name: Clean up
         if: always()
         run: |
           docker ps -aq | xargs -r docker rm -f
-          docker volume ls -q --filter name=kaas-exp | xargs -r docker volume rm
