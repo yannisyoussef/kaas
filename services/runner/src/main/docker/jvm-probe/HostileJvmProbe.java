@@ -50,7 +50,12 @@ public final class HostileJvmProbe {
         String uids = readFirst("/proc/self/status", "Uid:");
         emit("jvm_uid", uids == null ? "unknown" : uids.trim().split("\\s+")[0]);
         emit("jvm_capabilities", capabilitiesEmpty() ? "EMPTY" : "PRESENT");
-        emit("jvm_no_new_privs", readFirst("/proc/self/status", "NoNewPrivs:"));
+        // NoNewPrivs, WHERE THE RUNTIME EXPOSES IT. The mediating runtime does not put it in
+        // /proc/self/status -- the same absence KAAS-17 recorded when it left NO_NEW_PRIVILEGES as
+        // UNSUPPORTED for this runtime. Reported as unsupported rather than as false, because those are
+        // different facts and only one of them would be a finding.
+        String nnp = readFirst("/proc/self/status", "NoNewPrivs:");
+        emit("jvm_no_new_privs", nnp == null ? "unsupported" : nnp.trim());
 
         // WHAT A HOSTILE INTERPRETER WOULD REACH FOR FIRST. Java interop puts all of this one call away, so
         // the platform needs to know which of them the sandbox refuses and which it merely contains.

@@ -79,7 +79,12 @@ class HostileJvmContainmentTests {
         var observations = run(SyntheticProbe.HOSTILE_JVM);
 
         assertThat(observations).containsEntry("jvm_capabilities", "EMPTY");
-        assertThat(observations).containsEntry("jvm_no_new_privs", "1");
+        // NoNewPrivs is not observable under this runtime. The bootstrap sets it and the launcher requests
+        // it; what cannot be done is read it back, which is the same absence KAAS-17 recorded for the
+        // NO_NEW_PRIVILEGES control. Asserted as unsupported so a runtime that starts exposing it fails here
+        // and the claim gets upgraded honestly rather than assumed.
+        assertThat(observations).containsEntry("jvm_no_new_privs", "unsupported");
+        assertThat(observations).containsEntry("jvm_uid", "65534");
     }
 
     @Test
@@ -152,27 +157,43 @@ class HostileJvmContainmentTests {
         var observations = run(SyntheticProbe.HOSTILE_JVM);
 
         assertThat(observations).containsEntry("jvm_docker_socket", "false");
+        // Credential-shaped names, not every platform name. KAAS_SANDBOX is a marker the launcher sets so a
+        // workload can tell it is in one; asserting that no name contains "KAAS" would have banned that and
+        // taught nothing. What must never appear is authority.
         assertThat(observations.get("jvm_environment_names"))
                 .as("no worker credential, source capability, egress capability or signing key")
-                .doesNotContain("KAAS")
                 .doesNotContain("TOKEN")
                 .doesNotContain("CAPABILITY")
-                .doesNotContain("SECRET");
+                .doesNotContain("SECRET")
+                .doesNotContain("KEY")
+                .doesNotContain("CREDENTIAL")
+                .doesNotContain("PASSWORD");
     }
 
     @Test
     @Timeout(600)
-    @DisplayName("a JVM can spawn children and its threads are bounded by the profile")
-    void concurrencyIsBoundedRatherThanForbidden() {
-        // NOT A FINDING, AND RECORDED AS SUCH. Arbitrary code spawning a process is expected under the model
-        // this slice adopts; the question is whether the ceiling exists. It does, and it binds Java threads
-        // rather than only processes -- which is the JVM-specific fact a shell probe could not have shown.
+    @DisplayName("the PID ceiling does not bound JVM threads under this runtime, and that is recorded")
+    void threadsAreNotBoundedByThePidCeiling() {
+        // A FINDING, AND THE REASON A JVM PROBE EXISTS AT ALL.
+        //
+        // Under the baseline runtime the profile's PID ceiling of 64 stops a JVM at 49 threads:
+        // pthread_create returns EAGAIN and the JVM raises OutOfMemoryError. Under the mediating runtime the
+        // same workload starts all 200 it attempts. gVisor's task accounting does not charge Java threads
+        // against the container's pids limit.
+        //
+        // So PID_LIMIT bounds processes, not threads, on the runtime tenant code will actually run under.
+        // What bounds a thread explosion there is memory, and the wall-clock deadline behind it. That is a
+        // weaker and less direct bound than the one the profile appears to promise, and it is recorded as
+        // such rather than asserted away -- see docs/security/execution-readiness-matrix.md.
+        //
+        // Asserted in the direction it is true, so a runtime release that starts charging threads fails this
+        // test and the residual risk gets removed rather than quietly persisting.
         var observations = run(SyntheticProbe.HOSTILE_JVM);
 
         assertThat(observations).containsEntry("jvm_child_spawn", "true");
         assertThat(Integer.parseInt(observations.get("jvm_threads_started")))
-                .as("the PID ceiling bounds Java threads: %s", observations.get("jvm_thread_limit"))
-                .isLessThan(200);
+                .as("if this drops below the attempted count, the runtime began bounding threads")
+                .isEqualTo(200);
     }
 
     /**
@@ -190,6 +211,7 @@ class HostileJvmContainmentTests {
         StringBuilder evidence = new StringBuilder();
         evidence.append("java_capabilities=").append(containment.get("jvm_capabilities")).append('\n');
         evidence.append("java_no_new_privs=").append(containment.get("jvm_no_new_privs")).append('\n');
+        evidence.append("java_uid=").append(containment.get("jvm_uid")).append('\n');
         evidence.append("java_source_write=").append(withSource.get("jvm_source_write")).append('\n');
         evidence.append("java_source_exec=").append(withSource.get("jvm_source_exec")).append('\n');
         evidence.append("java_source_chmod=").append(withSource.get("jvm_source_chmod")).append('\n');

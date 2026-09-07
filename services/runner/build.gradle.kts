@@ -129,7 +129,29 @@ val egressSecurityTest = tasks.register<Test>("egressSecurityTest") {
  * <p>The consequence is worth stating rather than leaving to be inferred: **a green local build proves nothing
  * about the stronger runtime.** Only `strong-runtime-gate` does.
  */
+/**
+ * Assembles the hostile JVM probe's build context.
+ *
+ * <p>The probe needs the source bootstrap so a JVM can attack a real frozen source filesystem, and the
+ * bootstrap's C source lives next to the security probe. Copying it into a second directory would leave two
+ * files that must be kept identical by hand, which is the arrangement that eventually produces a measurement
+ * of a program nobody edited. Assembling the context instead keeps one source of truth.
+ */
+val jvmProbeImageContext = tasks.register<Sync>("jvmProbeImageContext") {
+    group = "build"
+    description = "Assembles the repository-controlled hostile JVM probe image build context."
+    into(layout.buildDirectory.dir("jvm-probe-context"))
+    from(layout.projectDirectory.dir("src/main/docker/jvm-probe"))
+    // The bootstrap's C source only. This image ships its own /probe.sh -- the bootstrap's handover is a
+    // compile-time constant, and in this image that constant has to reach the JVM rather than the shell
+    // verifier.
+    from(layout.projectDirectory.dir("src/main/docker/probe")) {
+        include("source-bootstrap.c")
+    }
+}
+
 val strongRuntimeTest = tasks.register<Test>("strongRuntimeTest") {
+    dependsOn(jvmProbeImageContext)
     group = "verification"
     description = "Runs the hostile-execution probe under the mediating runtime. Requires runsc on the daemon."
     testClassesDirs = sourceSets["test"].output.classesDirs
@@ -152,6 +174,7 @@ val strongRuntimeTest = tasks.register<Test>("strongRuntimeTest") {
 }
 
 tasks.named<Test>("test") {
+    dependsOn(jvmProbeImageContext)
     // Excluded here because they run in egressSecurityTest above. Running them in both would double a
     // Docker-heavy suite and put two launchers on one daemon.
     filter {

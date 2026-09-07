@@ -26,14 +26,15 @@ would be.
    refused, attacked from Java against a real delivered bundle.
 3. **Generated code cannot execute.** Scratch space is writable and `noexec`: the write succeeds and the
    execution does not, so `noexec` on the source filesystem is not trivially bypassed by writing elsewhere.
-4. **No privilege survives construction.** Every capability set empty, `NoNewPrivs=1`, uid 65534, read out of
-   `/proc` by the consumer rather than asserted by whatever dropped them.
+4. **No privilege survives construction.** Every capability set empty and uid 65534, read out of `/proc` by
+   the consumer rather than asserted by whatever dropped them. No-new-privs is requested by the launcher and
+   set by the bootstrap; this runtime does not expose it for reading back, and that is reported as
+   `unsupported` rather than as a pass.
 5. **Raw Java networking reaches nothing.** DNS and three socket destinations, including cloud metadata and
    loopback, all refused under `DENY_ALL` — by topology, not by any engine's client honouring configuration.
 6. **No platform authority is visible.** No daemon socket, no credential in the environment, and the
    environment's names are asserted against a closed set.
-7. **Concurrency is bounded.** The PID ceiling binds Java threads, not only processes — measured at 49 of 200
-   attempted before the runtime refused.
+7. **Process creation is bounded.** Child processes are subject to the PID ceiling and die with the sandbox.
 8. **A JVM fits the profile.** It starts and completes within 256 MiB, 64 PIDs and a 16 MiB scratch
    filesystem, so the first engine slice will not discover a resource problem disguised as a security one.
 
@@ -64,6 +65,18 @@ freeze rather than degrading it.
 
 The producer hashes the runtime binary; the daemon opens it later. Nothing in-process can bind that. Accepted,
 with deployment integrity named as the control rather than implied.
+
+### The PID ceiling does not bound JVM threads
+
+Measured, and it differs by runtime: under the baseline runtime a JVM is stopped at 49 of 200 attempted
+threads by `pthread_create` returning `EAGAIN`; under the mediating runtime the same workload starts all 200.
+gVisor does not charge Java threads against the container's pids limit.
+
+**Accepted**, because a thread explosion is still bounded — by the memory ceiling each thread's stack draws
+against, and by the wall-clock deadline behind that. But it is a weaker and less direct bound than the
+profile's `PID_LIMIT` appears to promise, and it is written down rather than left to be discovered by whoever
+first tunes the limits. The test asserts the current behaviour in the direction it is true, so a runtime that
+begins charging threads fails it and this acceptance is removed rather than persisting unnoticed.
 
 ### Cloud metadata by hostname on some providers
 

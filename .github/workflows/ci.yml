@@ -686,7 +686,10 @@ jobs:
           cat "$evidence"
           # The process a future engine would be, read out of its own /proc.
           grep -q '^java_capabilities=EMPTY$' "$evidence"
-          grep -q '^java_no_new_privs=1$' "$evidence"
+          # Requested by the launcher and set by the bootstrap; this runtime does not expose it for reading
+          # back, which is the same absence KAAS-17 recorded for the NO_NEW_PRIVILEGES control.
+          grep -q '^java_no_new_privs=unsupported$' "$evidence"
+          grep -q '^java_uid=65534$' "$evidence"
           # The source filesystem, attacked from Java rather than from shell.
           grep -q '^java_source_write=false$' "$evidence"
           grep -q '^java_source_exec=false$' "$evidence"
@@ -703,7 +706,10 @@ jobs:
           # Not findings, recorded because the model says so: arbitrary code may spawn and thread, and the
           # profile must bound it.
           grep -q '^java_child_spawned=true$' "$evidence"
-          grep -qE '^java_threads_bounded=true$' "$evidence"
+          # THE THREAD FINDING, recorded in the direction it is true. gVisor does not charge Java threads
+          # against the pids limit -- 200 of 200 attempted start here, where the baseline runtime stops at 49.
+          # If this ever becomes true, the runtime began bounding them and the residual risk is gone.
+          grep -qE '^java_threads_bounded=false$' "$evidence"
 
       # Tenant bytes are the one thing in this repository that must not survive the job that used them.
       - name: Confirm no tenant source outlived the gate

@@ -63,12 +63,12 @@ source filesystem. Each has a test.
 |---|---|---|
 | uid/gid | **ENFORCED** | 65534 both, read from `/proc/self` by the JVM itself |
 | capabilities | **ENFORCED** | every set empty, read by the consumer after the drop |
-| no-new-privs | **ENFORCED at process level** | the bootstrap sets it; the JVM reads `NoNewPrivs=1` |
+| no-new-privs | **SET, NOT OBSERVABLE** | the launcher requests it and the bootstrap sets it; the mediating runtime does not expose `NoNewPrivs` in `/proc/self/status`, the same absence KAAS-17 recorded for the control. Reported as `unsupported` rather than as false |
 | construction privilege does not survive | **ENFORCED** | the consumer reads its own empty sets; without the capability the freeze fails and nothing becomes ready |
 | tenant content cannot start before the drop | **ENFORCED** | the bootstrap execs the consumer as its last action; nothing it does interprets what it read |
 | process creation | **ALLOWED, CONTAINED** | expected under the chosen model; bounded by the PID ceiling |
-| threads | **BOUNDED** | 49 of 200 attempted before `pthread_create` failed — the ceiling binds tasks, not only processes |
-| resource limits | **ENFORCED** | memory, swap, CPU, PID, wall clock, output, log bytes |
+| threads | **NOT BOUNDED BY THE PID CEILING — ACCEPTED** | 49 of 200 under the baseline runtime; **200 of 200 under the mediating one**. gVisor does not charge Java threads against the container's pids limit. Bounded by memory and the wall-clock deadline instead — a weaker and less direct bound than the profile appears to promise |
+| resource limits | **ENFORCED** | memory, swap, CPU, PID, wall clock, output, log bytes — with the thread caveat above: `PID_LIMIT` bounds processes, not JVM threads, on the runtime tenant code will run under |
 | a JVM fits the profile | **FEASIBLE** | starts and completes within 256 MiB / 64 PIDs / 16 MiB scratch |
 
 ## Authority

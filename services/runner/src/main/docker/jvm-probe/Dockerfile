@@ -14,9 +14,23 @@ FROM eclipse-temurin@sha256:09349d79941fd53bb3d487b393ca118d8853c08c09193f416fe6
 COPY HostileJvmProbe.java /src/HostileJvmProbe.java
 RUN javac -d /probe /src/HostileJvmProbe.java
 
+# THE SOURCE BOOTSTRAP, built from the same C file the security probe uses.
+#
+# It is here so a JVM can attack a real frozen source filesystem rather than an approximation of one. Gradle
+# assembles this build context from two directories precisely so there is one copy of that source, not two
+# that have to be kept identical by hand.
+FROM gcc@sha256:5e927c284bf55a7dc796262e311a0703344f62f41f5621eb56843111b1d37e15 AS bootstrap
+COPY source-bootstrap.c /src/source-bootstrap.c
+RUN gcc -static -O2 -Wall -Wextra -Werror -o /src/source-bootstrap /src/source-bootstrap.c
+
 FROM eclipse-temurin@sha256:3137541deb3cac6626b5d9a4a2187bc0d6a34312f858bd2c67dd01e732e6b682
 
 COPY --from=compile /probe /probe
+COPY --from=bootstrap /src/source-bootstrap /source-bootstrap
+# The verifier the bootstrap hands over to. Present so the bootstrap's fixed handover resolves; this image's
+# own measurements come from the JVM, which the launcher starts instead when no source is delivered.
+COPY probe.sh /probe.sh
+RUN chmod 0555 /source-bootstrap /probe.sh
 
 # Non-root in the image as well as in the launcher, for the same reason as the security probe: the image's
 # USER is advisory because a launcher can override it, and a launcher-only setting leaves an image that runs

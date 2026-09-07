@@ -65,11 +65,18 @@ final class SandboxTestSupport {
         return jvmProbeImageReference;
     }
 
+    /**
+     * The assembled context, not the source directory.
+     *
+     * <p>Gradle gathers the probe's own files and the source bootstrap into one place, because the bootstrap
+     * lives beside the security probe and having a second copy of it here would mean two files kept identical
+     * by hand.
+     */
     static Path jvmProbeContext() {
-        Path fromModule = Path.of("src", "main", "docker", "jvm-probe");
+        Path fromModule = Path.of("build", "jvm-probe-context");
         return fromModule.toFile().isDirectory()
                 ? fromModule
-                : Path.of("services", "runner", "src", "main", "docker", "jvm-probe");
+                : Path.of("services", "runner", "build", "jvm-probe-context");
     }
 
     private static String proxyImageReference;
