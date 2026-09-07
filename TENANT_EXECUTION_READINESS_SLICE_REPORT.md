@@ -174,7 +174,23 @@ because the write succeeding is what makes the refusal meaningful.
 `java_child_spawned=true`. Not a finding: arbitrary code spawning a process is expected under the chosen
 model. It is bounded by the PID ceiling and dies with the container.
 
-## 21. Child-process containment
+## 21. Child-process containment and the thread ceiling
+
+**A finding, and the reason a JVM probe exists.** The profile's PID ceiling of 64 stops a JVM at 49 threads
+under the baseline runtime — `pthread_create` returns `EAGAIN` — and does not stop it at all under the
+mediating one, where all 200 attempted threads start. gVisor does not charge Java threads against the
+container's pids limit.
+
+So `PID_LIMIT` bounds processes and not threads on the runtime tenant code will actually run under. A thread
+explosion is still bounded, by the memory ceiling each stack draws against and by the wall-clock deadline
+behind it — but that is weaker and less direct than the profile appears to promise, and it is recorded as an
+accepted residual rather than asserted away. The test asserts the current behaviour in the direction it is
+true, so a runtime that begins charging threads fails it and the acceptance is removed.
+
+No shell probe could have found this: threads are not processes, and every hostile probe before this one was
+a shell script.
+
+## 21b. Child-process containment
 
 A per-execution container is removed on every path — success, failure, timeout, authority loss and launcher
 exception alike — so a child cannot outlive the sandbox that contains it. Cancellation terminates the sandbox
@@ -326,6 +342,10 @@ Findings that changed the work:
   as `runc`, not a path, so the baseline attestation could not be produced at all. Resolved the way the daemon
   resolves it, with the weaker binding stated rather than hidden.
 - **The measurement was untestable** (P1, found by mutation) — see §45.
+- **The forbidden-dependency guard banned only the abandoned Karate groupId** (P1). All three modules refused
+  `com.intuit.karate:`, whose coordinates stopped at 1.4.1 in 2023; the artifact anyone would actually add is
+  `io.karatelabs:`, and it would have passed. Found while evaluating 2.1.2 for this slice, and closed — the
+  guard that exists to stop Karate arriving unnoticed could not have stopped Karate arriving.
 
 ## 45. Mutation evidence
 
@@ -404,7 +424,8 @@ the test configurations that must now name an accepted implementation.
 ## 51. Local verification
 
 Full `cleanTest build` on Java 25 / Gradle 9.7.1 with PostgreSQL and RabbitMQ Testcontainers, plus web,
-contracts, audit and whitespace gates. **739 tests, 0 failures, 0 skips.**
+contracts, audit and whitespace gates. **744 tests, 0 failures, 0 skips** — 333 in `apps/api`, 256 in
+`services/runner`, 116 in `services/egress-proxy`, 39 in `tests/pipeline`.
 
 Also measured locally, because it is meaningful off gVisor: a JVM under the production profile, which is how
 the feasibility and `/tmp` findings were first obtained before CI confirmed them under the mediating runtime.
@@ -413,7 +434,44 @@ the feasibility and `/tmp` findings were first obtained before CI confirmed them
 
 ## 52. GitHub Actions verification
 
-Recorded in §58's addendum with the final run.
+**Run 34069154985 on `86eda8e`: all eight jobs green.** `strong-runtime-gate` executed 21 tests with 0 skips.
+
+Runtime identity, read back from the verifier's own output and compared against the file the job installed:
+
+```
+runtimeImplementationName=runsc
+runtimeImplementationVersion=runsc version release-20260817.0
+runtimeImplementationDigest=sha256:048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c
+runtime_sha256=048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c
+attestation_verification=VALID
+runtime_change_invalidates_evidence=true
+```
+
+The measured digest equals the pinned `RUNSC_SHA256` the job installed, so the producer measured the binary
+the daemon will actually run rather than some other copy — which is the failure mode §99 of the brief exists
+to prevent. The last line is the invalidation invariant: the same document, verified against a different
+accepted implementation, was refused.
+
+Hostile JVM containment, under the mediating runtime:
+
+```
+java_capabilities=EMPTY        java_no_new_privs=unsupported   java_uid=65534
+java_source_write=false        java_source_exec=false          java_source_chmod=false
+java_remount=false             java_mknod=false
+java_tmp_write=true            java_tmp_exec=false
+java_dns=false                 java_raw_direct_egress=false    java_docker_socket=false
+java_child_spawned=true        java_threads_started=200        java_threads_bounded=false
+stale_source_dirs=0            containers=0 networks=0 runsc_processes=0
+```
+
+`java_mknod=false` beside `java_source_write=false` is the `nodev` compensating-control argument measured from
+the attacker's side. `java_tmp_write=true` with `java_tmp_exec=false` is both halves of the generated-code
+case. `java_threads_bounded=false` is the finding in §21.
+
+Four CI failures preceded this run and every one was a real defect rather than a flaky job: a package manager
+in the probe image's build; a bare runtime registration that could not be measured; a bare `java` that the
+launcher could not start; and three assertions that described the baseline runtime's behaviour rather than the
+mediating one's — including the thread-ceiling claim, which was simply wrong about the runtime that matters.
 
 ## 53. Required-check governance
 
@@ -424,11 +482,14 @@ administration state this report cannot read and does not claim.
 ## 54. Accepted residual risks
 
 1. `nodev` not enforced by the runtime — §14.
-2. The construction phase holds capabilities briefly — §15, §16.
-3. The measure-to-use window on the runtime binary — deployment integrity is the control.
-4. A bare runtime registration is a weaker binding than an absolute one.
-5. Provider metadata endpoints that are globally routable need a deployment-level control.
-6. Karate dependency versions have had no CVE review; that belongs to the slice that pins them.
+2. The PID ceiling does not bound JVM threads under the mediating runtime — §21. Memory and the wall clock
+   are what bound a thread explosion there.
+3. The construction phase holds capabilities briefly — §15, §16.
+4. The measure-to-use window on the runtime binary — deployment integrity is the control.
+5. A bare runtime registration is a weaker binding than an absolute one.
+6. No-new-privs is set but not observable under this runtime, so it is reported as `unsupported`.
+7. Provider metadata endpoints that are globally routable need a deployment-level control.
+8. Karate dependency versions have had no CVE review; that belongs to the slice that pins them.
 
 ## 55. Remaining blockers
 

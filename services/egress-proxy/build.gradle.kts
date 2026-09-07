@@ -105,6 +105,10 @@ val verifyProxyHasNoPrivilegedDependencies = tasks.register("verifyProxyHasNoPri
             .filter {
                 it.startsWith("com.github.docker-java:") ||
                     it.startsWith("com.intuit.karate:") ||
+                    // Karate moved to io.karatelabs at 2.x, and the old coordinates stopped at 1.4.1 in
+                    // 2023. A guard that banned only the abandoned groupId would have permitted the exact
+                    // artifact anyone would actually add -- found while evaluating 2.1.2 for KAAS-20.
+                    it.startsWith("io.karatelabs:") ||
                     it.startsWith("io.minio:") ||
                     it.startsWith("org.springframework") ||
                     it.contains("kaas:api") ||
