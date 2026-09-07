@@ -23,6 +23,14 @@ COPY --from=compile /probe /probe
 # as root anywhere else it is used.
 USER 65534:65534
 
-# A fixed entrypoint. The launcher supplies only a mode selected from a server-side enumeration, so no
-# caller-supplied string ever becomes part of a command line.
-ENTRYPOINT ["java", "-XX:MaxRAMPercentage=50", "-cp", "/probe", "HostileJvmProbe"]
+# A fixed entrypoint, named by ABSOLUTE PATH.
+#
+# Not a style choice. Launched through the platform's own launcher, a bare `java` is not resolvable: the
+# daemon refuses the start with `exec: "java": executable file not found in $PATH`. The launcher sets the
+# sandbox's environment explicitly rather than inheriting one, and whatever the interaction is between that
+# and the image's own ENV, the measured outcome is that the lookup fails. The security probe has never hit
+# this because its entrypoint is /bin/sh, which is absolute.
+#
+# So: every image this launcher runs names its program by absolute path. The launcher supplies only a mode
+# selected from a server-side enumeration, so no caller-supplied string ever becomes part of this command line.
+ENTRYPOINT ["/opt/java/openjdk/bin/java", "-XX:MaxRAMPercentage=50", "-cp", "/probe", "HostileJvmProbe"]

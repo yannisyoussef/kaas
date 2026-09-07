@@ -45,7 +45,10 @@ public final class HostileJvmProbe {
         // THE PROCESS'S OWN SECURITY CONTEXT, read rather than assumed. A JVM reports these differently from
         // a shell, and the whole question is what the process a future engine would be actually holds.
         emit("jvm_version", System.getProperty("java.version"));
-        emit("jvm_uid", readFirst("/proc/self/status", "Uid:"));
+        // The real uid only. /proc reports four tab-separated ids on that line and emitting them raw ran
+        // them together into one meaningless number, which is worse than not reporting it.
+        String uids = readFirst("/proc/self/status", "Uid:");
+        emit("jvm_uid", uids == null ? "unknown" : uids.trim().split("\\s+")[0]);
         emit("jvm_capabilities", capabilitiesEmpty() ? "EMPTY" : "PRESENT");
         emit("jvm_no_new_privs", readFirst("/proc/self/status", "NoNewPrivs:"));
 
