@@ -48,11 +48,9 @@ public final class SyntheticResultDocument {
             Duration provisioning,
             Duration reporting,
             UUID resultId,
-            UUID messageId) {
+            UUID messageId,
+            boolean passed) {
 
-        Map<String, String> observations = outcome.observations();
-        String workloadOutcome = observations.get("workload_outcome");
-        boolean passed = "PASSED".equals(workloadOutcome);
 
         ObjectNode root = mapper.createObjectNode();
         root.put("schemaVersion", SCHEMA_VERSION);

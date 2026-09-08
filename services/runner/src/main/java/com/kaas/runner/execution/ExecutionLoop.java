@@ -77,6 +77,15 @@ public final class ExecutionLoop {
      */
     private final boolean deliversTenantSource;
 
+    /**
+     * Which engine this runner executes.
+     *
+     * <p>Deployment configuration, never anything a command carries. A runner holds one engine because the
+     * images differ: the synthetic workload's image has no JVM and the engine image has no shell probe. The
+     * command validator refuses a command naming a different one, and this decides how the result is read.
+     */
+    private final String engine;
+
     public ExecutionLoop(
             ControlPlaneClient controlPlane,
             CommandValidator validator,
@@ -124,6 +133,22 @@ public final class ExecutionLoop {
             SyntheticProbe workload,
             EgressExecutions egressExecutions,
             boolean deliversTenantSource) {
+        this(controlPlane, validator, launcher, mapper, clock, workload, egressExecutions,
+                deliversTenantSource, CommandValidator.SYNTHETIC_ENGINE);
+    }
+
+    /** The full form: a runner that executes a named engine rather than the platform's own workload. */
+    public ExecutionLoop(
+            ControlPlaneClient controlPlane,
+            CommandValidator validator,
+            SandboxLauncher launcher,
+            ObjectMapper mapper,
+            Clock clock,
+            SyntheticProbe workload,
+            EgressExecutions egressExecutions,
+            boolean deliversTenantSource,
+            String engine) {
+        this.engine = engine;
         this.controlPlane = controlPlane;
         this.validator = validator;
         this.launcher = launcher;
@@ -639,9 +664,15 @@ public final class ExecutionLoop {
         if (reporting.isNegative()) {
             reporting = Duration.ZERO;
         }
+        // THE ONLY THING THE WORKLOAD DECIDES.
+        //
+        // Everything else in the document below is reconstructed from the command and the control plane's own
+        // instants. This one boolean is the entire surface a hostile engine can influence, and ADR-032 says
+        // so plainly: a tenant running arbitrary code can lie about its own assertion, and the platform's
+        // requirement is that it cannot forge provenance or reach another tenant.
         String document = SyntheticResultDocument.build(
                 mapper, command, outcome, executionStartedAt, finishedAt, provisioningElapsed, reporting,
-                UUID.randomUUID(), UUID.randomUUID());
+                UUID.randomUUID(), UUID.randomUUID(), testPassed(outcome));
         var body = mapper.createObjectNode();
         body.put("assignmentEpoch", assignmentEpoch);
         body.put("commandId", command.commandId().toString());
@@ -701,7 +732,7 @@ public final class ExecutionLoop {
      * completion. Reporting any of them as a test outcome would attribute a platform failure to a tenant's
      * tests, which is the single most damaging thing this component can do.
      */
-    private static String infrastructureFailureDetail(SandboxOutcome outcome) {
+    private String infrastructureFailureDetail(SandboxOutcome outcome) {
         // Deliberately NOT calling evidenceIsComplete(): it is `failure.isEmpty() || timedOut()`, and the check
         // below has already returned for every case where a failure is present — so it can never be false here.
         // It was in this chain and mutation testing showed removing it killed nothing, which is what dead code
@@ -723,6 +754,23 @@ public final class ExecutionLoop {
         // The workload identifies itself, and the runner checks. Without this, ANY container that exited zero
         // and emitted the right key would be believed — and the probe's own comment claims this identity makes
         // a synthetic result unmistakable downstream, which was only true if somebody looked at it.
+        if (CommandValidator.KARATE_ENGINE.equals(engine)) {
+            // THE ENGINE PATH, and deliberately not the identity check below.
+            //
+            // A self-declared identity is worth something when the only thing in the sandbox is a
+            // platform-written probe. It is worth nothing when the sandbox is running tenant code, because
+            // tenant code can print any identity it likes. So the engine path does not ask the workload who
+            // it is; it reads a bounded verdict and refuses anything that is not one of two words.
+            EngineOutcome engineOutcome = EngineOutcome.of(outcome);
+            if (engineOutcome.completed()) {
+                return null;
+            }
+            // ENGINE_ERROR, ABSENT and MALFORMED are all platform problems and none of them is a test result.
+            // A hostile System.exit(0) lands here as ABSENT rather than as a pass, which is the whole reason
+            // the adapter's last act is to print a verdict.
+            return "The engine produced no usable result (" + engineOutcome.verdict() + ").";
+        }
+
         String identity = outcome.observations().get("workload_identity");
         if (!SYNTHETIC_WORKLOAD_IDENTITY.equals(identity)) {
             return "The sandbox did not identify itself as " + SYNTHETIC_WORKLOAD_IDENTITY + ".";
@@ -736,6 +784,19 @@ public final class ExecutionLoop {
 
     /** The fixed identity the trusted workload reports. Anything else did not run what we asked for. */
     public static final String SYNTHETIC_WORKLOAD_IDENTITY = "KAAS_SYNTHETIC_V1";
+
+    /**
+     * Whether the workload passed, asked of whichever engine this runner executes.
+     *
+     * <p>Reached only after {@link #infrastructureFailureDetail} returned nothing, so by here the engine is
+     * known to have produced a usable verdict.
+     */
+    private boolean testPassed(SandboxOutcome outcome) {
+        if (CommandValidator.KARATE_ENGINE.equals(engine)) {
+            return EngineOutcome.of(outcome).verdict() == EngineOutcome.Verdict.PASSED;
+        }
+        return "PASSED".equals(outcome.observations().get("workload_outcome"));
+    }
 
     /**
      * Which workload this runner executes.

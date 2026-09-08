@@ -79,7 +79,33 @@ public final class CommandValidator {
      * would name an engine, the runner would run shell assertions, and every consumer downstream would believe
      * a real engine had produced the result. Refusing is loud; running something else under that name is not.
      */
-    private static final String EXECUTABLE_ENGINE = "SYNTHETIC";
+    /**
+     * The engine this runner can actually execute, and the exact version of it.
+     *
+     * <p>Runner configuration, never anything the command carries. A runner holds one engine: the synthetic
+     * workload's image has no JVM and the Karate image has no shell probe, so "which engine" is a property of
+     * how this process was deployed. A command naming a different one is refused rather than attempted.
+     *
+     * <p>The VERSION is checked as well as the type, and that is not ceremony. KAAS-20's whole engine
+     * adjudication -- unrestricted {@code Java.type}, the JS engine, the dependency graph -- was performed
+     * against one exact version. A command authorized for that version must not be served by a deployment
+     * carrying another, because the analysis that authorized it would no longer describe what ran.
+     */
+    private final String executableEngine;
+
+    private final String executableEngineVersion;
+
+    /** The platform's own workload, and the default for a runner that was not told otherwise. */
+    public static final String SYNTHETIC_ENGINE = "SYNTHETIC";
+
+    /** The first tenant-code engine. Executable only where the engine image is actually deployed. */
+    public static final String KARATE_ENGINE = "KARATE";
+
+    /** The one Karate version this repository has adjudicated. See ADR-032 and ADR-033. */
+    public static final String KARATE_VERSION = "2.1.2";
+
+    /** The synthetic workload's version, as the control plane declares it. */
+    private static final String SYNTHETIC_VERSION_ANY = "*";
 
     private ObjectMapper mapper;
 
@@ -128,6 +154,22 @@ public final class CommandValidator {
             ObjectMapper mapper,
             java.util.Set<String> enforceablePolicies,
             java.util.Optional<String> expectedAssessmentDigest) {
+        this(mapper, enforceablePolicies, expectedAssessmentDigest, SYNTHETIC_ENGINE, SYNTHETIC_VERSION_ANY);
+    }
+
+    /**
+     * @param executableEngine the engine this runner is deployed to execute
+     * @param executableEngineVersion the exact version it carries, or {@code *} where the engine is the
+     *     platform's own workload and its version is the control plane's own declaration
+     */
+    public CommandValidator(
+            ObjectMapper mapper,
+            java.util.Set<String> enforceablePolicies,
+            java.util.Optional<String> expectedAssessmentDigest,
+            String executableEngine,
+            String executableEngineVersion) {
+        this.executableEngine = executableEngine;
+        this.executableEngineVersion = executableEngineVersion;
         java.util.Set<String> policies = new java.util.LinkedHashSet<>(enforceablePolicies);
         policies.add(ALWAYS_ENFORCEABLE);
         this.enforceablePolicies = java.util.Set.copyOf(policies);
@@ -234,10 +276,20 @@ public final class CommandValidator {
         }
 
         String engineType = text(engine, "type");
-        if (!EXECUTABLE_ENGINE.equals(engineType)) {
+        if (!executableEngine.equals(engineType)) {
             throw new CommandRejected(
                     "This runner cannot execute the engine " + engineType
-                            + "; only " + EXECUTABLE_ENGINE + " is executable here.");
+                            + "; only " + executableEngine + " is executable here.");
+        }
+        String engineVersion = text(engine, "version");
+        if (!SYNTHETIC_VERSION_ANY.equals(executableEngineVersion)
+                && !executableEngineVersion.equals(engineVersion)) {
+            // REFUSED, never served by whatever happens to be installed. The engine analysis that authorized
+            // execution was performed against one exact version; a deployment carrying another is a
+            // deployment whose boundary nobody adjudicated.
+            throw new CommandRejected(
+                    "This runner carries engine version " + executableEngineVersion
+                            + " and the command authorizes " + engineVersion + ".");
         }
 
         // A source bundle may be described but must never be fetched or executed by this runner. The synthetic

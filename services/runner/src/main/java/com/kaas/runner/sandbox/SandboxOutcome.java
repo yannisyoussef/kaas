@@ -20,6 +20,16 @@ import java.util.Optional;
 public record SandboxOutcome(
         Optional<Integer> exitCode,
         Map<String, String> observations,
+        /**
+         * Keys the sandbox reported more than once.
+         *
+         * <p>A map keeps the last value and forgets there was another, which is fine for a diagnostic and
+         * wrong for a result. Tenant code runs in this sandbox: a workload that announces an outcome and then
+         * lets the platform adapter announce the real one would leave a map holding one plausible answer with
+         * no trace of the other. This is what lets a caller refuse a stream that answered twice rather than
+         * pick whichever it preferred.
+         */
+        java.util.Set<String> duplicatedObservations,
         boolean outputTruncated,
         int retainedBytes,
         Duration elapsed,
@@ -28,6 +38,7 @@ public record SandboxOutcome(
 
     public SandboxOutcome {
         observations = Map.copyOf(observations);
+        duplicatedObservations = java.util.Set.copyOf(duplicatedObservations);
     }
 
     public boolean timedOut() {
@@ -48,8 +59,8 @@ public record SandboxOutcome(
     /** The same outcome with a failure recorded, used to fold a cleanup failure into a completed run. */
     public SandboxOutcome withFailure(SandboxFailure cleanupFailure) {
         return new SandboxOutcome(
-                exitCode, observations, outputTruncated, retainedBytes, elapsed, outOfMemory,
-                Optional.of(cleanupFailure));
+                exitCode, observations, duplicatedObservations, outputTruncated, retainedBytes, elapsed,
+                outOfMemory, Optional.of(cleanupFailure));
     }
 
     /** An observation the probe reported, or empty when it never got far enough to report one. */

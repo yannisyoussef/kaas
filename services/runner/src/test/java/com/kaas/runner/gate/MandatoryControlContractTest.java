@@ -153,6 +153,7 @@ class MandatoryControlContractTest {
             return new SandboxOutcome(
                     java.util.Optional.empty(),
                     java.util.Map.of(),
+                    java.util.Set.of(),
                     false,
                     0,
                     java.time.Duration.ZERO,

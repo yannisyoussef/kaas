@@ -156,6 +156,7 @@ class EgressEnforcementGateTests {
         assertThat(EgressEnforcementGate.noDirectRouteFrom(new com.kaas.runner.sandbox.SandboxOutcome(
                                 java.util.Optional.of(0),
                                 isolatedSandbox(),
+                                java.util.Set.of(),
                                 false,
                                 0,
                                 java.time.Duration.ofSeconds(1),
@@ -221,6 +222,7 @@ class EgressEnforcementGateTests {
         return new com.kaas.runner.sandbox.SandboxOutcome(
                 java.util.Optional.of(0),
                 observations,
+                java.util.Set.of(),
                 false,
                 0,
                 java.time.Duration.ofSeconds(1),

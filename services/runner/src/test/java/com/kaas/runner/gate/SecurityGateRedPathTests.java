@@ -186,6 +186,7 @@ class SecurityGateRedPathTests {
             return new SandboxOutcome(
                     Optional.of(timedOut ? 137 : 0),
                     observations.get(probe),
+                    java.util.Set.of(),
                     probe == SyntheticProbe.OUTPUT,
                     probe == SyntheticProbe.OUTPUT ? (bounding ? 64 * 1024 : 13 * 1024 * 1024) : 512,
                     timedOut ? Duration.ofSeconds(31) : Duration.ofSeconds(1),
@@ -336,7 +337,8 @@ class SecurityGateRedPathTests {
                 SandboxOutcome outcome = super.run(request);
                 return request.probe() == SyntheticProbe.SLEEP
                         ? new SandboxOutcome(
-                                outcome.exitCode(), outcome.observations(), outcome.outputTruncated(),
+                                outcome.exitCode(), outcome.observations(), outcome.duplicatedObservations(),
+                                outcome.outputTruncated(),
                                 outcome.retainedBytes(), Duration.ofMillis(164), outcome.outOfMemory(),
                                 outcome.failure())
                         : outcome;

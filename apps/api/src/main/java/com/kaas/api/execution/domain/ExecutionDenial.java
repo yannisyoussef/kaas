@@ -32,6 +32,20 @@ public enum ExecutionDenial {
     RUN_SNAPSHOT_INVALID,
     /** The run binds secrets and no production secret provider exists to satisfy them. */
     SECRET_PROVIDER_UNAVAILABLE,
+
+    /**
+     * The run carries secret bindings and its engine is only authorized for secret-free execution.
+     *
+     * <p>Deliberately separate from {@link #SECRET_PROVIDER_UNAVAILABLE}, which is a statement about the
+     * deployment: no provider exists, so no secret could be supplied. This is a statement about the
+     * authorization: ADR-033 permits tenant code to execute only where no secret is present, and that holds
+     * whether or not a provider ever appears.
+     *
+     * <p>Folding the two together would be the quiet failure. The provider check stops firing the moment a
+     * real provider is configured, and a Karate run with secrets would then proceed under an adjudication
+     * that never considered secrets in a sandbox running arbitrary tenant code.
+     */
+    ENGINE_REQUIRES_SECRET_FREE_RUN,
     /** The capability presented has passed its expiry. */
     CAPABILITY_EXPIRED,
     /** The capability was valid once, and the state it depended on has since moved. */

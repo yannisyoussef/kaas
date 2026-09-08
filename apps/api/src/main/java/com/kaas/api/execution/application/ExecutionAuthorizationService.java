@@ -56,6 +56,17 @@ import tools.jackson.databind.json.JsonMapper;
 @Service
 public class ExecutionAuthorizationService {
 
+    /**
+     * Engines authorized only for runs with no secret bindings at all.
+     *
+     * <p>Zero bindings, not zero useful ones: an empty value, a placeholder and a test secret are all
+     * bindings, and each would mean a sandbox running arbitrary tenant code beside secret material that no
+     * adjudication has covered.
+     */
+    private static final java.util.Set<String> SECRET_FREE_ENGINES =
+            java.util.Set.of(com.kaas.api.controlplane.domain.EngineDescriptor.KARATE);
+
+
     /** Only a principal in this namespace may hold an assignment. */
     private static final String WORKER_NAMESPACE = "kaas.worker.";
     private static final Logger LOGGER = LoggerFactory.getLogger(ExecutionAuthorizationService.class);
@@ -285,6 +296,25 @@ public class ExecutionAuthorizationService {
                 // was applying would be worse than one that has none and says so.
                 return denied(ExecutionDenial.NETWORK_POLICY_NOT_ENFORCEABLE);
             }
+        }
+
+        if (!context.secretBindings().isEmpty() && SECRET_FREE_ENGINES.contains(context.engine().engine())) {
+            // BEFORE the provider check, and independent of it.
+            //
+            // ADR-033 authorized tenant code execution for secret-free runs only. Every acceptance behind that
+            // -- the missing nodev, the construction privilege, ambient file access under a fully hostile
+            // model -- was reasoned without a secret anywhere in the sandbox.
+            //
+            // Placing this first matters. The provider check below stops firing the moment a real provider is
+            // configured, and a Karate run carrying secrets would then sail through an adjudication that never
+            // considered them.
+            LOGGER.atInfo()
+                    .addKeyValue("event", "EXECUTION_DENIED")
+                    .addKeyValue("runId", runId)
+                    .addKeyValue("attemptId", attemptId)
+                    .addKeyValue("reason", ExecutionDenial.ENGINE_REQUIRES_SECRET_FREE_RUN.name())
+                    .log("Refused a secret-bearing run for an engine authorized only for secret-free execution");
+            return denied(ExecutionDenial.ENGINE_REQUIRES_SECRET_FREE_RUN);
         }
 
         if (!context.secretBindings().isEmpty() && !secrets.available()) {

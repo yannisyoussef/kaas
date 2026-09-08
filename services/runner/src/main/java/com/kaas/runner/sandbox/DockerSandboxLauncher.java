@@ -91,6 +91,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
             outcome = new SandboxOutcome(
                     Optional.empty(),
                     Map.of(),
+                    java.util.Set.of(),
                     false,
                     0,
                     Duration.between(startedAt, Instant.now()),
@@ -597,6 +598,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
             return new SandboxOutcome(
                     Optional.ofNullable(exitCode),
                     output.observations(),
+                    output.duplicated(),
                     output.truncated(),
                     output.retainedBytes(),
                     elapsed,
@@ -608,6 +610,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
             return new SandboxOutcome(
                     Optional.empty(),
                     output.observations(),
+                    output.duplicated(),
                     output.truncated(),
                     output.retainedBytes(),
                     Duration.between(startedAt, Instant.now()),
@@ -622,6 +625,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
             return new SandboxOutcome(
                     Optional.empty(),
                     output.observations(),
+                    output.duplicated(),
                     output.truncated(),
                     output.retainedBytes(),
                     Duration.between(startedAt, Instant.now()),
@@ -632,6 +636,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
             return new SandboxOutcome(
                     Optional.empty(),
                     output.observations(),
+                    output.duplicated(),
                     output.truncated(),
                     output.retainedBytes(),
                     Duration.between(startedAt, Instant.now()),
@@ -771,6 +776,20 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
     private static final class BoundedOutput extends ResultCallback.Adapter<Frame> {
         private final int maximumBytes;
         private final Map<String, String> observations = new LinkedHashMap<>();
+
+        /** How many times each key appeared. See {@link #record} for why a map alone is not enough. */
+        private final Map<String, Integer> occurrences = new LinkedHashMap<>();
+
+        /** The keys that appeared more than once, which is the only part of the count a caller needs. */
+        private java.util.Set<String> duplicated() {
+            java.util.Set<String> repeated = new java.util.LinkedHashSet<>();
+            occurrences.forEach((key, count) -> {
+                if (count > 1) {
+                    repeated.add(key);
+                }
+            });
+            return repeated;
+        }
         private final StringBuilder pending = new StringBuilder();
         private final AtomicBoolean truncated = new AtomicBoolean();
         private int bytes;
@@ -809,7 +828,17 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
             }
             // Control characters are stripped here, at the boundary, rather than wherever this is eventually
             // rendered. Terminal escape sequences in untrusted output are an attack on whoever reads the logs.
-            observations.put(sanitize(line.substring(0, equals)), sanitize(line.substring(equals + 1)));
+            String key = sanitize(line.substring(0, equals));
+            String value = sanitize(line.substring(equals + 1));
+            // HOW MANY TIMES A KEY WAS SEEN, not only what it last said.
+            //
+            // A map keeps the last value and forgets there was another, which is fine for a diagnostic and
+            // wrong for a result. Tenant code runs in this sandbox and can print anything, so a workload that
+            // announces its own outcome and then lets the adapter announce the real one would leave a map
+            // holding one plausible answer with no trace of the other. Counting is what lets the runner
+            // refuse a stream that reported twice instead of picking whichever it preferred.
+            occurrences.merge(key, 1, Integer::sum);
+            observations.put(key, value);
         }
 
         private static String sanitize(String value) {
