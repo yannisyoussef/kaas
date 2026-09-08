@@ -132,8 +132,11 @@ would pass. Without the third, the two rules could be collapsed into one.
 | K-M2 | the adapter stops refusing an escaping manifest entry | two adapter tests (`../` and absolute) |
 | K-M3 | the secret-free refusal is removed | `aKarateRunCarryingASecretBindingIsRefused` |
 | K-M4 | the refusal fires for every KARATE run, secrets or not | `aKarateRunCarryingNoSecretIsNotRefusedForThatReason` |
+| K-M5 | the loop's engine branch never reports an infrastructure failure | `ExecutionLoopEngineTests` (5 tests red) |
+| K-M6 | the loop ignores its engine name and always takes the synthetic path | `ExecutionLoopEngineTests` (7 tests red) |
 
-All four killed. K-M4 is the direction a one-sided test would have missed.
+All six killed. K-M4 is the direction a one-sided test would have missed. K-M5 and K-M6 could not have been
+run at all before the defect in §9.8 was fixed — the branch they mutate was unreachable from every test.
 
 ## 9. Defects found and fixed during the slice
 
@@ -146,6 +149,8 @@ All four killed. K-M4 is the direction a one-sided test would have missed.
 | 5 | `javax.sql.DataSource` was asserted absent from the engine; it ships in the JDK | the assertion failed |
 | 6 | the engine module had no JUnit platform launcher, so its tests could not run at all | adding the first test |
 | 7 | the API architecture test banned only `com.intuit.karate`, not `io.karatelabs` | auditing the guards after adding the engine |
+| 8 | **the loop's entire engine branch was unreachable from any test.** `EngineOutcome` had full component coverage, `ExecutionLoop` had the branch, and no test anywhere constructed a loop with the engine name — so a branch that ignored its input would have been green | asking which test constructs the production configuration, rather than which tests pass |
+| 9 | a comment in `CommandValidator` asserted that "nothing in the execution path reads these entries", which this slice made false | re-reading the claims the slice invalidated |
 
 ## 10. What this slice did not do
 
@@ -169,18 +174,18 @@ working directories, plugins, tenant-uploaded libraries, arbitrary JAR loading.
 
 ## 12. Verification
 
-`./gradlew clean check` — **BUILD SUCCESSFUL**, 11m 21s.
+`./gradlew clean check` — **BUILD SUCCESSFUL**, 11m 13s.
 
 | Module | Task | Tests |
 | --- | --- | --- |
 | `apps/api` | `test` | 336 |
 | `services/egress-proxy` | `test` | 116 |
 | `services/karate-engine` | `test` | 7 |
-| `services/runner` | `test` | 226 |
+| `services/runner` | `test` | 232 |
 | `services/runner` | `egressSecurityTest` | 36 |
 | `services/runner` | `karateExecutionTest` | **11** |
 | `tests/pipeline` | `test` | 39 |
-| | **Total** | **771** |
+| | **Total** | **777** |
 
 **0 skipped, 0 failures.** A skipped test in a security suite is an unproven claim, so the CI gates assert
 zero skips rather than only zero failures.
@@ -189,6 +194,17 @@ zero skips rather than only zero failures.
 Docker Desktop offers no supported way to install. It runs in the mandatory `strong-runtime-gate` CI job.
 **A green local build proves nothing about the mediating runtime** — that has been true since ADR-028 and is
 still true.
+
+That gate now includes `StrongRuntimeKarateExecutionTests`: the engine, under the runtime production actually
+uses. Three questions only — that Karate loads and completes a suite under `runsc`, that a failing suite is
+still a tenant result there, and that the classpath control and the read-only freeze hold. Everything else
+about a JVM under this runtime was already measured by `HostileJvmContainmentTests` in the previous slice, and
+repeating it would be measuring gVisor twice.
+
+**Stated plainly: those three tests have never been executed on this machine.** They were written against a
+suite verified under the baseline runtime and differ from it in one line — the runtime type. Their first real
+run is in CI, which is the same position every mediated-runtime suite in this repository has been in since
+ADR-028.
 
 ## 13. What the CI gate refuses to accept
 
@@ -212,6 +228,8 @@ adapter printed — the version claim does not depend on the adapter's honesty.
 | --- | --- |
 | real Karate executes the authorized features | `services/runner/src/test/java/com/kaas/runner/sandbox/KarateExecutionTests.java` |
 | the runner cannot load Karate; the image ships exactly 2.1.2 | `.../sandbox/EngineTrustBoundaryTest.java` |
+| the engine runs under the mediating runtime | `.../sandbox/StrongRuntimeKarateExecutionTests.java` (CI only) |
+| the loop reads an engine verdict, and reads it differently from a synthetic one | `.../execution/ExecutionLoopEngineTests.java` |
 | the manifest decides what runs; escapes refused; the jar is 2.1.2 | `services/karate-engine/src/test/java/com/kaas/karate/KaasKarateAdapterTest.java` |
 | secret-bearing runs are refused, on three axes | `apps/api/src/test/java/com/kaas/api/ExecutionAuthorizationTests.java` |
 | the decision record | `docs/adr/033-first-secret-free-karate-execution.md` |
