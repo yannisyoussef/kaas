@@ -61,6 +61,10 @@
  * that reaches the verifier is one of these two literals and never a string that arrived from anywhere. */
 #define VERIFIER_MODE    "sourceverify"
 #define BOUNDARY_MODE    "sourceboundary"
+/* The engine image's handover word. That image's /probe.sh runs one program and ignores the word entirely,
+ * but the word still travels through this closed comparison rather than through argv, so the engine path
+ * inherits the same property as the others: what reaches the shell is a compile-time literal. */
+#define ENGINE_MODE      "engine"
 #define SANDBOX_UID      65534
 #define SANDBOX_GID      65534
 
@@ -397,8 +401,12 @@ int main(int argc, char **argv) {
      * from the probe enumeration, which is server-side and fixed; comparing it here means the string handed
      * to the verifier is one of two compile-time literals whatever argv actually contained. */
     const char *mode = VERIFIER_MODE;
-    if (argc > 1 && argv[1] != NULL && strcmp(argv[1], BOUNDARY_MODE) == 0) {
-        mode = BOUNDARY_MODE;
+    if (argc > 1 && argv[1] != NULL) {
+        if (strcmp(argv[1], BOUNDARY_MODE) == 0) {
+            mode = BOUNDARY_MODE;
+        } else if (strcmp(argv[1], ENGINE_MODE) == 0) {
+            mode = ENGINE_MODE;
+        }
     }
     char *const handover[] = {(char *) SHELL, (char *) VERIFIER, (char *) mode, NULL};
     char *const envp[] = {NULL};

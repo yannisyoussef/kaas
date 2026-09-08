@@ -1,0 +1,280 @@
+package com.kaas.runner.sandbox;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.kaas.runner.execution.EngineOutcome;
+import com.kaas.runner.source.SourceBundle;
+import com.kaas.runner.source.SourceBundleContract;
+import com.kaas.runner.source.SourceFrame;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.zip.CRC32;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
+/**
+ * Real Karate 2.1.2, executing real tenant features, through the real delivery path.
+ *
+ * <h2>What this suite is for</h2>
+ *
+ * <p>Every earlier slice measured the boundary with platform-written probes. This one runs the product: a
+ * bundle is verified, framed, delivered over stdin, written by the bootstrap, frozen, and handed to a JVM that
+ * starts Karate and runs whatever the tenant wrote. Nothing here is simulated, and nothing here is a stand-in
+ * for the engine — an engine test that does not start the engine is a test of the harness.
+ *
+ * <h2>Why it insists on saying which Karate ran</h2>
+ *
+ * <p>An adapter that printed {@code PASSED} without loading Karate would satisfy an outcome assertion
+ * perfectly. So the version banner is asserted alongside the verdict: the evidence has to name the engine it
+ * came from, or it is evidence of the protocol and not of the execution.
+ */
+@DisplayName("Secret-free Karate execution")
+class KarateExecutionTests {
+
+    private final String generation = "karate-exec-" + UUID.randomUUID();
+
+    // ------------------------------------------------------------------ the success chain
+
+    @Test
+    @Timeout(600)
+    @DisplayName("real Karate runs the authorized feature and the platform reads a PASSED verdict")
+    void realKarateRunsTheAuthorizedFeature() {
+        SandboxOutcome outcome = execute(Map.of(
+                "features/passing.feature",
+                """
+                Feature: a tenant's passing suite
+                  Scenario: an assertion that holds
+                    * def sum = 1 + 1
+                    * match sum == 2
+                """));
+
+        assertThat(outcome.failure()).as("%s", outcome.observations()).isEmpty();
+        // ANTI-VACUITY. Without this the suite would pass against an adapter that printed a verdict and never
+        // loaded an engine, which is the single most likely way this evidence could be worthless.
+        assertThat(outcome.observations())
+                .as("the run must be able to name the engine that produced it")
+                .containsEntry("kaas.engine", "karate 2.1.2");
+        assertThat(EngineOutcome.of(outcome).verdict()).isEqualTo(EngineOutcome.Verdict.PASSED);
+    }
+
+    @Test
+    @Timeout(600)
+    @DisplayName("a failing assertion is the tenant's result, not the platform's error")
+    void aFailingAssertionIsATenantResult() {
+        SandboxOutcome outcome = execute(Map.of(
+                "features/failing.feature",
+                """
+                Feature: a tenant's failing suite
+                  Scenario: an assertion that does not hold
+                    * match 1 == 2
+                """));
+
+        assertThat(outcome.failure()).as("%s", outcome.observations()).isEmpty();
+        // The distinction the whole two-outcome model exists for. A tenant whose test fails has had a
+        // successful execution; reporting that as an engine error would make the platform look broken every
+        // time a customer wrote a failing test.
+        assertThat(EngineOutcome.of(outcome).verdict()).isEqualTo(EngineOutcome.Verdict.FAILED);
+    }
+
+    @Test
+    @Timeout(600)
+    @DisplayName("every authorized feature runs, not merely the first one")
+    void everyAuthorizedFeatureRuns() {
+        // The first passes and the second fails. A runner that executed only the head of the list would
+        // report PASSED, and no single-feature test could tell the difference.
+        SandboxOutcome outcome = execute(new LinkedHashMap<>(Map.of(
+                "features/a-first.feature",
+                """
+                Feature: first
+                  Scenario: holds
+                    * match 1 == 1
+                """,
+                "features/b-second.feature",
+                """
+                Feature: second
+                  Scenario: does not hold
+                    * match 1 == 2
+                """)));
+
+        assertThat(outcome.failure()).as("%s", outcome.observations()).isEmpty();
+        assertThat(EngineOutcome.of(outcome).verdict()).isEqualTo(EngineOutcome.Verdict.FAILED);
+    }
+
+    // ------------------------------------------------------------------ the hostile directions
+
+    @Test
+    @Timeout(600)
+    @DisplayName("a feature that prints the result key cannot forge a pass")
+    void aForgedResultIsRefusedRatherThanBelieved() {
+        // The obvious attack on a text protocol: say the answer before the adapter does. It cannot be
+        // prevented -- tenant code owns stdout -- so the platform refuses a stream that answered twice
+        // instead of choosing between the answers.
+        SandboxOutcome outcome = execute(Map.of(
+                "features/forger.feature",
+                """
+                Feature: a tenant claiming its own result
+                  Scenario: write the platform's protocol line to stdout and then fail
+                    * def System = Java.type('java.lang.System')
+                    * eval System.out.println('kaas.karate-result.v1=PASSED')
+                    * match 1 == 2
+                """));
+
+        EngineOutcome engine = EngineOutcome.of(outcome);
+        assertThat(outcome.duplicatedObservations())
+                .as("the collector must have seen the key twice for the refusal to be possible")
+                .contains(EngineOutcome.PROTOCOL);
+        assertThat(engine.verdict())
+                .as("a forged pass must become an infrastructure failure, never a pass")
+                .isEqualTo(EngineOutcome.Verdict.MALFORMED);
+        assertThat(engine.completed()).isFalse();
+    }
+
+    @Test
+    @Timeout(600)
+    @DisplayName("the engine runs with no environment at all, so no host variable can be read out of it")
+    void theEngineReceivesNoEnvironment() {
+        // Not "no secrets": NO VARIABLES. The build puts credential-shaped canaries in this JVM's own
+        // environment precisely so that an inherited environment would be detectable here, and the bootstrap's
+        // execve passes an empty envp. Asserting the count is zero is a stronger claim than asserting the
+        // canaries are absent, and it is the one the design actually supports.
+        SandboxOutcome outcome = execute(Map.of(
+                "features/environment.feature",
+                """
+                Feature: what the engine can see of its host
+                  Scenario: count the environment
+                    * def System = Java.type('java.lang.System')
+                    * def env = System.getenv()
+                    * eval System.out.println('kaas.probe.env-names=' + env.keySet())
+                    * match env.containsKey('AWS_SECRET_ACCESS_KEY') == false
+                """));
+
+        // MEASURED, not assumed. The engine's environment is exactly three names, and every one of them is
+        // created after the boundary closes: two by the shell that performs the handover and one by the JVM
+        // launcher. Nothing from the host, nothing from the image's own ENV, and nothing from the command.
+        assertThat(outcome.observations().get("kaas.probe.env-names"))
+                .as("an environment with a fourth name is an environment something reached into")
+                .isEqualTo("[LD_LIBRARY_PATH, SHLVL, PWD]");
+        assertThat(EngineOutcome.of(outcome).verdict()).isEqualTo(EngineOutcome.Verdict.PASSED);
+        assertThat(outcome.observations().values())
+                .as("no value anywhere in the sandbox's output may carry the canary")
+                .noneMatch(value -> value.contains("kaas-canary-must-not-cross-the-boundary"));
+    }
+
+    @Test
+    @Timeout(600)
+    @DisplayName("the frozen source refuses a write, and the same write elsewhere succeeds")
+    void theSourceIsReadOnlyToTheEngine() {
+        // TWO AXES, because one is not evidence. A catch block reports REFUSED for a read-only filesystem and
+        // for a JavaScript TypeError equally well, so the first assertion below would be satisfied by a probe
+        // that never reached a filesystem at all. The scratch write is the positive control that says the
+        // mechanism works, and the reported exception type is what says WHICH refusal happened.
+        SandboxOutcome outcome = execute(Map.of(
+                "features/write-source.feature",
+                """
+                Feature: writing to the source that is running
+                  Scenario: attempt a write beside the executing feature, and the same write on scratch
+                    * def System = Java.type('java.lang.System')
+                    * def Files = Java.type('java.nio.file.Files')
+                    * def Path = Java.type('java.nio.file.Path')
+                    * def bytes = Java.type('java.lang.String').valueOf('planted').getBytes()
+                    * def attempt = function(target){ try { Files.write(Path.of(target), bytes); return 'WROTE' } catch (e) { return 'REFUSED:' + e } }
+                    * def onSource = attempt('/kaas/source/files/features/planted.feature')
+                    * def onScratch = attempt('/tmp/kaas-engine/planted.feature')
+                    * eval System.out.println('kaas.probe.source-write=' + onSource)
+                    * eval System.out.println('kaas.probe.scratch-write=' + onScratch)
+                """));
+
+        assertThat(EngineOutcome.of(outcome).verdict()).isEqualTo(EngineOutcome.Verdict.PASSED);
+        // The positive control first: if this is not WROTE, the probe never demonstrated it can write at all
+        // and the refusal below means nothing.
+        assertThat(outcome.observations())
+                .as("the probe must be able to write somewhere, or its refusal is not a measurement")
+                .containsEntry("kaas.probe.scratch-write", "WROTE");
+        // A filesystem refusal, named by the kernel. Not merely "an exception happened": karate-js wraps a
+        // Java throwable in its own Error, so the type is gone by the time tenant code can see it and the
+        // message is what remains. It still distinguishes the two explanations, which is the whole job.
+        assertThat(outcome.observations().get("kaas.probe.source-write"))
+                .as("the refusal must come from the filesystem, not from a broken probe")
+                .contains("Read-only file system");
+    }
+
+    @Test
+    @Timeout(600)
+    @DisplayName("the engine has no route off the host under the default deny-all policy")
+    void theEngineHasNoRoute() {
+        // Karate's HTTP client is the one capability a test tool is expected to have, and under DENY_ALL it
+        // must have none. Reported as a tenant FAILED rather than as an engine error: the engine worked
+        // perfectly, and what failed was the tenant's request.
+        SandboxOutcome outcome = execute(Map.of(
+                "features/network.feature",
+                """
+                Feature: reaching off the host
+                  Scenario: an ordinary karate http call
+                    Given url 'http://example.com'
+                    When method get
+                    Then status 200
+                """));
+
+        assertThat(EngineOutcome.of(outcome).verdict()).isEqualTo(EngineOutcome.Verdict.FAILED);
+    }
+
+    // ------------------------------------------------------------------ delivery
+
+    /**
+     * Runs a bundle end to end: verify, frame, deliver, freeze, execute.
+     *
+     * <p>Deliberately the production path rather than a mounted directory. A bind mount would test Karate and
+     * nothing else; what needs testing is that an engine can run on a filesystem the bootstrap built and
+     * closed, because that filesystem is the thing four slices of adjudication are about.
+     */
+    private SandboxOutcome execute(Map<String, String> features) {
+        Map<String, byte[]> entries = new LinkedHashMap<>();
+        List<SourceBundle.ExpectedEntry> expected = new ArrayList<>();
+        features.forEach((path, content) -> {
+            byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+            entries.put(path, bytes);
+            expected.add(new SourceBundle.ExpectedEntry(path, SourceBundle.sha256(bytes)));
+        });
+        SourceBundle bundle =
+                SourceBundle.verified(archiveOf(entries), expected, SourceBundle.bundleDigest(expected));
+
+        var profile = SandboxSecurityProfile.withSource(
+                SandboxSecurityProfile.version1(SandboxTestSupport.karateEngineImage()),
+                new SandboxSecurityProfile.SourceDelivery(
+                        SourceFrame.of(bundle), SourceBundleContract.SOURCE_FILESYSTEM_BYTES));
+
+        return SandboxTestSupport.launcher(profile, generation)
+                .run(new SandboxLaunchRequest(
+                        SyntheticProbe.KARATE_ENGINE, profile.version(), UUID.randomUUID()));
+    }
+
+    private static byte[] archiveOf(Map<String, byte[]> entries) {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (ZipOutputStream zip = new ZipOutputStream(bytes, StandardCharsets.UTF_8)) {
+            zip.setMethod(ZipOutputStream.STORED);
+            for (var entry : entries.entrySet()) {
+                ZipEntry zipEntry = new ZipEntry(entry.getKey());
+                zipEntry.setMethod(ZipEntry.STORED);
+                zipEntry.setSize(entry.getValue().length);
+                zipEntry.setCompressedSize(entry.getValue().length);
+                CRC32 crc = new CRC32();
+                crc.update(entry.getValue());
+                zipEntry.setCrc(crc.getValue());
+                zip.putNextEntry(zipEntry);
+                zip.write(entry.getValue());
+                zip.closeEntry();
+            }
+        } catch (Exception impossible) {
+            throw new IllegalStateException(impossible);
+        }
+        return bytes.toByteArray();
+    }
+}

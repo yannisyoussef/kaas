@@ -118,6 +118,30 @@ final class SandboxTestSupport {
                 : Path.of("services", "runner", "src", "main", "docker", "egress-target");
     }
 
+    private static String karateEngineImageReference;
+
+    /**
+     * The Karate engine image, built once from the context Gradle assembled.
+     *
+     * <p>The path comes from a system property the build sets from a resolved dependency, exactly as the
+     * proxy's does, and for the same reason: a guessed path builds whatever a previous build left there, which
+     * is an engine nobody compiled in this run. Here that failure mode is worse than usual — the engine's
+     * classpath IS a security control, so an image assembled from a stale set of jars would be measured as
+     * though it were the one under review.
+     */
+    static synchronized String karateEngineImage() {
+        if (karateEngineImageReference == null) {
+            String context = System.getProperty("kaas.karate.engine.context");
+            if (context == null) {
+                throw new IllegalStateException(
+                        "kaas.karate.engine.context is set by the build from the engine image context "
+                                + "dependency; without it these tests would silently build nothing.");
+            }
+            karateEngineImageReference = KarateEngineImage.build(docker(), Path.of(context));
+        }
+        return karateEngineImageReference;
+    }
+
     static SandboxSecurityProfile profile() {
         return SandboxSecurityProfile.version1(probeImage());
     }

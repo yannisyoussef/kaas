@@ -43,8 +43,23 @@ val proxyImageContext: Configuration by configurations.creating {
     attributes { attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage::class.java, "kaas-proxy-image-context")) }
 }
 
+/**
+ * The Karate engine's image build context, obtained the same way and for the same reason.
+ *
+ * <p>With one extra consequence that matters here: the engine module is a SEPARATE TRUST DOMAIN, and the
+ * runner does not depend on it as a library. Resolving only its image context is how the runner gets an
+ * engine to launch without putting Karate — or anything Karate drags in — on the runner's own classpath.
+ * A project dependency would have done both, which is precisely the coupling this slice exists to avoid.
+ */
+val engineImageContext: Configuration by configurations.creating {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+    attributes { attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage::class.java, "kaas-engine-image-context")) }
+}
+
 dependencies {
     proxyImageContext(project(":services:egress-proxy"))
+    engineImageContext(project(":services:karate-engine"))
 }
 
 tasks.withType<Test>().configureEach {
@@ -93,7 +108,19 @@ tasks.withType<Test>().configureEach {
     // Where those files are, for the launcher to build from. The build context is repository-controlled and
     // produced by this build; no caller supplies a path, and no test may point this somewhere else.
     val contextPath = proxyImageContext.elements.map { it.single().asFile.absolutePath }
-    doFirst { systemProperty("kaas.egress.proxy.context", contextPath.get()) }
+
+    // The engine image's context, on the same terms. Every jar on the engine's runtime classpath is an input
+    // here, which is the point: the classpath IS a security control under the hostile-execution model, so a
+    // dependency appearing on it must re-run the tests that measure what the engine can reach.
+    inputs.files(engineImageContext)
+        .withPropertyName("karateEngineImageContext")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    val enginePath = engineImageContext.elements.map { it.single().asFile.absolutePath }
+
+    doFirst {
+        systemProperty("kaas.egress.proxy.context", contextPath.get())
+        systemProperty("kaas.karate.engine.context", enginePath.get())
+    }
 }
 
 /**
@@ -173,6 +200,28 @@ val strongRuntimeTest = tasks.register<Test>("strongRuntimeTest") {
     }
 }
 
+/**
+ * The Karate execution gate: real Karate 2.1.2, real tenant features, through the real delivery path.
+ *
+ * <p>Its own task and its own CI job, for the reason every other security suite has one — a gate buried in a
+ * general build is a gate whose failure is one line in a long log. It is also the only suite in the repository
+ * that runs code the platform did not write, so what it demonstrates is different in kind from what the others
+ * do: not that a probe observed a boundary, but that an actual test engine executed inside one.
+ *
+ * <p>Wired into {@code check}, unlike the strong-runtime gate: this needs a JVM in a container and nothing
+ * else, so it runs on an ordinary development host. The containment claims it makes are therefore the
+ * baseline runtime's; the mediated-runtime versions of the same questions belong to {@code strongRuntimeTest}.
+ */
+val karateExecutionTest = tasks.register<Test>("karateExecutionTest") {
+    group = "verification"
+    description = "Runs real Karate 2.1.2 on a delivered, frozen source filesystem."
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    filter { includeTestsMatching("com.kaas.runner.sandbox.KarateExecutionTests") }
+}
+
+tasks.named("check") { dependsOn(karateExecutionTest) }
+
 tasks.named<Test>("test") {
     dependsOn(jvmProbeImageContext)
     // Excluded here because they run in egressSecurityTest above. Running them in both would double a
@@ -186,6 +235,9 @@ tasks.named<Test>("test") {
         excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeAuthorityRevocationTests")
         excludeTestsMatching("com.kaas.runner.sandbox.MediatedSourceFilesystemBoundaryTests")
         excludeTestsMatching("com.kaas.runner.sandbox.HostileJvmContainmentTests")
+        // Runs in karateExecutionTest above. Excluded here so one Docker-heavy suite does not run twice, on
+        // the same terms as the egress suites.
+        excludeTestsMatching("com.kaas.runner.sandbox.KarateExecutionTests")
     }
 }
 

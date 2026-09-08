@@ -60,6 +60,23 @@ public enum SyntheticProbe {
     WORKLOAD_SOURCE_VERIFY(List.of("sourceverify")),
 
     /**
+     * The Karate engine, started by the bootstrap on the frozen source filesystem.
+     *
+     * <p>The one probe whose program is not a platform-written shell script measuring something. It is the
+     * product: the engine image's handover script starts a JVM that runs the platform adapter, which runs
+     * the authorized features, which are tenant code.
+     *
+     * <p>It carries no arguments beyond the mode word, and there is nowhere to put one. Which features run is
+     * decided by the manifest the bootstrap wrote from the platform's frame — not by a command line, because a
+     * command line is a place a path could be smuggled into and the manifest is not.
+     *
+     * <p>Its environment is empty. Not filtered: the bootstrap's {@code execve} passes an empty {@code envp},
+     * so the JVM that runs tenant code starts with no variables at all. That is why "secret-free" here is a
+     * structural statement rather than a list of names someone remembered to remove.
+     */
+    KARATE_ENGINE(List.of("engine")),
+
+    /**
      * Measures what the source filesystem enforces, against fixtures the production format cannot express.
      *
      * <p>It exists because KAAS-18 could not tell two explanations apart. Production source is always

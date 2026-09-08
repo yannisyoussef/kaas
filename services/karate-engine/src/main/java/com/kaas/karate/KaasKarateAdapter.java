@@ -75,6 +75,14 @@ public final class KaasKarateAdapter {
     }
 
     static int run() {
+        // WHICH ENGINE IS ACTUALLY LOADED, printed before anything else runs.
+        //
+        // Every other line this adapter prints would be equally printable by an adapter that never loaded
+        // Karate at all, which makes an execution test indistinguishable from a protocol test. This one
+        // cannot: it resolves a resource through Karate's own class, so producing it requires the engine to
+        // be on the classpath and requires that engine to say what version it is.
+        emitEngineIdentity();
+
         List<String> features;
         try {
             features = authorizedFeatures();
@@ -152,6 +160,34 @@ public final class KaasKarateAdapter {
             paths.add(resolved.toString());
         }
         return List.copyOf(paths);
+    }
+
+    /**
+     * Reports the loaded engine's identity from the engine's own metadata.
+     *
+     * <p>Not a constant, and not the adapter's opinion. {@code karate-meta.properties} ships inside
+     * karate-core and is read through {@link Runner}'s classloader, so this line exists only if the class
+     * loaded and only if its jar carried the version it claims.
+     *
+     * <p>Tenant code could print this line too, and could print a different version. That does not weaken it:
+     * the runner refuses a stream carrying a duplicated key, so a second claim removes the evidence rather
+     * than replacing it — the same rule that governs the result itself.
+     */
+    private static void emitEngineIdentity() {
+        String version = "unknown";
+        try (java.io.InputStream meta = Runner.class.getClassLoader().getResourceAsStream("karate-meta.properties")) {
+            if (meta != null) {
+                java.util.Properties properties = new java.util.Properties();
+                properties.load(meta);
+                version = properties.getProperty("karate.version", "unknown");
+            }
+        } catch (IOException | RuntimeException unreadable) {
+            // Left as "unknown". An engine that cannot say what it is must not be reported as a version it
+            // might not be, and the suites that require an identity will fail on the word rather than on an
+            // absence nobody notices.
+            version = "unknown";
+        }
+        System.out.println("kaas.engine=karate " + version);
     }
 
     private static void emit(String outcome) {
