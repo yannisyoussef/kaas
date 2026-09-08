@@ -387,6 +387,98 @@ class ExecutionAuthorizationTests {
         }
     }
 
+    // ---------------------------------------------------------------- secret-free engine execution
+    //
+    // ADR-033 authorized executing tenant code for SECRET-FREE runs only. Every acceptance behind that
+    // authorization -- the missing nodev, the construction privilege, ambient file access under a fully
+    // hostile model -- was reasoned with no secret anywhere in the sandbox. These three tests are what makes
+    // "zero secret bindings" a property of the system rather than a sentence in a document.
+
+    @Test
+    @Timeout(120)
+    void aKarateRunCarryingASecretBindingIsRefused() throws Exception {
+        UUID runId = claimedRun();
+        withKarateEngineAndSecret(runId, true, () -> assertThat(
+                        authorizations.authorize(runId, attemptId(runId), 1, WORKER).denial())
+                .contains(ExecutionDenial.ENGINE_REQUIRES_SECRET_FREE_RUN));
+    }
+
+    @Test
+    @Timeout(120)
+    void aKarateRunCarryingNoSecretIsNotRefusedForThatReason() throws Exception {
+        // The other axis. Without it the assertion above is satisfied by a rule that refuses every KARATE run,
+        // which would pass the test and ship an engine nothing can ever execute.
+        UUID runId = claimedRun();
+        withKarateEngineAndSecret(runId, false, () -> assertThat(
+                        authorizations.authorize(runId, attemptId(runId), 1, WORKER).denial())
+                .isNotEqualTo(java.util.Optional.of(ExecutionDenial.ENGINE_REQUIRES_SECRET_FREE_RUN)));
+    }
+
+    @Test
+    @Timeout(120)
+    void aSyntheticRunCarryingASecretBindingIsRefusedForADifferentReason() throws Exception {
+        // The third axis: the refusal is scoped to the engines whose authorization depends on it, not applied
+        // to everything that mentions a secret. A synthetic run with a binding is still refused -- no provider
+        // is configured -- but it must be refused for THAT, or the two rules have been collapsed into one and
+        // configuring a provider would silently unblock the Karate path as well.
+        UUID runId = claimedRun();
+        withSecretBinding(runId, () -> {
+            var denial = authorizations.authorize(runId, attemptId(runId), 1, WORKER).denial();
+            assertThat(denial).isNotEqualTo(java.util.Optional.of(ExecutionDenial.ENGINE_REQUIRES_SECRET_FREE_RUN));
+            assertThat(denial).isPresent();
+        });
+    }
+
+    /** Retypes the run's snapshot to KARATE, optionally with one secret binding, and restores both. */
+    private void withKarateEngineAndSecret(UUID runId, boolean withSecret, Runnable assertion) {
+        jdbc.update("alter table run_snapshots disable trigger all");
+        try {
+            jdbc.update("update run_snapshots set engine = 'KARATE', engine_version = '2.1.2'"
+                    + " where run_id = ?", runId);
+            if (withSecret) {
+                withSecretBinding(runId, assertion);
+            } else {
+                assertion.run();
+            }
+        } finally {
+            jdbc.update("update run_snapshots set engine = 'SYNTHETIC', engine_version = '1.0.0'"
+                    + " where run_id = ?", runId);
+            jdbc.update("alter table run_snapshots enable trigger all");
+        }
+    }
+
+    /** Adds one real SECRET_REFERENCE configuration entry to the run's sealed snapshot, and removes it after. */
+    private void withSecretBinding(UUID runId, Runnable assertion) {
+        Map<String, Object> scope = jdbc.queryForMap(
+                "select organization_id, project_id from test_runs where run_id = ?", runId);
+        UUID secretId = UUID.randomUUID();
+        jdbc.update("alter table run_snapshot_configuration_entries disable trigger all");
+        // secret_references is append-only in production, enforced by a trigger that refuses UPDATE and
+        // DELETE. That immutability is deliberate -- a secret's identity is what capabilities and audit
+        // records point at -- so the fixture suspends it only to clean up after itself.
+        jdbc.update("alter table secret_references disable trigger all");
+        try {
+            // A REAL reference row, not a dangling id: the entry has a foreign key to it, and a test that
+            // could not satisfy the key would be testing the database rather than the decision. It names no
+            // value -- secret_references holds identity only, which is the whole design.
+            jdbc.update(
+                    "insert into secret_references (secret_reference_id, organization_id, project_id, name,"
+                            + " created_by, created_at) values (?, ?, ?, ?, 'kaas.test', now())",
+                    secretId, scope.get("organization_id"), scope.get("project_id"), "TEST_BINDING_" + secretId.toString().substring(0, 8));
+            jdbc.update(
+                    "insert into run_snapshot_configuration_entries (organization_id, project_id, run_id,"
+                            + " config_key, value_kind, secret_reference_id)"
+                            + " values (?, ?, ?, 'API_TOKEN', 'SECRET_REFERENCE', ?)",
+                    scope.get("organization_id"), scope.get("project_id"), runId, secretId);
+            assertion.run();
+        } finally {
+            jdbc.update("delete from run_snapshot_configuration_entries where run_id = ? and config_key = 'API_TOKEN'", runId);
+            jdbc.update("delete from secret_references where secret_reference_id = ?", secretId);
+            jdbc.update("alter table secret_references enable trigger all");
+            jdbc.update("alter table run_snapshot_configuration_entries enable trigger all");
+        }
+    }
+
     @Test
     void aPolicyWhoseDigestDoesNotMatchItsContentIsRefused() throws Exception {
         UUID runId = claimedRun();

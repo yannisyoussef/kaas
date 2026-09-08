@@ -40,6 +40,7 @@ dependencies {
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testImplementation("org.assertj:assertj-core:3.27.3")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 /**
@@ -77,3 +78,5 @@ val engineImageContextElements by configurations.registering {
 }
 
 artifacts { add(engineImageContextElements.name, layout.buildDirectory.dir("engine-image-context")) { builtBy(engineImageContext) } }
+
+tasks.named<Test>("test") { useJUnitPlatform() }

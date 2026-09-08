@@ -178,6 +178,9 @@ class ControlPlaneArchitectureTest {
                 .resideInAnyPackage(
                         "com.kaas.runner..",
                         "com.intuit.karate..",
+                        // Karate 2.x lives at io.karatelabs; banning only the abandoned coordinates would
+                        // have permitted the artifact anyone would actually add.
+                        "io.karatelabs..",
                         "io.minio..",
                         "com.github.dockerjava..",
                         "org.springframework.vault..",
@@ -209,6 +212,9 @@ class ControlPlaneArchitectureTest {
                 .resideInAnyPackage(
                         "com.kaas.runner..",
                         "com.intuit.karate..",
+                        // Karate 2.x lives at io.karatelabs; banning only the abandoned coordinates would
+                        // have permitted the artifact anyone would actually add.
+                        "io.karatelabs..",
                         "org.springframework.amqp..",
                         "com.rabbitmq..",
                         "io.minio..",
@@ -259,6 +265,9 @@ class ControlPlaneArchitectureTest {
                         "com.github.dockerjava..",
                         "com.kaas.runner..",
                         "com.intuit.karate..",
+                        // Karate 2.x lives at io.karatelabs; banning only the abandoned coordinates would
+                        // have permitted the artifact anyone would actually add.
+                        "io.karatelabs..",
                         "io.minio..",
                         "org.springframework.vault..",
                         "software.amazon.awssdk.services.secretsmanager..",

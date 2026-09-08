@@ -85,7 +85,7 @@ public final class KaasKarateAdapter {
 
         List<String> features;
         try {
-            features = authorizedFeatures();
+            features = authorizedFeatures(MANIFEST, FILES);
         } catch (IOException | RuntimeException unreadable) {
             // A category, never the exception's message: it would carry paths, and paths here are derived
             // from tenant-authored logical names.
@@ -138,21 +138,26 @@ public final class KaasKarateAdapter {
     /**
      * The authorized features, read from the platform's manifest.
      *
+     * <p>The two roots are parameters rather than the constants they are called with in production. Not for
+     * flexibility — nothing configures them — but because the escape check below is a security control, and a
+     * control that can only run against {@code /kaas/source} on a live sandbox is a control no test can drive
+     * a hostile manifest through. The production call site passes the constants and nothing else can.
+     *
      * <p>Every entry is a FeatureRevision the run's sealed snapshot selected, so every entry is a top-level
      * entrypoint. A bundle entry that is not meant to be run on its own would have to not be selected, which
      * is a control-plane decision rather than something inferred here from a filename.
      */
-    private static List<String> authorizedFeatures() throws IOException {
+    static List<String> authorizedFeatures(Path manifest, Path files) throws IOException {
         List<String> paths = new ArrayList<>();
-        List<String> lines = Files.readAllLines(MANIFEST, StandardCharsets.UTF_8);
+        List<String> lines = Files.readAllLines(manifest, StandardCharsets.UTF_8);
         for (int line = 1; line < lines.size(); line++) {
             // Header first, then one tab-separated entry per line: logical path, digest, byte length.
             String[] fields = lines.get(line).split("\t");
             if (fields.length < 3 || fields[0].isBlank()) {
                 continue;
             }
-            Path resolved = FILES.resolve(fields[0]).normalize();
-            if (!resolved.startsWith(FILES)) {
+            Path resolved = files.resolve(fields[0]).normalize();
+            if (!resolved.startsWith(files)) {
                 // The bootstrap already refuses a path that escapes, and the control plane before it. This is
                 // the third check, at the last place before a path becomes something Karate opens.
                 throw new IllegalStateException("A manifest entry resolved outside the source root.");
