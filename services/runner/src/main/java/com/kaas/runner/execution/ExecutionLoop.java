@@ -732,7 +732,10 @@ public final class ExecutionLoop {
      * completion. Reporting any of them as a test outcome would attribute a platform failure to a tenant's
      * tests, which is the single most damaging thing this component can do.
      */
-    private String infrastructureFailureDetail(SandboxOutcome outcome) {
+    // Package-private for the same reason the source path's methods are: these two decide whether a run is
+    // a pass, and a full pipeline can only produce the states a healthy sandbox reaches. Nothing outside this
+    // package gains anything by the widening.
+    String infrastructureFailureDetail(SandboxOutcome outcome) {
         // Deliberately NOT calling evidenceIsComplete(): it is `failure.isEmpty() || timedOut()`, and the check
         // below has already returned for every case where a failure is present — so it can never be false here.
         // It was in this chain and mutation testing showed removing it killed nothing, which is what dead code
@@ -791,7 +794,7 @@ public final class ExecutionLoop {
      * <p>Reached only after {@link #infrastructureFailureDetail} returned nothing, so by here the engine is
      * known to have produced a usable verdict.
      */
-    private boolean testPassed(SandboxOutcome outcome) {
+    boolean testPassed(SandboxOutcome outcome) {
         if (CommandValidator.KARATE_ENGINE.equals(engine)) {
             return EngineOutcome.of(outcome).verdict() == EngineOutcome.Verdict.PASSED;
         }
