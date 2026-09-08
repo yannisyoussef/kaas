@@ -292,9 +292,15 @@ public final class CommandValidator {
                             + " and the command authorizes " + engineVersion + ".");
         }
 
-        // A source bundle may be described but must never be fetched or executed by this runner. The synthetic
-        // workload is platform-owned, and nothing in the execution path reads these entries — an architecture
-        // test asserts that separately, because a comment is not a boundary.
+        // WHAT THIS LIST IS, NOW THAT AN ENGINE EXISTS.
+        //
+        // It was previously true that nothing in the execution path read these entries. It is not any more:
+        // under ADR-033 this list is the authorized feature set, and the runner uses it to verify the bundle
+        // it fetches and to build the frame the sandbox's bootstrap writes.
+        //
+        // What remains true, and is the part that matters, is that the RUNNER still never parses or executes
+        // any of it. The entries are compared against digests and copied into a length-prefixed frame; the
+        // only process that interprets them is the engine, on the other side of the sandbox wall.
         if (!bundle.get("features").isArray()) {
             throw new CommandRejected("A source bundle carries a feature array.");
         }

@@ -197,6 +197,9 @@ val strongRuntimeTest = tasks.register<Test>("strongRuntimeTest") {
         // What the boundary does when the workload is a JVM, which is what a future engine is. Named
         // explicitly like its neighbours so a rename cannot silently remove mandatory evidence.
         includeTestsMatching("com.kaas.runner.sandbox.HostileJvmContainmentTests")
+        // The product, under the runtime production uses. Named explicitly like its neighbours: the gate
+        // asserts which suites produced its evidence, and a glob would let a rename drop this silently.
+        includeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeKarateExecutionTests")
     }
 }
 
@@ -235,6 +238,7 @@ tasks.named<Test>("test") {
         excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeAuthorityRevocationTests")
         excludeTestsMatching("com.kaas.runner.sandbox.MediatedSourceFilesystemBoundaryTests")
         excludeTestsMatching("com.kaas.runner.sandbox.HostileJvmContainmentTests")
+        excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeKarateExecutionTests")
         // Runs in karateExecutionTest above. Excluded here so one Docker-heavy suite does not run twice, on
         // the same terms as the egress suites.
         excludeTestsMatching("com.kaas.runner.sandbox.KarateExecutionTests")
