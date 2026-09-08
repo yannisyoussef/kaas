@@ -17,7 +17,10 @@ engine. **The model is FULLY HOSTILE: containment is the boundary and the classp
 **What the boundary does to a JVM.** A platform-owned hostile Java workload, under the exact posture a future
 engine would inherit: every capability set empty, source filesystem write/chmod/exec/remount/`mknod` all
 refused, scratch space writable and non-executable, DNS and three socket destinations refused, no daemon
-socket, no credential in the environment, and Java threads bounded by the PID ceiling at 49 of 200 attempted.
+socket, no credential in the environment. And one finding that goes the other way: **the PID ceiling does
+not bound Java threads under the mediating runtime** — all 200 attempted threads start, where the baseline
+runtime stops a JVM at 49. Memory and the wall clock are the effective bound; recorded as an accepted
+residual, not as a control.
 
 **One gap was closed in this slice.** Signed evidence now binds the runtime binary — version, SHA-256 and an
 opaque path identity — measured from the daemon's own registration with no operator-supplied value anywhere.
@@ -235,7 +238,8 @@ credential in the launcher's environment cannot become a new leak in the sandbox
 ## 28. JVM hostile-code evaluation
 
 Summarised in §1 and detailed in the readiness matrix. The JVM-specific findings a shell probe could not have
-produced: threads are bounded by the PID ceiling (49 of 200, then `pthread_create EAGAIN`), and a JVM starts
+produced: `PID_LIMIT` does NOT bound Java threads under the mediating runtime — 200 of 200 attempted start,
+where the baseline runtime stops at 49 with `pthread_create EAGAIN` — and a JVM starts
 and completes within the production profile of 256 MiB, 64 PIDs and 16 MiB of scratch.
 
 ## 29. Karate version evaluation

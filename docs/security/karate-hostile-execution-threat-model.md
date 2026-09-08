@@ -36,7 +36,7 @@ Classified per §26 with no "probably blocked".
 | create a device node | reachable | **DENIED BY SANDBOX** | read-only filesystem + empty bounding set; `java_mknod=false` |
 | raw sockets, DNS | reachable | **DENIED BY TOPOLOGY** under `DENY_ALL`; proxy-only under `ALLOWLIST` | measured for four destinations |
 | read environment / system properties | available | **ALLOWED** | environment is built from empty; asserted to carry no credential |
-| threads / async | available | **ALLOWED, BOUNDED** | PID ceiling bounds tasks; measured at 49 of 200 |
+| threads / async | available | **ALLOWED, BOUNDED ONLY BY MEMORY AND WALL CLOCK** | the PID ceiling does not bound Java threads under the mediating runtime — 200 of 200 attempted start, measured. An accepted residual, not a control |
 | `read()` / `call()` / `classpath:` | available | **REQUIRES PLATFORM WRAPPER** | see below — the one item needing work in KAAS-21 |
 | `read()` of a URL | **UNKNOWN — must be established in KAAS-21** | **REQUIRES PLATFORM WRAPPER** | egress topology contains it either way |
 | XML / YAML / JSON parsing | available | **ALLOWED** | resource limits; see parser surface |

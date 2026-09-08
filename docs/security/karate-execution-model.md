@@ -53,7 +53,7 @@ mediated sandbox, and each one fails closed.
 |---|---|---|
 | construct any class on the classpath | yes, by design of the engine | the classpath is minimal and platform-owned |
 | spawn child processes | `java_child_spawned=true` | bounded by the PID ceiling; dies with the sandbox |
-| create threads | 49 of 200 attempted, then `pthread_create EAGAIN` | the PID ceiling bounds tasks, not just processes |
+| create threads | 200 of 200 attempted start under the mediating runtime; the baseline runtime stops at 49 | **not the PID ceiling** — gVisor does not charge Java threads against it. Memory and the wall clock bound a thread explosion, which is weaker and is an accepted residual rather than a control |
 | write to scratch space | `java_tmp_write=true` | bounded tmpfs, ephemeral, `noexec` |
 | read its own process state | yes | not authority; `/proc/self` describes the sandbox |
 
