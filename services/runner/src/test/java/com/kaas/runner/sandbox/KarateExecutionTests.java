@@ -226,6 +226,73 @@ class KarateExecutionTests {
         assertThat(EngineOutcome.of(outcome).verdict()).isEqualTo(EngineOutcome.Verdict.FAILED);
     }
 
+    @Test
+    @Timeout(600)
+    @DisplayName("what tenant features can actually reach, enumerated rather than asked after one at a time")
+    void theHostileCapabilitySurfaceIsWhatWasAdjudicated() {
+        // ONE run, every question. Asking them separately would mean each probe measured a different sandbox,
+        // and the interesting claims here are about a single process: that interop works AND the platform's
+        // classes are absent from it, that scratch is writable AND not executable.
+        SandboxOutcome outcome = execute(Map.of(
+                "features/hostile.feature",
+                """
+                Feature: what tenant code can reach through the engine
+                  Scenario: enumerate the surface
+                    * def System = Java.type('java.lang.System')
+                    * def say = function(k,v){ System.out.println('kaas.probe.' + k + '=' + v) }
+                    * def attempt = function(f){ try { return f() } catch (e) { return 'REFUSED:' + e } }
+                    * def Files = Java.type('java.nio.file.Files')
+                    * def Path = Java.type('java.nio.file.Path')
+                    * def PB = Java.type('java.lang.ProcessBuilder')
+                    * eval say('java-type', attempt(function(){ return Java.type('java.lang.ProcessBuilder') != null ? 'REACHABLE' : 'NULL' }))
+                    * eval say('platform-launcher', attempt(function(){ return Java.type('com.kaas.runner.sandbox.DockerSandboxLauncher') != null ? 'REACHABLE' : 'NULL' }))
+                    * eval say('process-spawn', attempt(function(){ return 'EXIT:' + new PB(['/bin/echo','hi']).start().waitFor() }))
+                    * eval say('dns', attempt(function(){ return 'RESOLVED:' + Java.type('java.net.InetAddress').getByName('example.com').getHostAddress() }))
+                    * eval say('socket-literal-ip', attempt(function(){ var SC = Java.type('java.nio.channels.SocketChannel'); var ISA = Java.type('java.net.InetSocketAddress'); SC.open().connect(new ISA('93.184.216.34', 80)); return 'CONNECTED' }))
+                    * eval say('scratch-write', attempt(function(){ Files.write(Path.of('/tmp/kaas-engine/x.sh'), Java.type('java.lang.String').valueOf('#!/bin/sh').getBytes()); return 'WROTE' }))
+                    * eval say('scratch-exec', attempt(function(){ return 'EXIT:' + new PB(['/bin/sh','-c','chmod +x /tmp/kaas-engine/x.sh && /tmp/kaas-engine/x.sh']).start().waitFor() }))
+                    * eval say('remount', attempt(function(){ return 'EXIT:' + new PB(['/bin/sh','-c','mount -o remount,rw /kaas/source']).start().waitFor() }))
+                    * eval say('post-remount-write', attempt(function(){ Files.write(Path.of('/kaas/source/files/planted.feature'), Java.type('java.lang.String').valueOf('x').getBytes()); return 'WROTE' }))
+                """));
+
+        Map<String, String> probe = outcome.observations();
+        assertThat(EngineOutcome.of(outcome).verdict()).isEqualTo(EngineOutcome.Verdict.PASSED);
+
+        // THE POSITIVE CONTROL FIRST. Java interop works, so every refusal below is a refusal rather than a
+        // karate-js limitation. That distinction is not hypothetical: an earlier version of this probe
+        // constructed a Socket with `new` and reported REFUSED because karate-js does not support that
+        // constructor form — which would have been recorded as containment the platform does not have.
+        assertThat(probe).containsEntry("kaas.probe.java-type", "REACHABLE");
+
+        // THE CLASSPATH IS THE CONTROL. This is the single most load-bearing measurement in the slice: the
+        // platform's own launcher is not merely unused by tenant code, it is not there to be used.
+        assertThat(probe.get("kaas.probe.platform-launcher"))
+                .as("no platform class may be resolvable from tenant source")
+                .startsWith("REFUSED:")
+                .contains("class not found");
+
+        // ACCEPTED, NOT CONTAINED. ADR-032 allowed process spawning: the PID ceiling bounds it and it dies
+        // with the sandbox. Recorded here so the acceptance stays visible rather than being rediscovered.
+        assertThat(probe).containsEntry("kaas.probe.process-spawn", "EXIT:0");
+        assertThat(probe).containsEntry("kaas.probe.scratch-write", "WROTE");
+
+        // DENIED BY THE SANDBOX. 126 is the shell's "found but not executable": noexec on the scratch
+        // filesystem, measured through the product rather than through a platform probe.
+        assertThat(probe).containsEntry("kaas.probe.scratch-exec", "EXIT:126");
+
+        // DENIED BY TOPOLOGY. The literal address matters -- a hostname would fail at DNS and prove only that
+        // there is no resolver, which is a weaker claim than there being no route.
+        assertThat(probe.get("kaas.probe.dns")).startsWith("REFUSED:");
+        assertThat(probe.get("kaas.probe.socket-literal-ip"))
+                .as("no route, established without relying on name resolution")
+                .startsWith("REFUSED:");
+
+        // THE FREEZE HOLDS. The remount fails, and the write fails after it -- both, because a remount that
+        // failed for some unrelated reason would leave the second question unanswered.
+        assertThat(probe).containsEntry("kaas.probe.remount", "EXIT:1");
+        assertThat(probe.get("kaas.probe.post-remount-write")).contains("Read-only file system");
+    }
+
     // ------------------------------------------------------------------ the ways a run can end badly
 
     @Test
