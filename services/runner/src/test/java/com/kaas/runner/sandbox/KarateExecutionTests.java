@@ -226,6 +226,77 @@ class KarateExecutionTests {
         assertThat(EngineOutcome.of(outcome).verdict()).isEqualTo(EngineOutcome.Verdict.FAILED);
     }
 
+    // ------------------------------------------------------------------ the ways a run can end badly
+
+    @Test
+    @Timeout(600)
+    @DisplayName("a feature that never returns is killed, and killing it is not a pass")
+    void anEndlessFeatureIsKilledAndReportsNoVerdict() {
+        SandboxOutcome outcome = execute(Map.of(
+                "features/endless.feature",
+                """
+                Feature: a suite that does not end
+                  Scenario: spin
+                    * def spin = function(){ while (true) { } }
+                    * eval spin()
+                """));
+
+        assertThat(outcome.failure())
+                .as("the wall-clock deadline is what ends this, and it must say so")
+                .contains(SandboxFailure.SANDBOX_TIMEOUT);
+        // The important half. A killed engine reported nothing, and nothing must never resolve to PASSED.
+        EngineOutcome engine = EngineOutcome.of(outcome);
+        assertThat(engine.verdict()).isEqualTo(EngineOutcome.Verdict.ABSENT);
+        assertThat(engine.completed()).isFalse();
+    }
+
+    @Test
+    @Timeout(600)
+    @DisplayName("a feature that exits the JVM early cannot turn a zero exit status into a pass")
+    void anEarlyExitIsNotAPass() {
+        // The sharpest version of the absent-evidence rule. System.exit(0) leaves a container that exited
+        // cleanly, having run no assertion and printed no verdict. Anything deriving an outcome from the exit
+        // status reports PASSED here, which is why the runner derives it from the protocol line instead.
+        SandboxOutcome outcome = execute(Map.of(
+                "features/early-exit.feature",
+                """
+                Feature: leaving before the verdict
+                  Scenario: exit cleanly mid-suite
+                    * def System = Java.type('java.lang.System')
+                    * eval System.exit(0)
+                    * match 1 == 2
+                """));
+
+        assertThat(outcome.exitCode()).as("the container really did exit zero").contains(0);
+        assertThat(EngineOutcome.of(outcome).verdict()).isEqualTo(EngineOutcome.Verdict.ABSENT);
+    }
+
+    @Test
+    @Timeout(600)
+    @DisplayName("a feature that floods stdout is truncated, and the flood does not become a verdict")
+    void afloodedStreamIsBoundedAndNotBelieved() {
+        // Output is bounded in the launcher's memory, so a hostile suite cannot exhaust the runner by
+        // printing. The consequence that matters here is what the truncation does to the result: the
+        // adapter's verdict comes last, so a flood removes it -- and removing it must mean ABSENT.
+        SandboxOutcome outcome = execute(Map.of(
+                "features/flood.feature",
+                """
+                Feature: filling the platform's buffer
+                  Scenario: print far past the ceiling
+                    * def System = Java.type('java.lang.System')
+                    * def line = Java.type('java.lang.String').valueOf('f').repeat(4000)
+                    * def flood = function(){ for (var i = 0; i < 200; i++) { System.out.println('kaas.probe.flood' + i + '=' + line) } }
+                    * eval flood()
+                """));
+
+        assertThat(outcome.outputTruncated())
+                .as("200 lines of 4000 characters must exceed the collector's ceiling")
+                .isTrue();
+        assertThat(EngineOutcome.of(outcome).completed())
+                .as("a truncated stream is not one the platform can read a verdict out of")
+                .isFalse();
+    }
+
     // ------------------------------------------------------------------ delivery
 
     /**

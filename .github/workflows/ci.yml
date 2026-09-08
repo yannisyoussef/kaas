@@ -321,6 +321,75 @@ jobs:
           docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f
           docker network ls -q --filter label=kaas.managed=true | xargs -r docker network rm
 
+  # The FIRST EXECUTION of code the platform did not write.
+  #
+  # Every other gate in this file measures a boundary with a platform-authored probe. This one starts real
+  # Karate 2.1.2 on a real frozen source filesystem and runs real tenant features through it, which is a
+  # different claim: not that a probe observed containment, but that the product executed inside it.
+  #
+  # Its own mandatory job for the usual reason -- a gate inside a general build is one line in a long log --
+  # and one specific to it: this is where "secret-free" stops being a document and becomes a measurement. The
+  # suite asserts the engine's environment is exactly three shell- and launcher-created names, so a variable
+  # reaching the JVM that runs tenant code turns this job red.
+  #
+  # The name `karate-execution-gate` must stay globally unique: required-check resolution matches on job name.
+  karate-execution-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+      - name: Confirm a container runtime is present
+        run: docker version
+      # Deleted before it runs, so an UP-TO-DATE result cannot satisfy this gate. A cached pass would report
+      # green without having started an engine.
+      - run: ./gradlew cleanKarateExecutionTest :services:runner:karateExecutionTest --no-daemon
+      # The engine module's own suite: it reads the jar rather than a line the adapter printed, which is what
+      # makes the version claim independent of the adapter's own honesty.
+      - run: ./gradlew :services:karate-engine:cleanTest :services:karate-engine:test --no-daemon
+      - name: Confirm the gate actually executed an engine
+        run: |
+          set -euo pipefail
+          results=services/runner/build/test-results/karateExecutionTest
+          if [ ! -d "$results" ]; then
+            echo "No test results were produced; the Karate execution gate did not run." >&2
+            exit 1
+          fi
+          executed=$(cat "$results"/*.xml | grep -o 'tests="[0-9]*"' | grep -o '[0-9]*' | awk '{n+=$1} END {print n+0}')
+          skipped=$(cat "$results"/*.xml | grep -o 'skipped="[0-9]*"' | grep -o '[0-9]*' | awk '{n+=$1} END {print n+0}')
+          echo "executed=$executed skipped=$skipped"
+          # A skipped test here is an unproven containment claim about a process running tenant code.
+          if [ "$executed" -lt 9 ] || [ "$skipped" -ne 0 ]; then
+            echo "Expected at least 9 executed tests and no skips." >&2
+            exit 1
+          fi
+          # ANTI-VACUITY, in the gate rather than only in the assertions. The suite requires the engine to
+          # name itself from karate-core's own metadata, so this string is present only if Karate loaded.
+          # Without this check a green job would be consistent with an adapter that printed verdicts and
+          # never started an engine.
+          if ! grep -rq "karate 2.1.2" "$results"; then
+            echo "No run reported an engine identity; nothing proves Karate executed." >&2
+            exit 1
+          fi
+      - name: Confirm no sandbox outlived the run
+        run: |
+          set -euo pipefail
+          containers=$(docker ps -aq --filter label=kaas.managed=true | wc -l | tr -d ' ')
+          echo "containers=$containers"
+          if [ "$containers" -ne 0 ]; then
+            echo "KaaS-managed containers outlived the suite." >&2
+            exit 1
+          fi
+      - name: Remove anything left behind by a failed run
+        if: always()
+        run: docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f
+
   # The security gate, run under the MEDIATING RUNTIME rather than the baseline one.
   #
   # A separate mandatory job for the same reasons as the two gates above, plus one specific to it: the runtime
