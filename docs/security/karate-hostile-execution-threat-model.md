@@ -119,7 +119,9 @@ bodies. The existing output sanitiser and ceiling already apply.
 
 Every row above marked "measured" came from a running engine, not from documentation. The evidence lives in
 `services/runner/src/test/java/com/kaas/runner/sandbox/KarateExecutionTests.java`, which runs in the mandatory
-`karate-execution-gate` CI job. That job additionally refuses to pass unless a run reported
+`karate-execution-gate` CI job, under the mediating runtime that job installs. Under the baseline runtime the
+bootstrap cannot close the source filesystem (ADR-031: `bootstrap_failure=FREEZE`), so no engine starts and
+there is nothing to measure — every row here describes the mediated boundary. That job additionally refuses to pass unless a run reported
 `kaas.engine=karate 2.1.2` — a string the adapter can only produce by resolving `karate-meta.properties`
 through Karate's own classloader, so a green gate is inconsistent with an adapter that never started an
 engine. The version claim is checked independently of the adapter in

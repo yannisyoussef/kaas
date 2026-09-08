@@ -327,6 +327,15 @@ jobs:
   # Karate 2.1.2 on a real frozen source filesystem and runs real tenant features through it, which is a
   # different claim: not that a probe observed containment, but that the product executed inside it.
   #
+  # WHY IT RUNS UNDER THE MEDIATING RUNTIME, and cannot run under the baseline one.
+  #
+  # The engine runs on a source filesystem the bootstrap populates and then closes behind itself, and closing
+  # it is a `mount` the baseline runtime refuses: docs/architecture/mediated-source-filesystem-evaluation.md
+  # records `bootstrap_failure=FREEZE` for exactly that request under runc. So there is no baseline version of
+  # this gate to have. It was written as one, and it was green on macOS -- where Docker Desktop's VM carries no
+  # AppArmor policy and the remount therefore succeeds -- while every test in it failed on this runner. A
+  # mechanism that only works under one runtime can only be measured under that runtime.
+  #
   # Its own mandatory job for the usual reason -- a gate inside a general build is one line in a long log --
   # and one specific to it: this is where "secret-free" stops being a document and becomes a measurement. The
   # suite asserts the engine's environment is exactly three shell- and launcher-created names, so a variable
@@ -347,9 +356,30 @@ jobs:
           cache-provider: basic
       - name: Confirm a container runtime is present
         run: docker version
+      - uses: ./.github/actions/install-mediating-runtime
       # Deleted before it runs, so an UP-TO-DATE result cannot satisfy this gate. A cached pass would report
       # green without having started an engine.
       - run: ./gradlew cleanKarateExecutionTest :services:runner:karateExecutionTest --no-daemon
+      # A failure here is a statement about what an engine could reach, so it has to be readable from the log
+      # alone. Gradle's console prints only the assertion's line number, and the useful part -- what the
+      # sandbox actually reported -- lives in the XML. Without this the first failure of this gate cost a
+      # round trip to find out that the bootstrap had reported FREEZE and no engine had started at all.
+      - name: Report what the engine actually did
+        if: failure()
+        run: |
+          results=services/runner/build/test-results/karateExecutionTest
+          [ -d "$results" ] || { echo "No results; the suite never started."; exit 0; }
+          python3 - "$results" <<'PYEOF'
+          import glob, sys, xml.etree.ElementTree as ET
+          for path in sorted(glob.glob(sys.argv[1] + "/*.xml")):
+              root = ET.parse(path).getroot()
+              for case in root.iter("testcase"):
+                  for bad in list(case.iter("failure")) + list(case.iter("error")):
+                      print("=" * 78)
+                      print(case.get("name"))
+                      print("-" * 78)
+                      print((bad.get("message") or "").strip()[:4000])
+          PYEOF
       # The engine module's own suite: it reads the jar rather than a line the adapter printed, which is what
       # makes the version claim independent of the adapter's own honesty.
       - run: ./gradlew :services:karate-engine:cleanTest :services:karate-engine:test --no-daemon
@@ -392,9 +422,11 @@ jobs:
 
   # The security gate, run under the MEDIATING RUNTIME rather than the baseline one.
   #
-  # A separate mandatory job for the same reasons as the two gates above, plus one specific to it: the runtime
-  # cannot be installed on macOS/Docker Desktop, so this is the ONLY place the stronger boundary is ever
-  # exercised. A green local build proves nothing about it.
+  # A separate mandatory job for the same reasons as the gates above, plus one specific to it: the runtime
+  # cannot be installed on macOS/Docker Desktop, so this job and `karate-execution-gate` are the ONLY places
+  # the stronger boundary is ever exercised. A green local build proves nothing about it. Both install the
+  # runtime from one pinned digest, in `.github/actions/install-mediating-runtime`: two copies of that pin
+  # would eventually differ, and two jobs would then measure two runtimes while reporting the same claim.
   #
   #   1. No job-level `if:`, no `continue-on-error`, no path or branch filter. A required check is satisfied by
   #      success, skipped, OR neutral, so a job that skipped itself when runsc was absent would be
@@ -416,49 +448,7 @@ jobs:
         with:
           cache-provider: basic
 
-      # A PINNED release and a digest recorded in this repository, not `latest` and not a piped installer.
-      # The digest is what makes the artifact identity a property of the repository rather than of whatever
-      # the bucket serves today; the publisher's own checksum is not an independent check, because it comes
-      # from the same place as the artifact.
-      - name: Install the pinned mediating runtime
-        env:
-          # Pinned to a release MEASURED to work on this runner's kernel, not to the newest one and not to
-          # `latest`. release-20240729 refused every network mode here with "cannot run with network enabled in
-          # root network namespace" -- on the runner kernel, not only under nested Docker -- and this release
-          # runs the sandbox profile unchanged. Moving the pin is therefore a measurement, and re-pinning later
-          # means re-measuring.
-          #
-          # The digest was taken from two independent hosts and networks and matched the publisher's own
-          # sha512. That is what makes the artifact identity a property of this repository rather than of
-          # whatever the bucket serves today.
-          GVISOR_RELEASE: "20260817"
-          RUNSC_SHA256: "048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c"
-        run: |
-          set -euo pipefail
-          arch=$(uname -m)
-          if [ "$arch" != "x86_64" ]; then
-            echo "The pinned digest below is for x86_64; this runner is $arch." >&2
-            exit 1
-          fi
-          url="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/${arch}"
-          curl -fsSL "${url}/runsc" -o /tmp/runsc
-          echo "${RUNSC_SHA256}  /tmp/runsc" | sha256sum -c -
-          sudo install -o root -g root -m 0755 /tmp/runsc /usr/local/bin/runsc
-          runsc --version
-
-      - name: Register it with the daemon
-        run: |
-          set -euo pipefail
-          # Registered as a NAMED runtime rather than made the default. The baseline runtime stays available
-          # and stays the default: the trusted probe suites, the egress topology and the synthetic pipeline all
-          # exercise it deliberately, and a host where every container silently became mediated would be a host
-          # where the comparison this slice rests on no longer exists.
-          sudo mkdir -p /etc/docker
-          echo '{"runtimes":{"runsc":{"path":"/usr/local/bin/runsc"}}}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
-          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
-          docker info --format '{{range $k,$v := .Runtimes}}{{$k}} {{end}}' | tee /tmp/runtimes.txt
-          grep -q runsc /tmp/runtimes.txt
+      - uses: ./.github/actions/install-mediating-runtime
 
 
       # Registration is not execution, and the two failures look nothing alike. This step establishes WHICH
@@ -671,8 +661,7 @@ jobs:
             exit 1
           fi
           for suite in StrongRuntimeBoundaryTests StrongRuntimeAuthorityRevocationTests \
-                       MediatedSourceFilesystemBoundaryTests HostileJvmContainmentTests \
-                       StrongRuntimeKarateExecutionTests; do
+                       MediatedSourceFilesystemBoundaryTests HostileJvmContainmentTests; do
             if ! ls "$results" | grep -q "$suite"; then
               echo "$suite did not run." >&2
               exit 1

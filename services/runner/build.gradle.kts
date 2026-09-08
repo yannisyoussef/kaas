@@ -197,9 +197,6 @@ val strongRuntimeTest = tasks.register<Test>("strongRuntimeTest") {
         // What the boundary does when the workload is a JVM, which is what a future engine is. Named
         // explicitly like its neighbours so a rename cannot silently remove mandatory evidence.
         includeTestsMatching("com.kaas.runner.sandbox.HostileJvmContainmentTests")
-        // The product, under the runtime production uses. Named explicitly like its neighbours: the gate
-        // asserts which suites produced its evidence, and a glob would let a rename drop this silently.
-        includeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeKarateExecutionTests")
     }
 }
 
@@ -211,19 +208,26 @@ val strongRuntimeTest = tasks.register<Test>("strongRuntimeTest") {
  * that runs code the platform did not write, so what it demonstrates is different in kind from what the others
  * do: not that a probe observed a boundary, but that an actual test engine executed inside one.
  *
- * <p>Wired into {@code check}, unlike the strong-runtime gate: this needs a JVM in a container and nothing
- * else, so it runs on an ordinary development host. The containment claims it makes are therefore the
- * baseline runtime's; the mediated-runtime versions of the same questions belong to {@code strongRuntimeTest}.
+ * <p><strong>It needs the mediating runtime, and is therefore NOT wired into {@code check}</strong> — on the
+ * same terms as {@code strongRuntimeTest} and for a sharper reason. The engine runs on a source filesystem the
+ * bootstrap closes behind itself, and that remount is refused under the baseline runtime: the evaluation in
+ * docs/architecture/mediated-source-filesystem-evaluation.md records `bootstrap_failure=FREEZE` for exactly
+ * that request under runc. There is no baseline version of this suite to have.
+ *
+ * <p>It was written as one. Every test in it passed on macOS, where Docker Desktop's VM carries no AppArmor
+ * policy and the remount happens to succeed, and ten of its eleven failed on the first Linux runner that saw
+ * it — the bootstrap reported FREEZE, exited zero, and no JVM ever started, so those ten failed on the absence
+ * of an engine. <strong>A green local build proves nothing about this gate either.</strong> Only
+ * {@code karate-execution-gate} does.
  */
 val karateExecutionTest = tasks.register<Test>("karateExecutionTest") {
     group = "verification"
-    description = "Runs real Karate 2.1.2 on a delivered, frozen source filesystem."
+    description =
+        "Runs real Karate 2.1.2 on a delivered, frozen source filesystem. Requires runsc on the daemon."
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath
     filter { includeTestsMatching("com.kaas.runner.sandbox.KarateExecutionTests") }
 }
-
-tasks.named("check") { dependsOn(karateExecutionTest) }
 
 tasks.named<Test>("test") {
     dependsOn(jvmProbeImageContext)
@@ -238,9 +242,8 @@ tasks.named<Test>("test") {
         excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeAuthorityRevocationTests")
         excludeTestsMatching("com.kaas.runner.sandbox.MediatedSourceFilesystemBoundaryTests")
         excludeTestsMatching("com.kaas.runner.sandbox.HostileJvmContainmentTests")
-        excludeTestsMatching("com.kaas.runner.sandbox.StrongRuntimeKarateExecutionTests")
-        // Runs in karateExecutionTest above. Excluded here so one Docker-heavy suite does not run twice, on
-        // the same terms as the egress suites.
+        // Runs in karateExecutionTest above, which needs that same runtime: the frozen source filesystem the
+        // engine executes on cannot be closed under the baseline one.
         excludeTestsMatching("com.kaas.runner.sandbox.KarateExecutionTests")
     }
 }

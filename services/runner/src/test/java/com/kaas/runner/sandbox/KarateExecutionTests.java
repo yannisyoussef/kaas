@@ -35,6 +35,22 @@ import org.junit.jupiter.api.Timeout;
  * <p>An adapter that printed {@code PASSED} without loading Karate would satisfy an outcome assertion
  * perfectly. So the version banner is asserted alongside the verdict: the evidence has to name the engine it
  * came from, or it is evidence of the protocol and not of the execution.
+ *
+ * <h2>Why it runs under the mediating runtime, and cannot run under the baseline one</h2>
+ *
+ * <p>The engine executes on a source filesystem the bootstrap populates and then closes behind itself, and
+ * that closing remount is refused under the baseline runtime — measured, and recorded in
+ * docs/architecture/mediated-source-filesystem-evaluation.md as {@code bootstrap_failure=FREEZE} for the
+ * identical request under runc. So there is no baseline-runtime version of this suite to write.
+ *
+ * <p>It was first written as one, and the way that failed is worth keeping: it was green on macOS, where
+ * Docker Desktop's VM carries no AppArmor policy and the remount therefore succeeds, and ten of its eleven
+ * tests failed on the first Linux runner that saw it. The bootstrap reported FREEZE and exited zero, no JVM
+ * ever started, and those ten failed on the absence of an engine rather than on anything an engine did. The
+ * eleventh passed, because it asserts an ABSENT verdict and an absent engine produces one — which is the
+ * sharpest illustration in the suite of why a green test is not evidence on its own. <strong>A green local
+ * build proves nothing about this suite</strong>: only the {@code karate-execution-gate} job does, and only
+ * because it installs {@code runsc}.
  */
 @DisplayName("Secret-free Karate execution")
 class KarateExecutionTests {
@@ -172,10 +188,17 @@ class KarateExecutionTests {
     @Timeout(600)
     @DisplayName("the frozen source refuses a write, and the same write elsewhere succeeds")
     void theSourceIsReadOnlyToTheEngine() {
-        // TWO AXES, because one is not evidence. A catch block reports REFUSED for a read-only filesystem and
-        // for a JavaScript TypeError equally well, so the first assertion below would be satisfied by a probe
-        // that never reached a filesystem at all. The scratch write is the positive control that says the
-        // mechanism works, and the reported exception type is what says WHICH refusal happened.
+        // THREE AXES, because two are not evidence. A catch block reports REFUSED for a read-only filesystem
+        // and for a JavaScript TypeError equally well, so the refusal alone would be satisfied by a probe that
+        // never reached a filesystem at all. The scratch write is the positive control that says the mechanism
+        // works. And the mount's own options, read by the engine out of its own /proc, are what say WHICH
+        // refusal happened.
+        //
+        // The options rather than the exception's text, deliberately. The earlier version of this asserted the
+        // message contained "Read-only file system", which is what the baseline runtime's kernel says and is
+        // NOT what the mediating runtime says: under runsc the same write returns a refusal carrying only the
+        // path. An assertion on a diagnostic string is an assertion about which kernel wrote it; `ro` in
+        // /proc/self/mountinfo is the control itself.
         SandboxOutcome outcome = execute(Map.of(
                 "features/write-source.feature",
                 """
@@ -186,10 +209,12 @@ class KarateExecutionTests {
                     * def Path = Java.type('java.nio.file.Path')
                     * def bytes = Java.type('java.lang.String').valueOf('planted').getBytes()
                     * def attempt = function(target){ try { Files.write(Path.of(target), bytes); return 'WROTE' } catch (e) { return 'REFUSED:' + e } }
+                    * def mountLine = function(target){ var lines = Files.readAllLines(Path.of('/proc/self/mountinfo')); var found = 'ABSENT'; for (var i = 0; i < lines.size(); i++) { var l = '' + lines.get(i); if (l.indexOf(' ' + target + ' ') > 0) { found = l } } return found }
                     * def onSource = attempt('/kaas/source/files/features/planted.feature')
                     * def onScratch = attempt('/tmp/kaas-engine/planted.feature')
                     * eval System.out.println('kaas.probe.source-write=' + onSource)
                     * eval System.out.println('kaas.probe.scratch-write=' + onScratch)
+                    * eval System.out.println('kaas.probe.source-mount=' + mountLine('/kaas/source'))
                 """));
 
         assertThat(EngineOutcome.of(outcome).verdict()).isEqualTo(EngineOutcome.Verdict.PASSED);
@@ -198,12 +223,15 @@ class KarateExecutionTests {
         assertThat(outcome.observations())
                 .as("the probe must be able to write somewhere, or its refusal is not a measurement")
                 .containsEntry("kaas.probe.scratch-write", "WROTE");
-        // A filesystem refusal, named by the kernel. Not merely "an exception happened": karate-js wraps a
-        // Java throwable in its own Error, so the type is gone by the time tenant code can see it and the
-        // message is what remains. It still distinguishes the two explanations, which is the whole job.
         assertThat(outcome.observations().get("kaas.probe.source-write"))
-                .as("the refusal must come from the filesystem, not from a broken probe")
-                .contains("Read-only file system");
+                .as("the write beside the executing feature must be refused")
+                .startsWith("REFUSED:");
+        // And what refused it. The engine reads the flags of the filesystem it is running on, out of its own
+        // /proc, so this is the freeze itself rather than a message about it.
+        assertThat(mountOptions(outcome, "kaas.probe.source-mount"))
+                .as("the source the engine runs on must be closed, seen from inside the engine: %s",
+                        outcome.observations().get("kaas.probe.source-mount"))
+                .contains("ro", "noexec", "nosuid");
     }
 
     @Test
@@ -244,6 +272,7 @@ class KarateExecutionTests {
                     * def Files = Java.type('java.nio.file.Files')
                     * def Path = Java.type('java.nio.file.Path')
                     * def PB = Java.type('java.lang.ProcessBuilder')
+                    * def mountLine = function(target){ var lines = Files.readAllLines(Path.of('/proc/self/mountinfo')); var found = 'ABSENT'; for (var i = 0; i < lines.size(); i++) { var l = '' + lines.get(i); if (l.indexOf(' ' + target + ' ') > 0) { found = l } } return found }
                     * eval say('java-type', attempt(function(){ return Java.type('java.lang.ProcessBuilder') != null ? 'REACHABLE' : 'NULL' }))
                     * eval say('platform-launcher', attempt(function(){ return Java.type('com.kaas.runner.sandbox.DockerSandboxLauncher') != null ? 'REACHABLE' : 'NULL' }))
                     * eval say('process-spawn', attempt(function(){ return 'EXIT:' + new PB(['/bin/echo','hi']).start().waitFor() }))
@@ -253,6 +282,7 @@ class KarateExecutionTests {
                     * eval say('scratch-exec', attempt(function(){ return 'EXIT:' + new PB(['/bin/sh','-c','chmod +x /tmp/kaas-engine/x.sh && /tmp/kaas-engine/x.sh']).start().waitFor() }))
                     * eval say('remount', attempt(function(){ return 'EXIT:' + new PB(['/bin/sh','-c','mount -o remount,rw /kaas/source']).start().waitFor() }))
                     * eval say('post-remount-write', attempt(function(){ Files.write(Path.of('/kaas/source/files/planted.feature'), Java.type('java.lang.String').valueOf('x').getBytes()); return 'WROTE' }))
+                    * eval say('post-remount-mount', mountLine('/kaas/source'))
                 """));
 
         Map<String, String> probe = outcome.observations();
@@ -287,10 +317,15 @@ class KarateExecutionTests {
                 .as("no route, established without relying on name resolution")
                 .startsWith("REFUSED:");
 
-        // THE FREEZE HOLDS. The remount fails, and the write fails after it -- both, because a remount that
-        // failed for some unrelated reason would leave the second question unanswered.
+        // THE FREEZE HOLDS. The remount fails, the write fails after it, and the mount is still `ro` when the
+        // dust settles -- all three, because a remount that failed for some unrelated reason would leave the
+        // second question unanswered, and a refusal is a message while the mount options are the control.
         assertThat(probe).containsEntry("kaas.probe.remount", "EXIT:1");
-        assertThat(probe.get("kaas.probe.post-remount-write")).contains("Read-only file system");
+        assertThat(probe.get("kaas.probe.post-remount-write")).startsWith("REFUSED:");
+        assertThat(mountOptions(outcome, "kaas.probe.post-remount-mount"))
+                .as("the source must still be closed after tenant code tried to open it: %s",
+                        probe.get("kaas.probe.post-remount-mount"))
+                .contains("ro", "noexec", "nosuid");
     }
 
     // ------------------------------------------------------------------ the ways a run can end badly
@@ -364,6 +399,32 @@ class KarateExecutionTests {
                 .isFalse();
     }
 
+    // ------------------------------------------------------------------ reading what the engine reported
+
+    /**
+     * The per-mount options of a {@code /proc/self/mountinfo} line the engine reported.
+     *
+     * <p>Parsed here rather than in the feature, because the feature is tenant-authored code running in a
+     * hostile process: what it prints is untrusted data, and untrusted data is split apart on the trusted side
+     * of the boundary. Field five is the per-mount option list, which is where {@code ro} lives; the
+     * superblock options after the separator are a different claim about a different object.
+     *
+     * <p>An absent or unparseable line is returned as an empty list rather than as a skipped assertion. A
+     * mount the engine could not see is a mount nothing measured, and that must fail.
+     */
+    private static List<String> mountOptions(SandboxOutcome outcome, String key) {
+        String line = outcome.observations().get(key);
+        if (line == null) {
+            return List.of();
+        }
+        String[] fields = line.split(" ");
+        // ID, parent, major:minor, root, mount point, options -- six fields before any optional one.
+        if (fields.length < 6) {
+            return List.of();
+        }
+        return List.of(fields[5].split(","));
+    }
+
     // ------------------------------------------------------------------ delivery
 
     /**
@@ -385,7 +446,10 @@ class KarateExecutionTests {
                 SourceBundle.verified(archiveOf(entries), expected, SourceBundle.bundleDigest(expected));
 
         var profile = SandboxSecurityProfile.withSource(
-                SandboxSecurityProfile.version1(SandboxTestSupport.karateEngineImage()),
+                // GVISOR, and not a preference. The bootstrap's freeze is a `mount`, and the baseline runtime
+                // refuses it: without this every test below measures a container that never started an engine.
+                SandboxSecurityProfile.version1(
+                        SandboxTestSupport.karateEngineImage(), ExecutionRuntimeType.GVISOR),
                 new SandboxSecurityProfile.SourceDelivery(
                         SourceFrame.of(bundle), SourceBundleContract.SOURCE_FILESYSTEM_BYTES));
 

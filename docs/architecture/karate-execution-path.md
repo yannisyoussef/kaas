@@ -4,6 +4,11 @@ What actually happens, in order, when a `KARATE` run executes. Adjudicated by
 [ADR-033](../adr/033-first-secret-free-karate-execution.md); the security argument is in
 [secret-free Karate execution](../security/secret-free-karate-execution.md).
 
+**Step 7 requires the mediating runtime.** The `MS_REMOUNT|MS_RDONLY` below is refused under the baseline
+runtime — [ADR-031's evaluation](mediated-source-filesystem-evaluation.md) measured it — and the bootstrap
+then reports `bootstrap_failure=FREEZE`, exits **0**, and never reaches step 8. This chain therefore has no
+baseline-runtime form: on `runc` it stops at step 7 with no engine, not with a weaker one.
+
 ## The chain
 
 ```

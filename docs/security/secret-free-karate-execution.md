@@ -108,3 +108,10 @@ verification, real framing, real stdin delivery, real freeze, real Karate. The j
 run reported `kaas.engine=karate 2.1.2` — a string the adapter can only produce by resolving
 `karate-meta.properties` through Karate's own classloader. The version is checked independently of the adapter
 by the engine module's own suite, which reads the jar.
+
+**The job installs the mediating runtime, and the suite runs only under it.** The freeze is a `mount`, and
+ADR-031's evaluation measured that mount as refused under the baseline runtime — so a sandbox that carries
+tenant source never gets past `bootstrap_failure=FREEZE` there, and no engine ever starts. Everything this
+document claims about a running engine is therefore a claim about the mediated boundary. It is not a claim
+about the baseline one, and a local build on Docker Desktop — where the remount happens to succeed because no
+AppArmor policy is applied inside its VM — is not evidence for either.

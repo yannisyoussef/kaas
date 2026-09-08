@@ -1,0 +1,56 @@
+# Installs the pinned mediating runtime and registers it with the daemon.
+#
+# ONE COPY, because the pin is a security fact rather than a convenience. Two jobs now need `runsc` — the
+# strong-runtime gate and the Karate execution gate — and a pin duplicated across them is a pin that
+# eventually differs, which would mean two jobs measuring two runtimes while reporting the same claim.
+name: Install the pinned mediating runtime
+description: Downloads runsc at a repository-pinned digest and registers it as a named Docker runtime.
+
+runs:
+  using: composite
+  steps:
+    # A PINNED release and a digest recorded in this repository, not `latest` and not a piped installer.
+    # The digest is what makes the artifact identity a property of the repository rather than of whatever
+    # the bucket serves today; the publisher's own checksum is not an independent check, because it comes
+    # from the same place as the artifact.
+    - name: Install the pinned mediating runtime
+      shell: bash
+      env:
+        # Pinned to a release MEASURED to work on this runner's kernel, not to the newest one and not to
+        # `latest`. release-20240729 refused every network mode here with "cannot run with network enabled in
+        # root network namespace" -- on the runner kernel, not only under nested Docker -- and this release
+        # runs the sandbox profile unchanged. Moving the pin is therefore a measurement, and re-pinning later
+        # means re-measuring.
+        #
+        # The digest was taken from two independent hosts and networks and matched the publisher's own
+        # sha512. That is what makes the artifact identity a property of this repository rather than of
+        # whatever the bucket serves today.
+        GVISOR_RELEASE: "20260817"
+        RUNSC_SHA256: "048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c"
+      run: |
+        set -euo pipefail
+        arch=$(uname -m)
+        if [ "$arch" != "x86_64" ]; then
+          echo "The pinned digest below is for x86_64; this runner is $arch." >&2
+          exit 1
+        fi
+        url="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/${arch}"
+        curl -fsSL "${url}/runsc" -o /tmp/runsc
+        echo "${RUNSC_SHA256}  /tmp/runsc" | sha256sum -c -
+        sudo install -o root -g root -m 0755 /tmp/runsc /usr/local/bin/runsc
+        runsc --version
+
+    - name: Register it with the daemon
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Registered as a NAMED runtime rather than made the default. The baseline runtime stays available
+        # and stays the default: the trusted probe suites, the egress topology and the synthetic pipeline all
+        # exercise it deliberately, and a host where every container silently became mediated would be a host
+        # where the comparison this slice rests on no longer exists.
+        sudo mkdir -p /etc/docker
+        echo '{"runtimes":{"runsc":{"path":"/usr/local/bin/runsc"}}}' | sudo tee /etc/docker/daemon.json
+        sudo systemctl restart docker
+        for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+        docker info --format '{{range $k,$v := .Runtimes}}{{$k}} {{end}}' | tee /tmp/runtimes.txt
+        grep -q runsc /tmp/runtimes.txt

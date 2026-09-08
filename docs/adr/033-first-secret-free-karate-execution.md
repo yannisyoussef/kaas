@@ -99,6 +99,11 @@ refusals, on both sides of the boundary.
 - The first code the platform did not write now executes in production paths.
 - A ninth mandatory CI job, `karate-execution-gate`, runs real Karate on a real frozen source filesystem and
   fails if no run reports `kaas.engine=karate 2.1.2`.
+- **That job installs `runsc`, and the suite behind it is not part of `check`.** The engine executes on a
+  filesystem the bootstrap closes behind itself, and ADR-031's evaluation measured that closing remount as
+  refused under the baseline runtime (`bootstrap_failure=FREEZE`). So execution of tenant code is, today, a
+  property of the mediating runtime and not merely a preference for it: there is no baseline-runtime
+  configuration in which the engine ever starts. A green local build proves nothing about this gate.
 - Adding a dependency to the engine module widens what tenant code can reach. The module's classpath is now a
   reviewed security surface, and the runner's test task treats every jar on it as an input.
 - **Unchanged by this slice, deliberately:** `source_mount_nodev=false` (ADR-031 §47) and

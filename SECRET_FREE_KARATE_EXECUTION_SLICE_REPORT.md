@@ -11,8 +11,15 @@ toward it by refusing to: ADR-030 delivered tenant bytes as inert data, ADR-031 
 would not execute them, ADR-032 adjudicated whether they *may* become instructions and said yes for a
 secret-free slice under binding restrictions. This slice ran it.
 
-**Three things came out differently from how they were reasoned about beforehand, and all three are recorded
-as reversals rather than quietly absorbed:**
+**The largest correction is about where it runs.** Executing tenant code is a property of the mediating
+runtime, not a preference for it: the engine runs on a filesystem the bootstrap closes behind itself, and that
+closing `mount` is refused under the baseline runtime. ADR-031 measured exactly that and this slice was built
+on top of it anyway — the suite was written as a baseline-runtime gate, was green on macOS, and failed ten
+tests out of eleven on the first Linux runner that saw it, with no engine ever starting. It now targets
+`runsc`, and there is no baseline configuration in which the product executes anything. See §12.
+
+**Three further things came out differently from how they were reasoned about beforehand, and all three are
+recorded as reversals rather than quietly absorbed:**
 
 1. **Source resolution is not confined, and confining it was abandoned as security theatre.** ADR-032's threat
    model said this slice "must bound source resolution to `/kaas/source` and prove traversal outside it
@@ -49,7 +56,7 @@ unreachable`, which is the real topological claim.
 | Engine probe | `SyntheticProbe.KARATE_ENGINE` | the one probe whose program is the product |
 | Bootstrap mode | `source-bootstrap.c` `ENGINE_MODE` | a third compile-time handover literal |
 | Secret-free refusal | `ENGINE_REQUIRES_SECRET_FREE_RUN` | denies secret-bearing runs before the provider check |
-| CI gate | `karate-execution-gate` | ninth mandatory job; fails unless a run names the engine |
+| CI gate | `karate-execution-gate` | ninth mandatory job; installs `runsc`; fails unless a run names the engine |
 
 ## 3. The success chain, demonstrated
 
@@ -99,7 +106,8 @@ platform classes are absent; scratch is writable *and* not executable.
 | DNS | refused | DENIED |
 | `SocketChannel` to a **literal IP** | `Network unreachable` | DENIED BY TOPOLOGY, without relying on DNS |
 | `mount -o remount,rw /kaas/source` | `EXIT:1` | DENIED |
-| write after the failed remount | `Read-only file system` | the freeze holds |
+| write after the failed remount | `REFUSED` | the freeze holds |
+| `/proc/self/mountinfo` for `/kaas/source`, after the remount attempt | `ro,noexec,nosuid` | **the freeze itself**, read by the engine out of its own `/proc` |
 
 ## 6. Absent evidence is never a pass
 
@@ -151,6 +159,8 @@ run at all before the defect in §9.8 was fixed — the branch they mutate was u
 | 7 | the API architecture test banned only `com.intuit.karate`, not `io.karatelabs` | auditing the guards after adding the engine |
 | 8 | **the loop's entire engine branch was unreachable from any test.** `EngineOutcome` had full component coverage, `ExecutionLoop` had the branch, and no test anywhere constructed a loop with the engine name — so a branch that ignored its input would have been green | asking which test constructs the production configuration, rather than which tests pass |
 | 9 | a comment in `CommandValidator` asserted that "nothing in the execution path reads these entries", which this slice made false | re-reading the claims the slice invalidated |
+| 10 | **the whole suite was built against a runtime that cannot run it.** The engine's source filesystem is closed by a `mount` the baseline runtime refuses, so on Linux the bootstrap reported `FREEZE`, no JVM started, and ten of eleven tests failed on the absence of an engine | CI, on the first Linux host that ran it. Nothing local could have found it: Docker Desktop's VM applies no AppArmor policy and the remount succeeds there |
+| 11 | the source-write assertions read `Read-only file system` out of an exception message, which is the *baseline* kernel's wording; the mediating runtime refuses the same write with a message carrying only the path | the mediated version of the same test failed on the string while the control it was standing in for held. Replaced with the mount's own options, read from `/proc/self/mountinfo` by the engine |
 
 ## 10. What this slice did not do
 
@@ -174,7 +184,7 @@ working directories, plugins, tenant-uploaded libraries, arbitrary JAR loading.
 
 ## 12. Verification
 
-`./gradlew clean check` — **BUILD SUCCESSFUL**, 11m 13s.
+`./gradlew clean check` — **BUILD SUCCESSFUL**, 9m 34s.
 
 | Module | Task | Tests |
 | --- | --- | --- |
@@ -183,9 +193,8 @@ working directories, plugins, tenant-uploaded libraries, arbitrary JAR loading.
 | `services/karate-engine` | `test` | 7 |
 | `services/runner` | `test` | 232 |
 | `services/runner` | `egressSecurityTest` | 36 |
-| `services/runner` | `karateExecutionTest` | **11** |
 | `tests/pipeline` | `test` | 39 |
-| | **Total** | **777** |
+| | **Total** | **766** |
 
 **0 skipped, 0 failures.** A skipped test in a security suite is an unproven claim, so the CI gates assert
 zero skips rather than only zero failures.
@@ -195,16 +204,29 @@ Docker Desktop offers no supported way to install. It runs in the mandatory `str
 **A green local build proves nothing about the mediating runtime** — that has been true since ADR-028 and is
 still true.
 
-That gate now includes `StrongRuntimeKarateExecutionTests`: the engine, under the runtime production actually
-uses. Three questions only — that Karate loads and completes a suite under `runsc`, that a failing suite is
-still a tenant result there, and that the classpath control and the read-only freeze hold. Everything else
-about a JVM under this runtime was already measured by `HostileJvmContainmentTests` in the previous slice, and
-repeating it would be measuring gVisor twice.
+### `karateExecutionTest` is not in this total either, and the reason is the correction below
 
-**Stated plainly: those three tests have never been executed on this machine.** They were written against a
-suite verified under the baseline runtime and differ from it in one line — the runtime type. Their first real
-run is in CI, which is the same position every mediated-runtime suite in this repository has been in since
-ADR-028.
+The 11 engine tests were first written and verified against the **baseline** runtime, on macOS, and reported
+as part of a green `check`. They were: on Docker Desktop the bootstrap's closing remount succeeds, because no
+AppArmor policy is applied inside its VM. On the first Linux runner that saw them, ten of the eleven failed —
+the bootstrap reported `bootstrap_failure=FREEZE`, exited 0, and no JVM ever started. The eleventh passed
+because it asserts an *absent* verdict and got one.
+
+This was already measured and already written down. ADR-031's evaluation records `mount -o remount,ro` with
+`CAP_SYS_ADMIN` as **Permission denied** under runc and **OK** under runsc, and `SourceBootstrapTests` had
+already been relaxed to tolerate `FREEZE` for exactly this reason, with the note that it "failed in the
+ordinary gate while passing on the development machine". The slice was built on top of that mechanism without
+carrying its runtime constraint forward.
+
+So `KarateExecutionTests` now runs under the mediating runtime, `karate-execution-gate` installs `runsc`, and
+the suite is out of `check` on the same terms as every other mediated-runtime suite.
+`StrongRuntimeKarateExecutionTests` was deleted: with the main suite running under `runsc`, its three
+questions were a strict subset of the eleven.
+
+**Stated plainly: the 11 engine tests have never been executed under the runtime they now target.** Their
+first real run is in CI, which is the same position every mediated-runtime suite in this repository has been
+in since ADR-028. What *was* verified on this machine, under the baseline runtime, is that the probes
+themselves work and that their assertions hold once an engine actually starts.
 
 ## 13. What the CI gate refuses to accept
 
@@ -222,13 +244,22 @@ running the suite it independently checks:
 It also runs the engine module's own suite, which reads the version from the jar rather than from a line the
 adapter printed — the version claim does not depend on the adapter's honesty.
 
+It installs the mediating runtime first, from the same pinned digest `strong-runtime-gate` uses — one copy, in
+`.github/actions/install-mediating-runtime`, because a pin duplicated across two jobs is a pin that eventually
+differs and two jobs would then measure two runtimes while reporting the same claim.
+
+And on failure it prints each failed test's message out of the JUnit XML, the way `strong-runtime-gate`
+already did. Gradle's console prints a class and a line number; the first failure of this gate cost a round
+trip to CI to discover something the observations would have said outright — that the bootstrap had reported
+`FREEZE` and no engine had started at all.
+
 ## 14. Where the evidence lives
 
 | Claim | File |
 | --- | --- |
 | real Karate executes the authorized features | `services/runner/src/test/java/com/kaas/runner/sandbox/KarateExecutionTests.java` |
 | the runner cannot load Karate; the image ships exactly 2.1.2 | `.../sandbox/EngineTrustBoundaryTest.java` |
-| the engine runs under the mediating runtime | `.../sandbox/StrongRuntimeKarateExecutionTests.java` (CI only) |
+| the engine runs under the mediating runtime | the same file — it targets `GVISOR`, and runs in CI only |
 | the loop reads an engine verdict, and reads it differently from a synthetic one | `.../execution/ExecutionLoopEngineTests.java` |
 | the manifest decides what runs; escapes refused; the jar is 2.1.2 | `services/karate-engine/src/test/java/com/kaas/karate/KaasKarateAdapterTest.java` |
 | secret-bearing runs are refused, on three axes | `apps/api/src/test/java/com/kaas/api/ExecutionAuthorizationTests.java` |
@@ -246,3 +277,7 @@ adapter printed — the version claim does not depend on the adapter's honesty.
   key. Widening it is a decision, not a configuration change.
 - **The engine's classpath is now a reviewed surface.** Adding a dependency to `services/karate-engine`
   widens what tenant code can reach and should be treated as a security change.
+- **A deployment on the baseline runtime cannot run tenant features at all.** Not "runs them less safely" —
+  the bootstrap fails closed at the freeze and no engine starts. That is the correct behaviour and it is now
+  the documented one, but it means the mediating runtime is a hard prerequisite for the product rather than a
+  hardening choice, and any environment that cannot register `runsc` is out of scope for execution.
