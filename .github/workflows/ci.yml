@@ -399,14 +399,24 @@ jobs:
             echo "Expected at least 9 executed tests and no skips." >&2
             exit 1
           fi
-          # ANTI-VACUITY, in the gate rather than only in the assertions. The suite requires the engine to
-          # name itself from karate-core's own metadata, so this string is present only if Karate loaded.
-          # Without this check a green job would be consistent with an adapter that printed verdicts and
-          # never started an engine.
-          if ! grep -rq "karate 2.1.2" "$results"; then
-            echo "No run reported an engine identity; nothing proves Karate executed." >&2
+      # ANTI-VACUITY, in the gate rather than only in the assertions. The suite requires the engine to name
+      # itself from karate-core's own metadata, so this string exists only if Karate loaded.
+      #
+      # Read out of an evidence file the suite writes, NOT out of the JUnit XML. The XML carries a failure's
+      # message and nothing else, so the earlier `grep -r "karate 2.1.2"` over it could only be satisfied by
+      # the assertion FAILING — a check that was red on every green run and green on nothing. It went
+      # unnoticed because the suite had never passed on a host where this step could run.
+      - name: Confirm an engine named itself
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/karate-execution-evidence.txt"
+          if [ ! -f "$evidence" ]; then
+            echo "The suite recorded no engine identity; nothing proves Karate executed." >&2
             exit 1
           fi
+          cat "$evidence"
+          grep -q '^engine_identity=karate 2.1.2$' "$evidence"
+          grep -q '^engine_verdict=PASSED$' "$evidence"
       - name: Confirm no sandbox outlived the run
         run: |
           set -euo pipefail

@@ -72,6 +72,10 @@ class KarateExecutionTests {
                     * match sum == 2
                 """));
 
+        // Recorded BEFORE the assertions, so a run that named the wrong engine leaves the wrong name where a
+        // reader can see it rather than leaving nothing at all.
+        record(outcome);
+
         assertThat(outcome.failure()).as("%s", outcome.observations()).isEmpty();
         // ANTI-VACUITY. Without this the suite would pass against an adapter that printed a verdict and never
         // loaded an engine, which is the single most likely way this evidence could be worthless.
@@ -400,6 +404,37 @@ class KarateExecutionTests {
     }
 
     // ------------------------------------------------------------------ reading what the engine reported
+
+    /**
+     * Writes the engine's own identity and verdict where the gate can read them back.
+     *
+     * <p>The same arrangement the mediated source-delivery suite uses, and here it closes a hole rather than
+     * merely documenting one. The gate's anti-vacuity check used to grep the JUnit XML for
+     * {@code karate 2.1.2} — a string that only appears there when the assertion for it FAILS. So the check
+     * could be satisfied by a broken run and never by a working one, and nothing noticed until the suite
+     * passed for the first time and the gate went red on a green build.
+     *
+     * <p>Both lines come from {@code outcome}, so they are what the sandbox reported rather than what this
+     * test expected. A constant here would make the gate assert the test's own opinion.
+     */
+    private static void record(SandboxOutcome outcome) {
+        String directory = System.getenv("RUNNER_TEMP");
+        if (directory == null || directory.isBlank()) {
+            return; // Off CI there is no gate to read it.
+        }
+        String evidence = "engine_identity=" + outcome.observations().getOrDefault("kaas.engine", "ABSENT")
+                + "\nengine_verdict=" + EngineOutcome.of(outcome).verdict() + "\n";
+        try {
+            java.nio.file.Files.writeString(
+                    java.nio.file.Path.of(directory, "karate-execution-evidence.txt"),
+                    evidence,
+                    StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (java.io.IOException unwritable) {
+            throw new java.io.UncheckedIOException(unwritable);
+        }
+    }
 
     /**
      * The per-mount options of a {@code /proc/self/mountinfo} line the engine reported.

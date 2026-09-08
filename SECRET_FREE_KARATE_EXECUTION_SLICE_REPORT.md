@@ -161,6 +161,7 @@ run at all before the defect in §9.8 was fixed — the branch they mutate was u
 | 9 | a comment in `CommandValidator` asserted that "nothing in the execution path reads these entries", which this slice made false | re-reading the claims the slice invalidated |
 | 10 | **the whole suite was built against a runtime that cannot run it.** The engine's source filesystem is closed by a `mount` the baseline runtime refuses, so on Linux the bootstrap reported `FREEZE`, no JVM started, and ten of eleven tests failed on the absence of an engine | CI, on the first Linux host that ran it. Nothing local could have found it: Docker Desktop's VM applies no AppArmor policy and the remount succeeds there |
 | 11 | the source-write assertions read `Read-only file system` out of an exception message, which is the *baseline* kernel's wording; the mediating runtime refuses the same write with a message carrying only the path | the mediated version of the same test failed on the string while the control it was standing in for held. Replaced with the mount's own options, read from `/proc/self/mountinfo` by the engine |
+| 12 | **the gate's anti-vacuity check could only pass when the suite failed.** It grepped the JUnit XML for `karate 2.1.2`, and the XML carries a failure's message and nothing else — so the string was present exactly when the assertion for it did *not* hold | the first CI run in which all eleven tests passed. The gate went red on a green suite. Replaced with an evidence file the success-chain test writes from the sandbox's own report |
 
 ## 10. What this slice did not do
 
@@ -235,9 +236,13 @@ running the suite it independently checks:
 
 - test results exist at all — a missing directory is a failure, not an absence;
 - at least 9 tests executed and **zero** were skipped;
-- some run reported `kaas.engine=karate 2.1.2`. That string can only be produced by resolving
+- the success-chain test recorded `engine_identity=karate 2.1.2` and `engine_verdict=PASSED` in an evidence
+  file, both read from what the sandbox reported. That string can only be produced by resolving
   `karate-meta.properties` through Karate's own classloader, so a green job is inconsistent with an adapter
-  that printed verdicts and never started an engine;
+  that printed verdicts and never started an engine. It reads an evidence file rather than the JUnit XML: the
+  XML carries a failure's message and nothing else, so the original `grep -r "karate 2.1.2"` over it could
+  only be satisfied by the assertion *failing* — red on every green run, green on nothing. Nobody saw it,
+  because the suite had never passed on a host where that step could run;
 - no KaaS-managed container outlived the suite;
 - the task was deleted before running, so an `UP-TO-DATE` result cannot satisfy the gate.
 
