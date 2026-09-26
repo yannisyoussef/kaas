@@ -28,6 +28,7 @@ import java.util.Set;
  *             → UTF-8 decoding  incremental, so a code point split across frames survives
  *             → line assembly   per stream, including a final line with no newline
  *             → sanitisation    control and format characters stripped
+ *             → redaction again  over the sanitised line: stripping can JOIN what the first pass saw apart
  *             → observations (key=value) and the redacted transcript
  * </pre>
  *
@@ -50,6 +51,14 @@ final class OutputCollector extends ResultCallback.Adapter<Frame> {
     private final Channel stdout;
     private final Channel stderr;
 
+    /**
+     * The collector's own copies of the values, for the second pass. Sanitising deletes characters, and a
+     * deletion can reassemble a value the byte-exact first pass saw in two pieces -- {@code ab<U+200B>cd}
+     * becomes {@code abcd}. Without a second pass the platform's own clean-up would be what reconstructed the
+     * secret. Cleared when the streams end.
+     */
+    private final List<byte[]> secrets;
+
     private final Map<String, String> observations = new LinkedHashMap<>();
     private final Map<String, Integer> occurrences = new LinkedHashMap<>();
 
@@ -62,6 +71,7 @@ final class OutputCollector extends ResultCallback.Adapter<Frame> {
      */
     OutputCollector(int maximumBytes, List<byte[]> secrets) {
         this.maximumBytes = maximumBytes;
+        this.secrets = secrets.stream().map(byte[]::clone).toList();
         this.stdout = new Channel(secrets);
         this.stderr = new Channel(secrets);
     }
@@ -100,6 +110,7 @@ final class OutputCollector extends ResultCallback.Adapter<Frame> {
             channel.endOfInput(this);
             channel.redactor.close();
         }
+        secrets.forEach(value -> java.util.Arrays.fill(value, (byte) 0));
         finished = true;
     }
 
@@ -125,19 +136,40 @@ final class OutputCollector extends ResultCallback.Adapter<Frame> {
     }
 
     private void record(Channel channel, String line) {
-        channel.transcript.append(sanitize(line)).append('\n');
-        int equals = line.indexOf('=');
+        // Control characters are stripped here, at the boundary, rather than wherever this is eventually
+        // rendered. Terminal escape sequences in untrusted output are an attack on whoever reads the logs.
+        // Then redacted again, because the stripping may have joined a value; and only then split, so the key
+        // and the value are cut from text that has been through both passes.
+        String kept = redactAgain(sanitize(line));
+        channel.transcript.append(kept).append('\n');
+        int equals = kept.indexOf('=');
         if (equals <= 0) {
             return;
         }
-        // Control characters are stripped here, at the boundary, rather than wherever this is eventually
-        // rendered. Terminal escape sequences in untrusted output are an attack on whoever reads the logs.
-        String key = sanitize(line.substring(0, equals));
-        String value = sanitize(line.substring(equals + 1));
+        String key = kept.substring(0, equals).trim();
+        String value = kept.substring(equals + 1).trim();
         // HOW MANY TIMES A KEY WAS SEEN, not only what it last said, for the reason KAAS-21 recorded: a map
         // keeps the last value and forgets there was another.
         occurrences.merge(key, 1, Integer::sum);
         observations.put(key, value);
+    }
+
+    /** The second, whole-line pass: exact bytes again, over text that sanitising may have rejoined. */
+    private String redactAgain(String sanitized) {
+        if (secrets.isEmpty()) {
+            return sanitized;
+        }
+        byte[] bytes = sanitized.getBytes(StandardCharsets.UTF_8);
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(bytes.length);
+        SecretRedactor second = SecretRedactor.over(secrets);
+        try {
+            second.write(bytes, 0, bytes.length, out::write);
+            second.finish(out::write);
+        } finally {
+            second.close();
+            java.util.Arrays.fill(bytes, (byte) 0);
+        }
+        return out.toString(StandardCharsets.UTF_8);
     }
 
     static String sanitize(String value) {

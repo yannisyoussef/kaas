@@ -194,6 +194,7 @@ class SecretExecutionPipelineTests {
 
     @Autowired private ObjectMapper mapper;
     @Autowired private JdbcTemplate jdbc;
+    @Autowired private com.kaas.api.secrets.domain.SecretTransit transit;
     @Autowired private PendingRunScheduler scheduler;
     @Autowired private RunClaimService claims;
 
@@ -291,13 +292,20 @@ class SecretExecutionPipelineTests {
         assertThat(inProxyLogs).as("secret_in_proxy_logs").isFalse();
         assertThat(topology().leftovers(GENERATION)).as("containers and networks").isEmpty();
 
+        // Every value below is computed from what was observed, not restated from the assertions above: an
+        // evidence file that could only ever say VALID would prove that the test passed and nothing else.
+        int redemptions = ((Number) capability.get("redemption_count")).intValue();
+        int scope = ((Number) capability.get("scope")).intValue();
         PipelineEvidence.append("secret-pipeline-evidence.txt",
-                "secret_provider=vault-transit\n"
-                        + "secret_provider_auth=VALID\n"
+                // The provider the application actually wired, read from the bean rather than named here.
+                "secret_provider=" + (transit instanceof com.kaas.api.secrets.infrastructure.VaultTransitClient ? "vault-transit" : "OTHER") + "\n"
+                        // Vault accepted this deployment's AppRole for both the encryption (Vault decrypts the
+                        // stored ciphertext for the operator) and the decryption (the engine held the value).
+                        + "secret_provider_auth=" + (encryptedByVault && authenticated == 1 ? "VALID" : "INVALID") + "\n"
                         + "secret_encryption=" + (encryptedByVault ? "VALID" : "INVALID") + "\n"
                         + "secret_version_pinned=" + (pinned == 1) + "\n"
-                        + "secret_capability=VALID\n"
-                        + "secret_redemption=VALID\n"
+                        + "secret_capability=" + (scope == 1 ? "VALID" : "INVALID") + "\n"
+                        + "secret_redemption=" + (redemptions == 1 ? "VALID" : "INVALID") + "\n"
                         + "secret_authenticated_request=" + (authenticated == 1) + "\n"
                         + "raw_stdout_secret_observed=" + (outcome.redaction().stdoutMatches() > 0) + "\n"
                         + "raw_stderr_secret_observed=" + (outcome.redaction().stderrMatches() > 0) + "\n"
@@ -308,7 +316,7 @@ class SecretExecutionPipelineTests {
                         + "secret_in_host_files=" + inHostFiles + "\n"
                         + "secret_in_proxy_logs=" + inProxyLogs + "\n"
                         + "engine_identity=" + outcome.protocol().single(ProtocolScanner.ENGINE_KEY) + "\n"
-                        + "engine_verdict=PASSED\n"
+                        + "engine_verdict=" + report.detail() + "\n"
                         + "runtime=" + outcome.assignedRuntime() + "\n");
     }
 
@@ -382,7 +390,8 @@ class SecretExecutionPipelineTests {
         assertThat(report.detail()).contains("SECRET_VERSION_REVOKED");
         assertThat(observed).as("no sandbox was launched").isEmpty();
         assertThat(topology().authenticatedRequests()).as("and version 2 was never used").isEqualTo(authenticatedBefore);
-        PipelineEvidence.append("secret-pipeline-evidence.txt", "revoked_version_refused=true\n");
+        PipelineEvidence.append("secret-pipeline-evidence.txt", "revoked_version_refused="
+                + (String.valueOf(report.detail()).contains("SECRET_VERSION_REVOKED") && observed.isEmpty()) + "\n");
     }
 
     @Test
@@ -412,7 +421,9 @@ class SecretExecutionPipelineTests {
         assertThat(passed.status()).as("%s", passed.detail()).isEqualTo("COMPLETED");
         assertThat(passed.detail()).isEqualTo("PASSED");
         PipelineEvidence.append("secret-pipeline-evidence.txt",
-                "provider_outage_refused_secret_run=true\n" + "secret_free_run_with_provider_down=PASSED\n");
+                "provider_outage_refused_secret_run="
+                        + (String.valueOf(refused.detail()).contains("SECRET_PROVIDER_UNAVAILABLE")) + "\n"
+                        + "secret_free_run_with_provider_down=" + passed.detail() + "\n");
     }
 
     // ------------------------------------------------------------------ the tenant's feature
@@ -525,6 +536,12 @@ class SecretExecutionPipelineTests {
      * KaaS-owned locations on this host that could have received a file: the JVM's temporary directory and
      * the build directories of the modules under test, restricted to files written during this test. Not the
      * whole host: that would be a search that proves nothing about KaaS and costs everything.
+     *
+     * <p>Fails closed. A directory that cannot be read is skipped and the walk goes on -- it does not abandon
+     * the root, which is how the first version of this scan missed a file written straight into the temporary
+     * directory: one unreadable sibling ended the whole walk and "found nothing" read as "nothing there". The
+     * control proves each root was really walked: a marker file is planted in every root before the scan, and
+     * a root whose marker the scan did not find fails the test rather than passing it.
      */
     private static boolean hostFilesContain(String needle, Instant since) throws IOException {
         List<Path> roots = List.of(
@@ -533,29 +550,52 @@ class SecretExecutionPipelineTests {
                 Path.of("..", "..", "services", "runner", "build"),
                 Path.of("..", "..", "apps", "api", "build"));
         byte[] target = needle.getBytes(StandardCharsets.UTF_8);
+        byte[] marker = ("kaas-scan-control-" + UUID.randomUUID()).getBytes(StandardCharsets.UTF_8);
+        boolean found = false;
         for (Path root : roots) {
-            if (!Files.isDirectory(root)) {
-                continue;
-            }
-            try (var files = Files.walk(root, 8)) {
-                for (Path file : files.filter(Files::isRegularFile).toList()) {
-                    try {
-                        if (Files.getLastModifiedTime(file).toInstant().isBefore(since) || Files.size(file) > 32 << 20) {
-                            continue;
-                        }
-                        byte[] content = Files.readAllBytes(file);
-                        if (indexOf(content, target) >= 0) {
-                            return true;
-                        }
-                    } catch (IOException | SecurityException unreadable) {
-                        // Another process's file, or one removed while walking. Not ours to judge.
-                    }
-                }
-            } catch (java.io.UncheckedIOException walking) {
-                // A directory vanished mid-walk. The rest of the roots are still scanned.
+            assertThat(root).as("scan root %s exists", root).isDirectory();
+            Path control = Files.createTempFile(root, "kaas-scan-control", ".txt");
+            try {
+                Files.write(control, marker);
+                boolean[] hits = scan(root, since, target, marker);
+                assertThat(hits[1]).as("the scan really walked %s: it found its control file", root).isTrue();
+                found |= hits[0];
+            } finally {
+                Files.deleteIfExists(control);
             }
         }
-        return false;
+        return found;
+    }
+
+    /** {target found, marker found} under {@code root}, skipping what cannot be read and nothing else. */
+    private static boolean[] scan(Path root, Instant since, byte[] target, byte[] marker) throws IOException {
+        boolean[] hits = new boolean[2];
+        Files.walkFileTree(root, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class), 8,
+                new java.nio.file.SimpleFileVisitor<>() {
+                    @Override
+                    public java.nio.file.FileVisitResult visitFile(
+                            Path file, java.nio.file.attribute.BasicFileAttributes attributes) {
+                        if (!attributes.isRegularFile() || attributes.size() > 32 << 20
+                                || attributes.lastModifiedTime().toInstant().isBefore(since)) {
+                            return java.nio.file.FileVisitResult.CONTINUE;
+                        }
+                        try {
+                            byte[] content = Files.readAllBytes(file);
+                            hits[0] |= indexOf(content, target) >= 0;
+                            hits[1] |= indexOf(content, marker) >= 0;
+                        } catch (IOException | SecurityException unreadable) {
+                            // Another process's file, or one removed while walking. The walk goes on.
+                        }
+                        return java.nio.file.FileVisitResult.CONTINUE;
+                    }
+
+                    @Override
+                    public java.nio.file.FileVisitResult visitFileFailed(Path file, IOException unreadable) {
+                        // An unreadable or vanished entry: skip it, never the rest of the root.
+                        return java.nio.file.FileVisitResult.CONTINUE;
+                    }
+                });
+        return hits;
     }
 
     private static int indexOf(byte[] haystack, byte[] needle) {

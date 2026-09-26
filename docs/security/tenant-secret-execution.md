@@ -88,6 +88,7 @@ failure** (FAILED) on a successful infrastructure, and the quoted value is redac
 | during the Vault call | decryption completes, the post-call revalidation refuses, plaintext is cleared, nothing is sent (tested) |
 | after the response, before delivery | the runner re-checks authority before framing; the sandbox is not created |
 | during delivery / after engine start | KAAS-16's continuous authority stops the sandbox; the JVM holding the values dies with it; no result is submitted |
+| a version revoked in the instant between the post-call check and the response write | **not caught**: the value is delivered, and a sandbox that holds a value keeps it until it ends. Revocation stops every later redemption and every new run; it does not reach into a running JVM (ADR-034, residual risks) |
 
 ## Limits
 

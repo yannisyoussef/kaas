@@ -94,9 +94,11 @@ class SecretBearingKarateExecutionTests {
         assertThat(contains(outcome.redaction().stdout(), secret)).as("stdout kept raw").isFalse();
         assertThat(contains(outcome.redaction().stderr(), secret)).as("stderr kept raw").isFalse();
         assertThat(contains(outcome.observations().toString(), secret)).as("observations kept raw").isFalse();
-        assertThat(outcome.redaction().stdout()).contains("stdout-line:[REDACTED]:end");
-        assertThat(outcome.redaction().stderr()).contains("stderr-line:[REDACTED]:end");
-        assertThat(outcome.observations()).containsEntry("kaas.probe.echo", "[REDACTED]");
+        // Booleans, never the transcript itself: if redaction ever broke, an assertion on the string would print
+        // it -- raw value included -- into the build log a CI run publishes.
+        assertThat(contains(outcome.redaction().stdout(), "stdout-line:[REDACTED]:end")).as("stdout marker").isTrue();
+        assertThat(contains(outcome.redaction().stderr(), "stderr-line:[REDACTED]:end")).as("stderr marker").isTrue();
+        assertThat("[REDACTED]".equals(outcome.observations().get("kaas.probe.echo"))).as("echo redacted").isTrue();
 
         SandboxEvidence.append("secret-execution-evidence.txt",
                 "raw_stdout_secret_observed=" + (outcome.redaction().stdoutMatches() > 0) + "\n"
@@ -213,7 +215,7 @@ class SecretBearingKarateExecutionTests {
                     * eval System.out.println('kaas.probe.stdin-read=' + stdinByte)
                 """);
 
-        assertThat(EngineOutcome.of(outcome).verdict()).as("%s", outcome.observations()).isEqualTo(EngineOutcome.Verdict.PASSED);
+        assertThat(EngineOutcome.of(outcome).verdict()).isEqualTo(EngineOutcome.Verdict.PASSED);
         var seen = outcome.observations();
         assertThat(seen).containsEntry("kaas.probe.environ-read", "true")
                 .containsEntry("kaas.probe.cmdline-read", "true")
@@ -276,7 +278,8 @@ class SecretBearingKarateExecutionTests {
                     * match kaas.secrets.WORD == 'PASSED'
                 """);
         assertThat(EngineOutcome.of(passedWord).verdict()).isEqualTo(EngineOutcome.Verdict.PASSED);
-        assertThat(passedWord.redaction().stdout()).contains("kaas.karate-result.v1=[REDACTED]");
+        assertThat(contains(passedWord.redaction().stdout(), "kaas.karate-result.v1=[REDACTED]"))
+                .as("the verdict word is redacted in the transcript").isTrue();
 
         String secret = generated();
         SandboxOutcome forged = execute(Map.of("API_TOKEN", secret), """

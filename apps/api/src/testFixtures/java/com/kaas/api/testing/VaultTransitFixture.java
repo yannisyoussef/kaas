@@ -14,6 +14,7 @@ import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.List;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -30,7 +31,8 @@ import org.testcontainers.utility.DockerImageName;
  * <p>Real: the Vault binary and version (1.18.5, pinned by the multi-architecture index digest), TLS with a CA
  * that is not in any trust store, the Transit engine, a {@code kaas-tenant-secrets} key of type
  * {@code aes256-gcm96} with {@code derived=true}, not exportable, deletion not allowed, and an AppRole whose
- * policy grants exactly {@code update} on encrypt and decrypt for that one key and nothing else. The control
+ * policy grants exactly {@code update} on encrypt and decrypt and {@code read} on the key's configuration, for
+ * that key (and a deliberately non-derived test key) and nothing else. The control
  * plane authenticates through that AppRole with a runtime-generated role id and secret id, exactly as it does in
  * production.
  *
@@ -49,6 +51,12 @@ public final class VaultTransitFixture implements AutoCloseable {
             "hashicorp/vault:1.18.5@sha256:750bb37c1638fa194ab37053a81618c61bb0491ddec6fccac87c07a8e6cd8166";
 
     public static final String TRANSIT_KEY = "kaas-tenant-secrets";
+
+    /**
+     * A key the AppRole may use that is NOT derived, so the context would be ignored. It exists only so a test
+     * can show the client refusing it; nothing in the application is ever configured with it.
+     */
+    public static final String NON_DERIVED_KEY = "kaas-test-non-derived";
 
     private static final String ROLE = "kaas-control-plane";
 
@@ -194,9 +202,15 @@ public final class VaultTransitFixture implements AutoCloseable {
                 "{\"type\":\"aes256-gcm96\",\"derived\":true,\"exportable\":false,\"allow_plaintext_backup\":false}");
         // deletion_allowed defaults to false; stated so the key's configuration here reads like the contract.
         root("POST", "/v1/transit/keys/" + TRANSIT_KEY + "/config", "{\"deletion_allowed\":false}");
+        root("POST", "/v1/transit/keys/" + NON_DERIVED_KEY, "{\"type\":\"aes256-gcm96\"}");
         root("POST", "/v1/sys/auth/approle", "{\"type\":\"approle\"}");
-        String policy = "path \\\"transit/encrypt/" + TRANSIT_KEY + "\\\" { capabilities = [\\\"update\\\"] }\\n"
-                + "path \\\"transit/decrypt/" + TRANSIT_KEY + "\\\" { capabilities = [\\\"update\\\"] }\\n";
+        StringBuilder policy = new StringBuilder();
+        for (String key : List.of(TRANSIT_KEY, NON_DERIVED_KEY)) {
+            policy.append("path \\\"transit/encrypt/").append(key).append("\\\" { capabilities = [\\\"update\\\"] }\\n")
+                    .append("path \\\"transit/decrypt/").append(key).append("\\\" { capabilities = [\\\"update\\\"] }\\n")
+                    // Read on the key's own configuration: the client refuses a key it cannot see is derived.
+                    .append("path \\\"transit/keys/").append(key).append("\\\" { capabilities = [\\\"read\\\"] }\\n");
+        }
         root("PUT", "/v1/sys/policies/acl/" + POLICY, "{\"policy\":\"" + policy + "\"}");
         root("POST", "/v1/auth/approle/role/" + ROLE,
                 "{\"token_policies\":[\"" + POLICY + "\"],\"token_no_default_policy\":true,"

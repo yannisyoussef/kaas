@@ -118,6 +118,26 @@ class OutputCollectorTests {
     }
 
     @Test
+    @DisplayName("sanitising cannot reassemble a value the first pass saw in pieces")
+    void sanitisingNeverRejoinsASecret() {
+        // The byte-exact first pass sees neither of these as the value: a zero-width space and a control
+        // character sit inside it. Sanitising deletes both -- and without a second pass, that deletion is what
+        // would put the exact value into the transcript and the observations.
+        String split = VALUE.substring(0, 6) + "​" + VALUE.substring(6);
+        String controlled = VALUE.substring(0, 9) + "\u0001" + VALUE.substring(9);
+        OutputCollector collector = new OutputCollector(4096, List.of(bytes(VALUE)));
+        collector.onNext(stdout("token=" + split + "\n"));
+        collector.onNext(stderr("plain " + controlled + " end\n"));
+        collector.finish();
+
+        assertThat(collector.redaction().stdoutMatches()).as("the first pass really did not see it").isZero();
+        assertThat(collector.redaction().stdout()).doesNotContain(VALUE).contains("token=[REDACTED]");
+        assertThat(collector.redaction().stderr()).doesNotContain(VALUE).contains("plain [REDACTED] end");
+        assertThat(collector.observations().toString()).doesNotContain(VALUE);
+        assertThat(collector.observations()).containsEntry("token", "[REDACTED]");
+    }
+
+    @Test
     @DisplayName("a forged protocol line on stderr still makes the verdict ambiguous")
     void aForgeryOnEitherStreamCounts() {
         OutputCollector collector = new OutputCollector(4096, List.of());

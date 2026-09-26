@@ -144,6 +144,12 @@ class MigrationUpgradeTests {
         // everywhere.
         assertThat(count(database, "execution_capabilities where redemption_count > 0")).isPositive();
 
+        // V13 adds a CHECK and a foreign key to run_snapshot_configuration_entries, both validated against every
+        // row present: a secret-binding entry from before versions existed, and one that binds no secret.
+        assertThat(count(database, "run_snapshot_configuration_entries where value_kind = 'SECRET_REFERENCE'"))
+                .isPositive();
+        assertThat(count(database, "run_snapshot_configuration_entries where value_kind = 'STRING'")).isPositive();
+
         // V12 adds NOT NULL columns with defaults and foreign keys to projects and run_snapshots. Both are
         // validated against every existing row, so both tables have to be non-empty here or the new
         // references are checked against nothing.
@@ -352,6 +358,11 @@ class MigrationUpgradeTests {
                 .isEqualTo(1);
         assertThat(count(database, "pg_constraint where conname = 'uq_network_policy_type_version'")).isZero();
         assertThat(count(database, "execution_capability_secret_references")).isZero();
+        // The pre-V13 secret binding survived with no version: nothing was invented for it. The authorization
+        // path refuses such a snapshot (RUN_SNAPSHOT_INVALID) rather than resolving a version on its behalf.
+        assertThat(count(database, "run_snapshot_configuration_entries where value_kind = 'SECRET_REFERENCE'"
+                        + " and secret_version_number is null")).isEqualTo(1);
+        assertThat(count(database, "run_snapshot_configuration_entries")).isEqualTo(2);
         assertThat(count(database, "execution_commands")).isZero();
 
         // Exactly one policy revision, seeded by the migration itself: DENY_ALL, version one, platform-authored,
@@ -502,6 +513,30 @@ class MigrationUpgradeTests {
         // "a fresh-schema migration test is not a migration test" failure this class exists to catch, one
         // table deeper than it was looking.
         statements.add(executionAuthorityFixture("34"));
+
+        // A sealed snapshot that binds a secret, written the only way the previous release could write one: a
+        // reference and no version, because versions did not exist. Beside it an ordinary STRING entry.
+        //
+        // Added for V13, which adds ck_run_snapshot_configuration_secret_version and a foreign key onto
+        // secret_versions to this table. Both are validated against every row already present, and before this
+        // the fixture held no configuration entries at all -- so both were checked against nothing, and a CHECK
+        // that forgot `secret_version_number IS NULL`, or a foreign key declared MATCH FULL, would have applied
+        // cleanly here and refused the first real deployment that held a secret-binding run.
+        statements.add("""
+            INSERT INTO secret_references (secret_reference_id, organization_id, project_id, name, created_by,
+                    created_at)
+            VALUES ('00000000-0000-4000-8000-0000000000e1', '00000000-0000-4000-8000-0000000000a0',
+                    '00000000-0000-4000-8000-000000000001', 'fixture-secret', 'fixture', now());
+            INSERT INTO run_snapshot_configuration_entries (organization_id, project_id, run_id, config_key,
+                    value_kind, secret_reference_id)
+            VALUES ('00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001',
+                    '00000000-0000-4000-8000-000000000010', 'API_TOKEN', 'SECRET_REFERENCE',
+                    '00000000-0000-4000-8000-0000000000e1');
+            INSERT INTO run_snapshot_configuration_entries (organization_id, project_id, run_id, config_key,
+                    value_kind, string_value)
+            VALUES ('00000000-0000-4000-8000-0000000000a0', '00000000-0000-4000-8000-000000000001',
+                    '00000000-0000-4000-8000-000000000010', 'BASE_URL', 'STRING', 'https://example.test');
+            """);
 
         // One RUN_STATE_CHANGED row as well, so the generalized schema is exercised beside the real type.
         statements.add("""

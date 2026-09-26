@@ -76,7 +76,14 @@ public final class SecretBundleFormat {
         if (total > SecretLimits.MAX_TOTAL_BYTES) {
             throw new IllegalArgumentException("The secret bundle is out of bounds.");
         }
-        ByteArrayOutputStream out = new ByteArrayOutputStream((int) total + 256);
+        long keys = 0;
+        for (Entry entry : ordered) {
+            keys += entry.key().length();
+        }
+        // Exactly the frame's size, so the buffer never grows: a grown buffer leaves the old array, values and
+        // all, behind where nothing can clear it.
+        ByteArrayOutputStream out = new ByteArrayOutputStream(
+                (int) (MAGIC.length + 4 + ordered.size() * (2L + 4L) + keys + total + TRAILER.length));
         out.writeBytes(MAGIC);
         u32(out, ordered.size());
         for (Entry entry : ordered) {

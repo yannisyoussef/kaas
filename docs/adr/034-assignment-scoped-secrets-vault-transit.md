@@ -157,6 +157,28 @@ controls **what KaaS itself keeps**. This is not data-loss prevention.
 - Migration V13 is expand-only; the previous release keeps working against it. A run created by that release
   pins no version and is refused (`RUN_SNAPSHOT_INVALID`) rather than executed against a version chosen later.
 
+### What the key must be, checked rather than assumed
+
+The per-project context only separates tenants if the Transit key is **derived**; Vault accepts and ignores a
+context on a key that is not. So the control plane reads the key's configuration with every fresh AppRole token,
+before that token is used or cached, and refuses a key that is not `derived`, or that is `convergent`,
+`exportable` or `deletion_allowed` (`SECRET_PROVIDER_UNAVAILABLE`). This is checked at login, not at startup, so a
+control plane with Vault down still starts and still runs secret-free work. **The AppRole policy therefore needs
+`read` on `transit/keys/kaas-tenant-secrets`** in addition to `update` on encrypt and decrypt.
+
+### Which version a NEW run pins
+
+A new run pins the highest version that is **not revoked**. Revoking the newest version therefore makes new runs
+pin the one before it — deliberately: revocation retires a value, it does not delete a secret. To retire a value
+from every future run, revoke every version that holds it; to stop a secret being used at all, remove the
+binding. A run already pinned is never moved: "no fallback" above is about pinned runs.
+
+### Transport of plaintext to the runner
+
+The runner redeems secrets only over `https`, or plain `http` to its own loopback interface; any other address
+is refused before a request is made. The source bundle has always travelled over whatever address the runner is
+configured with; secrets do not.
+
 ## Deployment prerequisites (not satisfied by this ADR)
 
 Vault backup, audit device and seal alerting; the dedicated staging execution host; WireGuard; the KaaS stack;
@@ -171,4 +193,19 @@ deployment readiness.**
   buffers the code owns are cleared best-effort, and copies the JDK, the HTTP stack or Karate make cannot be.
 - Transformed exfiltration, and exfiltration to an authorized destination, are out of scope by design.
 - The egress capability is readable by tenant code (as it always was for the platform's own workload); it is
-  scoped to one execution's policy and revalidated per request.
+  scoped to one execution's policy and revalidated per request. It is not in the engine container's
+  environment (the engine never reads one), so it is not in container metadata either.
+- **A revocation that commits in the last instant of a redemption is still delivered.** Authority and version
+  state are re-read after the Vault call, but a revocation committing between that check and the socket write is
+  not seen, and a sandbox that already holds a value keeps it until it ends. Revocation stops every *later*
+  redemption and every new run; it does not reach into a running JVM.
+- **The verdict remains tenant-controlled, by design.** The adapter starts its verdict with a newline, so a
+  tenant cannot hide the verdict by leaving stdout mid-line: a forged result then always appears twice and is
+  `MALFORMED`. A tenant that prints a forged `PASSED` and then exits the JVM before the adapter runs is not
+  stopped: the adapter shares a JVM with tenant code, so no secret it holds could authenticate its line. This
+  is the tenant choosing its own outcome, which it can also do by writing a test that always passes.
+- **Encoded forms are not redacted**, including ones a tenant's HTTP client produces unprompted: an
+  `Authorization: Basic` header carries `base64(user:password)`, a JSON body escapes a PEM's newlines, a URL
+  percent-encodes. The one encoding the *platform* introduces — its proxy credential as
+  `Proxy-Authorization: Basic base64("kaas:" + token)` — is registered with the redactor. Before transcripts
+  are ever persisted, the others need a decision.

@@ -346,9 +346,24 @@ public record SandboxSecurityProfile(
                 base.wallClockTimeout(),
                 base.maximumOutputBytes(),
                 base.maximumLogBytes(),
-                base.environment(),
+                delivery.engineInput() == null ? base.environment() : withoutCredential(base.environment()),
                 base.runtime(),
                 delivery);
+    }
+
+    /**
+     * An engine's environment without the egress credential.
+     *
+     * <p>The engine never reads its environment -- the bootstrap starts it with an empty one -- and it receives
+     * the credential in the engine frame on stdin. A copy in the container's environment would therefore do
+     * nothing except sit in the daemon's container metadata, readable by {@code docker inspect} and persisted
+     * in the container's configuration until removal, for the whole life of a credential the output redactor
+     * treats as a secret.
+     */
+    private static Map<String, String> withoutCredential(Map<String, String> environment) {
+        Map<String, String> kept = new java.util.LinkedHashMap<>(environment);
+        kept.remove("KAAS_EGRESS_CAPABILITY");
+        return Map.copyOf(kept);
     }
 
     public static SandboxSecurityProfile version1(

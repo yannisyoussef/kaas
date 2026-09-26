@@ -164,7 +164,25 @@ public final class ControlPlaneClient {
      *
      * @return the bundle, or the refusal's category
      */
+    /** https anywhere, or plain http only to this host's own loopback interface. */
+    static boolean carriesSecretsSafely(URI base) {
+        if ("https".equalsIgnoreCase(base.getScheme())) {
+            return true;
+        }
+        if (!"http".equalsIgnoreCase(base.getScheme()) || base.getHost() == null) {
+            return false;
+        }
+        String host = base.getHost();
+        return host.equalsIgnoreCase("localhost") || host.equals("127.0.0.1") || host.equals("[::1]")
+                || host.equals("::1");
+    }
+
     public SecretRedemption redeemSecrets(String capabilityToken, int maximumBytes) throws ControlPlaneUnavailable {
+        if (!carriesSecretsSafely(baseUri)) {
+            // Refused before a request exists. Plaintext secrets do not cross a network in the clear, whatever
+            // the deployment's address says; the loopback exception is a process on this host talking to itself.
+            throw new ControlPlaneUnavailable("Secrets are redeemed only over https or loopback.", null);
+        }
         java.io.IOException lastFailure = null;
         for (int attempt = 1; attempt <= 2; attempt++) {
             HttpRequest request = HttpRequest.newBuilder(baseUri.resolve("/internal/v1/secret-bundles"))

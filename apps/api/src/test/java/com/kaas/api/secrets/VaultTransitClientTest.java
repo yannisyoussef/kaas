@@ -218,6 +218,18 @@ class VaultTransitClientTest {
     }
 
     @Test
+    @DisplayName("a key that is not derived, and so would ignore the tenant context, is refused before any use")
+    void aKeyThatDoesNotSeparateTenantsIsRefused() {
+        // The same Vault, AppRole and permissions; only the key differs. Vault would happily encrypt and decrypt
+        // with it -- which is exactly the hazard: the context would be accepted and ignored.
+        SecretTransit nonDerived = new VaultTransitClient(new VaultTransitSettings(
+                URI.create(vault.address()), vault.roleId(), vault.secretId(), vault.caFile(),
+                VaultTransitFixture.NON_DERIVED_KEY, Duration.ofSeconds(2), Duration.ofSeconds(5)));
+        assertFailure(() -> nonDerived.encrypt(tenant(), generated("n-")), SecretFailure.SECRET_PROVIDER_UNAVAILABLE);
+        assertFailure(() -> nonDerived.decrypt(tenant(), "vault:v1:AAAA"), SecretFailure.SECRET_PROVIDER_UNAVAILABLE);
+    }
+
+    @Test
     @DisplayName("a Vault whose certificate is not signed by the configured CA is an unavailable provider")
     void anUntrustedCertificateIsRefused() throws Exception {
         Path otherCa = Files.createTempFile("kaas-other-ca-", ".pem");

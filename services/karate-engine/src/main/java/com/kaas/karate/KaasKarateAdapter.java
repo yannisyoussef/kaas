@@ -331,15 +331,26 @@ public final class KaasKarateAdapter {
         System.out.println("kaas.engine=karate " + version);
     }
 
+    /**
+     * The verdict, on a line of its own whatever tenant code left on stdout.
+     *
+     * <p>The leading newline is the point. Tenant code shares this stream, and a tenant that printed a forged
+     * {@code PASSED} on stderr and then left stdout mid-line would otherwise have this line glued onto its own
+     * unterminated one -- where the runner would never count it, and the forgery would be the only verdict. With
+     * it, this line is always a line, a forgery is always a second occurrence, and a second occurrence is
+     * {@code MALFORMED}. (A tenant that forges and then exits before this runs is not stopped by anything the
+     * adapter prints; that is recorded as part of the tenant-owned outcome in ADR-034.)
+     */
     private static void emit(String outcome) {
-        System.out.println(PROTOCOL + "=" + outcome);
+        System.out.print("\n" + PROTOCOL + "=" + outcome + "\n");
+        System.out.flush();
     }
 
     private static void fail(String category) {
         // The engine could not produce a verdict. Reported as its own protocol value rather than as FAILED,
         // so the runner can tell "the suite failed" from "the engine never ran the suite" -- one of those is
         // a tenant's result and the other is the platform's problem.
-        System.out.println(PROTOCOL + "=ENGINE_ERROR");
+        System.out.print("\n" + PROTOCOL + "=ENGINE_ERROR\n");
         System.out.println("engine_error=" + category);
     }
 }

@@ -140,6 +140,9 @@ tasks.withType<Test>().configureEach {
         systemProperty("kaas.egress.proxy.context", contextPath.get())
         systemProperty("kaas.karate.engine.context", enginePath.get())
         systemProperty("kaas.evidence.dir", evidenceDirectory.get())
+        // Emptied before every run, so a gate can never read a file an earlier run left: a suite that fails
+        // before writing its evidence leaves nothing behind, not last run's verdict.
+        File(evidenceDirectory.get()).deleteRecursively()
         localRuntime.orNull?.let { systemProperty("kaas.test.mediated-runtime", it) }
         sentinelNonce.orNull?.let { systemProperty("kaas.test.sentinel-nonce", it) }
     }

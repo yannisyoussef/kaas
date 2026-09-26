@@ -465,12 +465,18 @@ jobs:
           for results in services/runner/build/test-results/secretExecutionTest tests/pipeline/build/test-results/secretExecutionPipelineTest; do
             [ -d "$results" ] || { echo "No results in $results."; continue; }
             python3 - "$results" <<'PYEOF'
-          import glob, sys, xml.etree.ElementTree as ET
+          import glob, os, re, sys, xml.etree.ElementTree as ET
+          # Every generated value carries the nonce, so any token containing it is masked before this log --
+          # which is public -- ever sees it. The suites assert on booleans, but a failure message is written by
+          # whatever failed, and this step exists precisely for the runs where something did.
+          nonce = os.environ.get("KAAS_SENTINEL_NONCE", "")
+          def masked(text):
+              return re.sub(r"\S*" + re.escape(nonce) + r"\S*", "[GENERATED-VALUE]", text) if nonce else text
           for path in sorted(glob.glob(sys.argv[1] + "/*.xml")):
               for case in ET.parse(path).getroot().iter("testcase"):
                   for bad in list(case.iter("failure")) + list(case.iter("error")):
                       print("=" * 78); print(case.get("name")); print("-" * 78)
-                      print((bad.get("message") or "").strip()[:4000])
+                      print(masked((bad.get("message") or "").strip()[:4000]))
           PYEOF
           done
       - name: Confirm both suites ran whole
@@ -508,15 +514,32 @@ jobs:
             sentinel_nonce_applied=true
       # THE TEST-REPORT LEAK, checked from outside the JVM. Every generated value carries this run's nonce, so
       # a value that reached a JUnit XML, an HTML report or anything else the build wrote is found by the nonce
-      # alone. The control proves the scan can see: the same search over a file known to contain the nonce must
-      # match, or an empty result means nothing.
+      # alone. The control is planted INSIDE a scanned tree and must be among the hits, so the scan is shown to
+      # have walked the directories it names, not merely to work on some other file. grep's status is read
+      # explicitly: 0 found something, 1 found nothing, anything else is a scan that failed -- and a failed scan
+      # is a failed gate, never a clean one. Runs after a failure too: a failing run is when a leak is likeliest.
       - name: Confirm no generated secret reached a report or build output
+        if: always()
         run: |
           set -euo pipefail
-          control="$RUNNER_TEMP/nonce-control.txt"
+          [ -n "${KAAS_SENTINEL_NONCE:-}" ] || { echo "No sentinel nonce was set." >&2; exit 1; }
+          roots="services/runner/build tests/pipeline/build apps/api/build"
+          for root in $roots; do
+            [ -d "$root" ] || { echo "Scan root $root does not exist." >&2; exit 1; }
+          done
+          control="services/runner/build/nonce-scan-control.txt"
           printf 'control-%s\n' "$KAAS_SENTINEL_NONCE" > "$control"
-          grep -rqF -- "$KAAS_SENTINEL_NONCE" "$control" || { echo "The scan cannot see the nonce." >&2; exit 1; }
-          if grep -rlF -- "$KAAS_SENTINEL_NONCE" services/runner/build tests/pipeline/build apps/api/build 2>/dev/null; then
+          status=0
+          hits=$(grep -rlF -- "$KAAS_SENTINEL_NONCE" $roots) || status=$?
+          rm -f "$control"
+          if [ "$status" -ne 0 ]; then
+            echo "The scan failed (grep status $status); with its control planted it must find at least one file." >&2
+            exit 1
+          fi
+          printf '%s\n' "$hits" | grep -qxF "$control" || { echo "The scan did not find its own control." >&2; exit 1; }
+          others=$(printf '%s\n' "$hits" | grep -vxF "$control" || true)
+          if [ -n "$others" ]; then
+            printf '%s\n' "$others"
             echo "A generated secret value reached build output (files listed above)." >&2
             exit 1
           fi

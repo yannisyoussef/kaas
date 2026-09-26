@@ -4,7 +4,8 @@
 
 **Exact registered plaintext byte sequences are removed from every platform-owned output channel KaaS keeps.**
 The registered sequences are the values of the run's pinned secrets, exactly as delivered, and the execution's
-egress credential. The covered channels are everything the runner keeps of a sandbox's stdout and stderr — the
+egress credential — both raw and in the one encoding the platform itself applies to it, the proxy's
+`Basic base64("kaas:" + token)`. The covered channels are everything the runner keeps of a sandbox's stdout and stderr — the
 redacted transcripts and the observation map — and everything built from them.
 
 This holds:
@@ -20,6 +21,10 @@ This holds:
 - for **multi-byte and multiline values**: matching is on raw bytes, before decoding, so CRLF, LF, Unicode and
   PEM blocks are matched exactly and never normalised;
 - on **both streams independently**, with separate state;
+- **after sanitisation too**: sanitising deletes control and format characters, and a deletion can join a value
+  the byte-exact pass saw in two pieces (`ab<U+200B>cd` becomes `abcd`). Each sanitised line is redacted again,
+  and keys and values are split from that final text, so the platform's own clean-up can never be what
+  reassembles a secret;
 - in **linear time**, whatever the values: an Aho-Corasick automaton over bytes, so a tenant who knows its own
   secret cannot make the runner quadratic.
 
@@ -33,6 +38,9 @@ it. A kept output with no secret proves nothing unless the redactor also saw one
 
 Detection of transformed data: Base64, hex, hashes, reversal, character splitting, interleaving, custom encoding,
 encryption, or anything else that is not the exact byte sequence. Hostile tenant code can print any of these.
+Nor only hostile code: an ordinary HTTP client logging its request headers prints `Authorization: Basic
+base64(user:password)`, a JSON body escapes a PEM's newlines, a URL percent-encodes. None of these forms is
+registered today, which matters most for the day transcripts are persisted (they are not, yet).
 Nor does redaction constrain where the sandbox sends data: an authorized destination can receive a secret on
 purpose. Network policy controls **where**; redaction controls **what KaaS keeps**. This is not data-loss
 prevention.

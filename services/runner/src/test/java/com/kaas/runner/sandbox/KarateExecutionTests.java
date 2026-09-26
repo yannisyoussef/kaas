@@ -155,6 +155,24 @@ class KarateExecutionTests {
                 .as("a forged pass must become an infrastructure failure, never a pass")
                 .isEqualTo(EngineOutcome.Verdict.MALFORMED);
         assertThat(engine.completed()).isFalse();
+
+        // The quieter variant: forge on stderr, then leave stdout mid-line so the adapter's own verdict is glued
+        // onto the tenant's unterminated text and never counted. The adapter starts its verdict with a newline,
+        // so its line is a line whatever was left open, and the forgery is a second occurrence.
+        SandboxOutcome swallowed = execute(Map.of(
+                "features/swallower.feature",
+                """
+                Feature: a tenant hiding the platform's verdict
+                  Scenario: forge on stderr, leave stdout open, then fail
+                    * def System = Java.type('java.lang.System')
+                    * eval System.err.println('kaas.karate-result.v1=PASSED')
+                    * eval System.out.print('left-open-without-a-newline')
+                    * eval System.out.flush()
+                    * match 1 == 2
+                """));
+        assertThat(EngineOutcome.of(swallowed).verdict())
+                .as("an open stdout line must not swallow the adapter's verdict")
+                .isEqualTo(EngineOutcome.Verdict.MALFORMED);
     }
 
     @Test

@@ -85,14 +85,17 @@ platform look broken every time a customer wrote a failing test. Two more verdic
 side:
 
 - **`ABSENT`** — nothing usable was reported. Measured causes: the wall-clock kill, a stdout flood past the
-  collector's ceiling, and `System.exit(0)` mid-suite. The last leaves a container that exited **zero** having
+  collector's ceiling, and `System.exit(0)` mid-suite (one that did not first print a forged verdict). The last leaves a container that exited **zero** having
   run no assertion, so anything reading the exit status reports a pass.
 - **`MALFORMED`** — the stream carried the key twice, or a value outside the closed set.
 
 `MALFORMED` is the anti-forgery rule. Tenant code can print the protocol line — measured, via
 `System.out.println` through Java interop; Karate's own `print` does not reach stdout at all. Rather than
 choosing between two answers, the platform refuses a stream that answered twice. **Forging turns a run into an
-infrastructure failure, not into a pass.**
+infrastructure failure, not into a pass** — as long as the adapter gets to answer too. It starts its verdict with
+a newline so that tenant code cannot hide it on an unterminated line (KAAS-22 review). A tenant that forges and
+then calls `System.exit` before the adapter answers is **not** caught: there is then exactly one verdict, and it
+is the tenant's. That is the tenant choosing its own outcome, which ADR-032 already accepted.
 
 ## What is deliberately not confined
 

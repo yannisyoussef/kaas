@@ -263,7 +263,9 @@ public final class VaultTransitClient implements SecretTransit {
             if (reuse.compareTo(MIN_TOKEN_REUSE) < 0) {
                 reuse = MIN_TOKEN_REUSE;
             }
-            token = clientToken.stringValue();
+            String fresh = clientToken.stringValue();
+            requireTenantSeparatingKey(fresh);
+            token = fresh;
             refreshAtNanos = nanoTime.getAsLong() + reuse.toNanos();
             return token;
         } catch (RuntimeException unreadable) {
@@ -273,12 +275,54 @@ public final class VaultTransitClient implements SecretTransit {
         }
     }
 
+    /**
+     * Refuses a key that would not separate tenants, read with each fresh token before it is used or cached.
+     *
+     * <p>The per-project context is only a boundary if the key is {@code derived}: Vault ignores the context
+     * of a key that is not, so every tenant's ciphertext would decrypt under every other tenant's context and
+     * nothing would say so -- the SQL scoping would be the only line left. A key that is convergent, exportable
+     * or deletable is refused for the same reason: each is a property ADR-034 relies on being absent. Checked at
+     * login rather than at startup so that a platform with Vault down still starts and still runs secret-free
+     * work, and checked on every login so that a key reconfigured under a running control plane is noticed
+     * within one token lifetime. The refusal is {@code SECRET_PROVIDER_UNAVAILABLE}: a misconfigured provider
+     * is one that cannot serve this operation, and which property failed is an operator's question.
+     */
+    private void requireTenantSeparatingKey(String freshToken) throws SecretProviderException {
+        Exchange read = send(settings.address().resolve("/v1/transit/keys/" + settings.transitKey()), null, freshToken);
+        try {
+            if (read.status() != 200) {
+                throw new SecretProviderException(SecretFailure.SECRET_PROVIDER_UNAVAILABLE);
+            }
+            JsonNode data = mapper.readTree(read.body()).get("data");
+            boolean separating = data != null
+                    && data.path("derived").isBoolean() && data.path("derived").asBoolean()
+                    && !data.path("convergent_encryption").asBoolean(false)
+                    && !data.path("exportable").asBoolean(true)
+                    && !data.path("deletion_allowed").asBoolean(true);
+            if (!separating) {
+                throw new SecretProviderException(SecretFailure.SECRET_PROVIDER_UNAVAILABLE);
+            }
+        } catch (RuntimeException unreadable) {
+            throw new SecretProviderException(SecretFailure.SECRET_PROVIDER_UNAVAILABLE);
+        } finally {
+            read.clear();
+        }
+    }
+
     private Exchange post(URI endpoint, byte[] body, String vaultToken) throws SecretProviderException {
+        return send(endpoint, body, vaultToken);
+    }
+
+    /** A POST of {@code body}, or a GET when there is none. */
+    private Exchange send(URI endpoint, byte[] body, String vaultToken) throws SecretProviderException {
         HttpRequest.Builder request = HttpRequest.newBuilder(endpoint)
                 .timeout(settings.requestTimeout())
-                .header("Content-Type", "application/json")
-                .header("X-Vault-Request", "true")
-                .POST(HttpRequest.BodyPublishers.ofByteArray(body));
+                .header("X-Vault-Request", "true");
+        if (body == null) {
+            request.GET();
+        } else {
+            request.header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofByteArray(body));
+        }
         if (vaultToken != null) {
             request.header("X-Vault-Token", vaultToken);
         }

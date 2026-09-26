@@ -106,7 +106,17 @@ public final class EngineInput implements AutoCloseable {
         if (total > MAX_TOTAL_BYTES) {
             throw new IllegalArgumentException("The secret set is out of bounds.");
         }
-        ByteArrayOutputStream out = new ByteArrayOutputStream((int) total + 512);
+        // Everything is validated before a byte is written, so no path leaves a half-built frame or a clone
+        // of a value behind uncleared.
+        if (egress != null && (!HOST.matcher(egress.host()).matches() || egress.port() < 1 || egress.port() > 65535
+                || egress.token() == null || egress.token().isEmpty() || egress.token().length() > 256)) {
+            throw new IllegalArgumentException("The egress endpoint is malformed.");
+        }
+        // Sized for the largest frame these bounds allow, so the buffer never grows: a grown buffer leaves the
+        // old array, values and all, behind where nothing can clear it.
+        ByteArrayOutputStream out = new ByteArrayOutputStream(
+                (int) total + ordered.size() * (2 + 128 + 4) + MAGIC.length + 4 + 1 + (2 + 253 + 2 + 2 + 256)
+                        + TRAILER.length);
         out.writeBytes(MAGIC);
         u32(out, ordered.size());
         List<byte[]> redactable = new ArrayList<>();
@@ -121,10 +131,6 @@ public final class EngineInput implements AutoCloseable {
         if (egress == null) {
             out.write(0);
         } else {
-            if (!HOST.matcher(egress.host()).matches() || egress.port() < 1 || egress.port() > 65535
-                    || egress.token() == null || egress.token().isEmpty() || egress.token().length() > 256) {
-                throw new IllegalArgumentException("The egress endpoint is malformed.");
-            }
             out.write(1);
             byte[] host = egress.host().getBytes(StandardCharsets.US_ASCII);
             u16(out, host.length);
@@ -137,6 +143,12 @@ public final class EngineInput implements AutoCloseable {
             // allowlist execution talks to anything -- but it is still a credential, so it is redacted from the
             // platform's copy of the output like a secret is.
             redactable.add(token.clone());
+            // And in the form the platform's own karate-config.js makes it travel in: Proxy-Authorization
+            // Basic base64("kaas:" + token). The platform chose that encoding, so the platform redacts it; an
+            // HTTP client that logs its request headers would otherwise print the credential in a form the
+            // exact-bytes redactor was never told about.
+            redactable.add(java.util.Base64.getEncoder().encode(
+                    ("kaas:" + egress.token()).getBytes(StandardCharsets.US_ASCII)));
         }
         out.writeBytes(TRAILER);
         byte[] frame = out.toByteArray();

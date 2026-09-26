@@ -206,9 +206,11 @@ public class ApiExceptionHandler {
         if (path == null) {
             return true;
         }
-        return path.startsWith("/internal/v1/secret-bundles")
-                || (path.startsWith("/api/v1/projects/") && path.contains("/secret-references/")
-                        && path.contains("/versions"));
+        // Matched anywhere in the URI rather than at its start, so a servlet context path in front of these
+        // routes cannot quietly turn the backstop off. Over-matching costs a cause chain in a log; under-matching
+        // could cost a secret.
+        return path.contains("/internal/v1/secret-bundles")
+                || (path.contains("/secret-references/") && path.contains("/versions"));
     }
 
     private static String sqlState(Throwable exception) {
