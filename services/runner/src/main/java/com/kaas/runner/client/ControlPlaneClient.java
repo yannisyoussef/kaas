@@ -152,6 +152,75 @@ public final class ControlPlaneClient {
     }
 
     /** Revalidates this assignment's authority and returns a fresh command. */
+    /**
+     * Redeems a secret capability for the run's secret bundle.
+     *
+     * <p>At most two attempts, and only for transport failure: the capability itself permits two redemptions,
+     * precisely so that a response lost in transit -- the control plane decrypted and sent, this side never
+     * received -- can be retried once. A refusal is never retried; it is the control plane's answer.
+     *
+     * <p>The bundle is read with a hard bound and returned as the only copy; the caller parses it and clears it.
+     * The capability travels in its own header and never in the URL, and nothing here logs either.
+     *
+     * @return the bundle, or the refusal's category
+     */
+    public SecretRedemption redeemSecrets(String capabilityToken, int maximumBytes) throws ControlPlaneUnavailable {
+        java.io.IOException lastFailure = null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            HttpRequest request = HttpRequest.newBuilder(baseUri.resolve("/internal/v1/secret-bundles"))
+                    .timeout(requestTimeout)
+                    .header("Authorization", authorization)
+                    .header("X-KaaS-Secret-Capability", capabilityToken)
+                    .POST(HttpRequest.BodyPublishers.noBody())
+                    .build();
+            try {
+                HttpResponse<java.io.InputStream> response =
+                        http.send(request, HttpResponse.BodyHandlers.ofInputStream());
+                try (java.io.InputStream body = response.body()) {
+                    if (response.statusCode() == 200) {
+                        byte[] bytes = body.readNBytes(maximumBytes + 1);
+                        if (bytes.length > maximumBytes) {
+                            java.util.Arrays.fill(bytes, (byte) 0);
+                            throw new ControlPlaneUnavailable("A secret bundle exceeded its ceiling.", null);
+                        }
+                        return new SecretRedemption(bytes, null);
+                    }
+                    if (response.statusCode() < 500) {
+                        // A refusal body is a small JSON object carrying a category and nothing else.
+                        String refusal = new String(body.readNBytes(512), StandardCharsets.UTF_8);
+                        return new SecretRedemption(null, categoryOf(refusal));
+                    }
+                    lastFailure = new java.io.IOException("Control plane returned " + response.statusCode());
+                }
+            } catch (java.io.IOException transport) {
+                lastFailure = transport;
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new ControlPlaneUnavailable("Interrupted while redeeming secrets.", interrupted);
+            }
+        }
+        // The cause is the transport's own exception, which names a host and a port and never a value.
+        throw new ControlPlaneUnavailable("The secret bundle could not be retrieved.", lastFailure);
+    }
+
+    /** The code from a refusal body, or UNKNOWN. Only a closed-looking token is kept. */
+    private static String categoryOf(String refusal) {
+        var matcher = java.util.regex.Pattern.compile("\"code\"\\s*:\\s*\"([A-Z_]{1,64})\"").matcher(refusal);
+        return matcher.find() ? matcher.group(1) : "UNKNOWN";
+    }
+
+    /**
+     * A secret redemption's result: the bundle bytes, or a refusal category. Never both.
+     *
+     * <p>Not printable: {@link #toString()} names the category or says a bundle arrived, and nothing else.
+     */
+    public record SecretRedemption(byte[] bundle, String refusal) {
+        @Override
+        public String toString() {
+            return bundle != null ? "SecretRedemption[bundle]" : "SecretRedemption[refused=" + refusal + "]";
+        }
+    }
+
     public Response authorize(UUID runId, UUID attemptId, String body) throws ControlPlaneUnavailable {
         return post(
                 "/internal/v1/runs/" + runId + "/attempts/" + attemptId + "/execution-authorizations", body);

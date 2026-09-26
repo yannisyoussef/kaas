@@ -34,11 +34,84 @@ public record SandboxOutcome(
         int retainedBytes,
         Duration elapsed,
         boolean outOfMemory,
-        Optional<SandboxFailure> failure) {
+        Optional<SandboxFailure> failure,
+        /**
+         * The result protocol as the RAW stream carried it: counts per platform key, and the vocabulary word
+         * each carried. Read before redaction on a separate branch, so a secret equal to a protocol word
+         * cannot change a verdict. See {@link ProtocolScanner}.
+         */
+        ProtocolScanner.Observed protocol,
+        /** What the redactor found and what it kept. See {@link Redaction}. */
+        Redaction redaction,
+        /**
+         * The runtime the daemon reports it assigned this sandbox, read back before the workload started, or
+         * null if no container was created. The launcher refuses to start anything under a runtime other than
+         * the profile's, so this is evidence of what ran rather than of what was requested.
+         */
+        String assignedRuntime) {
 
     public SandboxOutcome {
         observations = Map.copyOf(observations);
         duplicatedObservations = java.util.Set.copyOf(duplicatedObservations);
+        protocol = protocol == null ? ProtocolScanner.Observed.NONE : protocol;
+        redaction = redaction == null ? Redaction.NONE : redaction;
+    }
+
+    /** The form every probe-only sandbox produced before KAAS-22, with no protocol and nothing redacted. */
+    public SandboxOutcome(
+            Optional<Integer> exitCode,
+            Map<String, String> observations,
+            java.util.Set<String> duplicatedObservations,
+            boolean outputTruncated,
+            int retainedBytes,
+            Duration elapsed,
+            boolean outOfMemory,
+            Optional<SandboxFailure> failure) {
+        this(exitCode, observations, duplicatedObservations, outputTruncated, retainedBytes, elapsed, outOfMemory,
+                failure, ProtocolScanner.Observed.NONE, Redaction.NONE, null);
+    }
+
+    /** The form a collected sandbox produces, before the launcher records which runtime it was assigned. */
+    public SandboxOutcome(
+            Optional<Integer> exitCode,
+            Map<String, String> observations,
+            java.util.Set<String> duplicatedObservations,
+            boolean outputTruncated,
+            int retainedBytes,
+            Duration elapsed,
+            boolean outOfMemory,
+            Optional<SandboxFailure> failure,
+            ProtocolScanner.Observed protocol,
+            Redaction redaction) {
+        this(exitCode, observations, duplicatedObservations, outputTruncated, retainedBytes, elapsed, outOfMemory,
+                failure, protocol, redaction, null);
+    }
+
+    /** This outcome, naming the runtime the daemon assigned. */
+    public SandboxOutcome withAssignedRuntime(String runtime) {
+        return new SandboxOutcome(
+                exitCode, observations, duplicatedObservations, outputTruncated, retainedBytes, elapsed,
+                outOfMemory, failure, protocol, redaction, runtime);
+    }
+
+    /**
+     * The trusted redactor's own account of one execution.
+     *
+     * <p>{@code stdoutMatches} and {@code stderrMatches} count raw occurrences of a registered secret the
+     * redactor saw and replaced, per stream. They are the instrumentation that makes a redaction test
+     * non-vacuous: a transcript with no secret in it proves nothing unless the redactor also saw one arrive.
+     *
+     * <p>The transcripts are the ONLY form in which a tenant's output leaves the collector: bounded, redacted
+     * before the ceiling, decoded, and stripped of control characters. They are platform-owned output. No raw
+     * byte of what the sandbox printed survives anywhere else in this object.
+     */
+    public record Redaction(long stdoutMatches, long stderrMatches, String stdout, String stderr) {
+        public static final Redaction NONE = new Redaction(0, 0, "", "");
+
+        @Override
+        public String toString() {
+            return "Redaction[stdoutMatches=" + stdoutMatches + ", stderrMatches=" + stderrMatches + "]";
+        }
     }
 
     public boolean timedOut() {
@@ -60,7 +133,7 @@ public record SandboxOutcome(
     public SandboxOutcome withFailure(SandboxFailure cleanupFailure) {
         return new SandboxOutcome(
                 exitCode, observations, duplicatedObservations, outputTruncated, retainedBytes, elapsed,
-                outOfMemory, Optional.of(cleanupFailure));
+                outOfMemory, Optional.of(cleanupFailure), protocol, redaction, assignedRuntime);
     }
 
     /** An observation the probe reported, or empty when it never got far enough to report one. */

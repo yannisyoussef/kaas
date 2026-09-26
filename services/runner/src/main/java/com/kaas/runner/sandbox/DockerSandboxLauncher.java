@@ -64,28 +64,53 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
             // whatever profile happens to be configured. Evidence has to say which policy produced it.
             throw new IllegalArgumentException("Unknown security profile version.");
         }
+        if (request.probe() == SyntheticProbe.KARATE_ENGINE
+                && (profile.sourceDelivery() == null || profile.sourceDelivery().engineInput() == null)) {
+            // The engine's adapter reads its engine frame before anything else, secret-free runs included, and
+            // closes standard input behind it. An engine launched without one would wait on a pipe nothing
+            // will ever write to, until its deadline -- so it is refused here, before a container exists.
+            throw new IllegalArgumentException("The engine is launched with its engine input.");
+        }
         Instant startedAt = Instant.now();
         String containerId = null;
+        String assignedRuntime = null;
         SandboxOutcome outcome;
         try {
             containerId = create(request);
-            requireRuntimeEnforced(containerId);
+            assignedRuntime = requireRuntimeEnforced(containerId);
             // CHECKED AFTER CREATION AND BEFORE START. Authority can be lost while a sandbox is being built,
             // and a container that is created but never started leaves nothing running to terminate. The
             // creation is undone by the ordinary cleanup below, so this costs a container and no execution.
             if (authority.lost()) {
                 throw new AuthorityLostException(authority.lostReason());
             }
-            // THE ONLY CHANNEL TENANT SOURCE TRAVELS ON, and the attach happens BEFORE the start.
-            //
-            // Measured the other way round first: attaching after starting left the bootstrap blocked on a
-            // read that never completed, and every source-carrying sandbox died at its wall-clock deadline
-            // with no observations at all. The daemon pumps an attached stream, and a stream attached to a
-            // container that is already running past its first read is a stream nothing is waiting for.
-            try (SourceDelivery delivery = attachSource(containerId)) {
+            OutputCollector output = new OutputCollector(profile.maximumOutputBytes(), redactable());
+            if (runsTenantCode()) {
+                // TENANT CODE IS OBSERVED LIVE, AND ONLY LIVE.
+                //
+                // One attach, made BEFORE the start, carries the source frame and the engine frame in on stdin
+                // and every byte the sandbox prints out on stdout and stderr, straight into the trusted
+                // collector. The container is created with LogConfig=none, so the daemon keeps no copy: there
+                // is no json-file on the host holding raw tenant output, redacted or not, and nothing to read
+                // back later. Before KAAS-22 this output was written to a host file first and read back through
+                // `docker logs`, which put anything a feature printed -- a secret included -- on disk before any
+                // trusted code had seen it.
+                //
+                // Attaching BEFORE the start is not a preference either. Measured the other way round first:
+                // attaching after starting left the bootstrap blocked on a read that never completed.
+                //
+                // Two attaches, both before the start: one that carries the frames IN and then closes -- so the
+                // bootstrap sees end-of-file after the last byte and a truncated frame is refused at once rather
+                // than waited on -- and one that carries the output OUT for as long as the container runs.
+                try (Attachment attachment = attachOutput(containerId, output);
+                        FrameDelivery delivery = attachFrames(containerId)) {
+                    docker.startContainerCmd(containerId).exec();
+                    delivery.await();
+                    outcome = observe(containerId, startedAt, authority, output, false);
+                }
+            } else {
                 docker.startContainerCmd(containerId).exec();
-                delivery.await();
-                outcome = observe(containerId, startedAt, authority);
+                outcome = observe(containerId, startedAt, authority, output, true);
             }
         } catch (RuntimeException failure) {
             outcome = new SandboxOutcome(
@@ -106,6 +131,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
         // the caller — the security gate — aborted by exception instead of returning verdicts. A cleanup
         // failure is now folded into the outcome, which is what SANDBOX_CLEANUP_FAILED existed for and never
         // reached.
+        outcome = outcome.withAssignedRuntime(assignedRuntime);
         try {
             remove(containerId);
         } catch (SandboxCleanupException cleanupFailed) {
@@ -131,7 +157,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
      * sandbox, because a daemon reporting a runtime name is still the daemon answering a question about
      * itself.
      */
-    private void requireRuntimeEnforced(String containerId) {
+    private String requireRuntimeEnforced(String containerId) {
         String assigned;
         try {
             assigned = docker.inspectContainerCmd(containerId).exec().getHostConfig().getRuntime();
@@ -147,6 +173,7 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                     "The sandbox was assigned runtime " + assigned + " but the profile requires " + expected
                             + "; refusing rather than running under a boundary that was not authorized.");
         }
+        return assigned;
     }
 
     private String create(SandboxLaunchRequest request) {
@@ -170,14 +197,21 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                         "/dev/shm", "rw,noexec,nosuid,nodev,size=" + profile.temporaryFilesystemBytes()))
                 .withCapDrop(Capability.values())
                 .withSecurityOpts(List.of("no-new-privileges:true"))
-                // The daemon writes every byte the sandbox prints to a host file, and that write happens
-                // outside the container's cgroup: it is charged to nothing, throttled by nothing, and invisible
-                // to the collector's own ceiling. Measured at 883 MB/s and 35.11 GB from one sandbox before
-                // this bound existed. The collector's limit bounds what the launcher keeps; this bounds what
-                // the host is made to store.
-                .withLogConfig(new LogConfig(
-                        LogConfig.LoggingType.JSON_FILE,
-                        Map.of("max-size", profile.maximumLogBytes() + "b", "max-file", "1")))
+                // WHAT THE DAEMON KEEPS OF WHAT THE SANDBOX PRINTS.
+                //
+                // For a sandbox that runs tenant code: nothing. LogConfig=none means the daemon writes no host
+                // file at all, and the output is read live over the attach instead -- see run(). This is what
+                // keeps a secret a feature prints off the host's disk: redaction happens in the collector, and
+                // a json-file written by the daemon would be written BEFORE the collector ever saw the bytes.
+                //
+                // For the platform's own probes, which run no tenant code and receive no secret: the bounded
+                // json-file KAAS-13 introduced, because the host write it bounds is charged to nothing and was
+                // measured at 883 MB/s and 35.11 GB from one sandbox before the bound existed.
+                .withLogConfig(runsTenantCode()
+                        ? new LogConfig(LogConfig.LoggingType.NONE, Map.of())
+                        : new LogConfig(
+                                LogConfig.LoggingType.JSON_FILE,
+                                Map.of("max-size", profile.maximumLogBytes() + "b", "max-file", "1")))
                 .withMemory(profile.memoryLimitBytes())
                 // Equal to memory, which is the runtime's way of saying "no swap". Without it a workload
                 // simply swaps past the ceiling and the limit is decorative.
@@ -233,6 +267,12 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
             // measured rather than assumed -- see docs/architecture/mediated-source-filesystem-evaluation.md.
             hostConfig.withCapAdd(
                     Capability.SYS_ADMIN, Capability.SETUID, Capability.SETGID, Capability.SETPCAP);
+
+            // NO CORE FILES from a process that may hold secrets. A JVM that crashes, or a tenant that sends
+            // itself SIGSEGV, would otherwise be asking the kernel to write its whole address space somewhere.
+            // The engine's JVM also runs with -XX:-CreateCoredumpOnCrash and no heap dump; this is the limit
+            // that holds whatever the process asks for.
+            hostConfig.withUlimits(List.of(new com.github.dockerjava.api.model.Ulimit("core", 0L, 0L)));
         }
 
         CreateContainerResponse created = createOrRefuse(hostConfig, request);
@@ -270,30 +310,58 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
         }
     }
 
-    /**
-     * Writes the framed bundle to the bootstrap's standard input, once, and closes it.
-     *
-     * <p>Closing is part of the protocol rather than tidiness: the bootstrap reads a fixed trailer and a
-     * stream that stays open would leave it waiting for bytes that are never coming, which the wall-clock
-     * deadline would eventually resolve as a timeout instead of as the delivery it actually was.
-     *
-     * <p>Nothing is read back here. The bootstrap's own report and everything the verifier observes arrive
-     * through the ordinary output collector, bounded and sanitised like every other byte the sandbox prints.
-     */
-    private SourceDelivery attachSource(String containerId) {
+    /** Whether this sandbox runs tenant code: every sandbox that is handed tenant source does. */
+    private boolean runsTenantCode() {
+        return profile.sourceDelivery() != null;
+    }
+
+    /** The exact byte sequences the collector must redact: the engine input's, or none. */
+    private List<byte[]> redactable() {
         SandboxSecurityProfile.SourceDelivery delivery = profile.sourceDelivery();
-        if (delivery == null) {
-            return SourceDelivery.none();
-        }
+        return delivery == null || delivery.engineInput() == null ? List.of() : delivery.engineInput().redactable();
+    }
+
+    /**
+     * Attaches the trusted collector to the container's output, before the container starts.
+     *
+     * <p>Live, and the only capture a tenant-code sandbox has: its log driver is {@code none}, so there is no
+     * stored copy to read back afterwards.
+     */
+    private Attachment attachOutput(String containerId, OutputCollector output) {
         try {
-            var stdin = new java.io.ByteArrayInputStream(delivery.frame());
+            docker.attachContainerCmd(containerId)
+                    .withStdOut(true)
+                    .withStdErr(true)
+                    .withFollowStream(true)
+                    .withLogs(false)
+                    .exec(output);
+            return new Attachment(output);
+        } catch (RuntimeException failure) {
+            throw new SandboxSourceDeliveryException("The sandbox's output could not be attached.");
+        }
+    }
+
+    /**
+     * Writes the source frame and then the engine frame to the container's standard input, once, and closes it.
+     *
+     * <p>In that order and nothing else. The bootstrap consumes exactly the first; the engine adapter exactly the
+     * second. Closing is part of the protocol: a reader that finds the stream shorter than its frame refuses it
+     * at once instead of waiting for bytes that are never coming.
+     */
+    private FrameDelivery attachFrames(String containerId) {
+        SandboxSecurityProfile.SourceDelivery delivery = profile.sourceDelivery();
+        byte[] engineFrame = delivery.engineInput() == null ? new byte[0] : delivery.engineInput().frame();
+        java.io.InputStream stdin = new java.io.SequenceInputStream(
+                new java.io.ByteArrayInputStream(delivery.frame()),
+                new java.io.ByteArrayInputStream(engineFrame));
+        try {
             var attached = docker.attachContainerCmd(containerId)
                     .withStdIn(stdin)
                     .withFollowStream(true)
                     .withStdOut(false)
                     .withStdErr(false)
                     .exec(new ResultCallback.Adapter<Frame>());
-            return new SourceDelivery(attached);
+            return new FrameDelivery(attached);
         } catch (RuntimeException failure) {
             // The category travels; the bundle does not. A message carrying a length or a path would be
             // tenant-derived detail in a launcher log.
@@ -301,34 +369,22 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
         }
     }
 
-    /**
-     * One handover of the framed bundle, held open across the container's start.
-     *
-     * <p>{@link AutoCloseable} so the stream is released on every path — including a launch that threw before
-     * the bootstrap ever read anything — rather than depending on each branch remembering to.
-     */
-    private static final class SourceDelivery implements AutoCloseable {
+    /** One handover of the frames, held open across the container's start and released on every path. */
+    private static final class FrameDelivery implements AutoCloseable {
         private final ResultCallback.Adapter<Frame> attached;
 
-        private SourceDelivery(ResultCallback.Adapter<Frame> attached) {
+        private FrameDelivery(ResultCallback.Adapter<Frame> attached) {
             this.attached = attached;
-        }
-
-        static SourceDelivery none() {
-            return new SourceDelivery(null);
         }
 
         /**
          * Waits for the bytes to have been handed over.
          *
-         * <p>A timeout here is not fatal on its own. The bootstrap is what decides whether it received a whole
-         * bundle — it reads a trailer and refuses a short stream — so the authoritative answer comes from the
-         * sandbox's own report rather than from how long the daemon took to drain a pipe.
+         * <p>A timeout here is not fatal on its own. The bootstrap and the adapter decide whether they received
+         * whole frames -- each reads a trailer and refuses a short stream -- so the authoritative answer comes
+         * from the sandbox's own report rather than from how long the daemon took to drain a pipe.
          */
         void await() {
-            if (attached == null) {
-                return;
-            }
             try {
                 attached.awaitCompletion(
                         SOURCE_DELIVERY_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
@@ -340,9 +396,6 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
 
         @Override
         public void close() {
-            if (attached == null) {
-                return;
-            }
             try {
                 attached.close();
             } catch (java.io.IOException | RuntimeException ignored) {
@@ -352,7 +405,28 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
     }
 
     /**
-     * How long the launcher will spend handing the bundle over.
+     * The live output attachment, released on every path -- including a launch that threw before the sandbox
+     * printed anything -- rather than depending on each branch remembering to.
+     */
+    private static final class Attachment implements AutoCloseable {
+        private final OutputCollector output;
+
+        private Attachment(OutputCollector output) {
+            this.output = output;
+        }
+
+        @Override
+        public void close() {
+            try {
+                output.close();
+            } catch (java.io.IOException | RuntimeException ignored) {
+                // The container's outcome is what matters; a stream that failed to close is not a result.
+            }
+        }
+    }
+
+    /**
+     * How long the launcher will spend handing the frames over.
      *
      * <p>Generous against the largest bundle the format allows and short against the sandbox's wall clock, so
      * a delivery that hangs is reported as a delivery failure rather than consuming the execution's whole
@@ -560,14 +634,22 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
         kill(containerId);
     }
 
-    private SandboxOutcome observe(String containerId, Instant startedAt, ExecutionAuthority authority) {
-        BoundedOutput output = new BoundedOutput(profile.maximumOutputBytes());
+    private SandboxOutcome observe(
+            String containerId,
+            Instant startedAt,
+            ExecutionAuthority authority,
+            OutputCollector output,
+            boolean followLogs) {
         try {
-            docker.logContainerCmd(containerId)
-                    .withStdOut(true)
-                    .withStdErr(true)
-                    .withFollowStream(true)
-                    .exec(output);
+            if (followLogs) {
+                // A platform probe's output, read back from its bounded json-file. Never reached for a sandbox
+                // running tenant code, which has no log file to read and is observed through the attach.
+                docker.logContainerCmd(containerId)
+                        .withStdOut(true)
+                        .withStdErr(true)
+                        .withFollowStream(true)
+                        .exec(output);
+            }
             Integer exitCode = awaitExit(containerId, authority);
             // The container exiting does not mean its output has arrived. Reading the observations at this
             // point without waiting for the stream to drain makes every conclusion drawn from them racy — and
@@ -575,6 +657,9 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
             // reports a control it never observed.
             boolean drained = output.awaitCompletion(
                     OUTPUT_DRAIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            // The held-back tail of each stream is final now: whatever the redactor was still waiting on is
+            // decided, and a last line with no newline becomes a line.
+            output.finish();
             Duration elapsed = Duration.between(startedAt, Instant.now());
             // WHY THE SANDBOX ENDED, AND NOT MERELY THAT IT DID.
             //
@@ -603,10 +688,13 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                     output.retainedBytes(),
                     elapsed,
                     outOfMemory(containerId),
-                    failure);
+                    failure,
+                    output.protocol(),
+                    output.redaction());
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             kill(containerId);
+            output.finish();
             return new SandboxOutcome(
                     Optional.empty(),
                     output.observations(),
@@ -615,13 +703,16 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                     output.retainedBytes(),
                     Duration.between(startedAt, Instant.now()),
                     false,
-                    Optional.of(SandboxFailure.SANDBOX_OBSERVE_FAILED));
+                    Optional.of(SandboxFailure.SANDBOX_OBSERVE_FAILED),
+                    output.protocol(),
+                    output.redaction());
         } catch (DockerClientException deadline) {
             // docker-java signals a wait timeout with this type. Every other RuntimeException is a daemon or
             // transport fault, and mapping those to SANDBOX_TIMEOUT let an unreachable daemon at t=2s satisfy
             // a check that was supposed to demonstrate a 30-second deadline. The two are now distinct, because
             // "we stopped it" and "we lost contact with it" are not the same claim.
             kill(containerId);
+            output.finish();
             return new SandboxOutcome(
                     Optional.empty(),
                     output.observations(),
@@ -630,9 +721,12 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                     output.retainedBytes(),
                     Duration.between(startedAt, Instant.now()),
                     false,
-                    Optional.of(SandboxFailure.SANDBOX_TIMEOUT));
+                    Optional.of(SandboxFailure.SANDBOX_TIMEOUT),
+                    output.protocol(),
+                    output.redaction());
         } catch (RuntimeException daemonFailure) {
             kill(containerId);
+            output.finish();
             return new SandboxOutcome(
                     Optional.empty(),
                     output.observations(),
@@ -641,7 +735,9 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
                     output.retainedBytes(),
                     Duration.between(startedAt, Instant.now()),
                     false,
-                    Optional.of(SandboxFailure.SANDBOX_OBSERVE_FAILED));
+                    Optional.of(SandboxFailure.SANDBOX_OBSERVE_FAILED),
+                    output.protocol(),
+                    output.redaction());
         }
     }
 
@@ -758,122 +854,6 @@ public final class DockerSandboxLauncher implements SandboxLauncher {
 
         public SandboxFailure failure() {
             return failure;
-        }
-    }
-
-    /**
-     * Collects the probe's key=value observations, stopping at the configured ceiling.
-     *
-     * <p>Untrusted output is attacker-controlled data, so it is bounded before it is anything else. Beyond the
-     * limit the collector stops keeping bytes entirely rather than buffering and trimming, because the cost of
-     * a flood has to be paid at the moment it arrives, not afterwards. This bounds what the launcher keeps;
-     * the daemon's own copy on host disk is bounded separately, by the log configuration in {@code create}.
-     *
-     * <p>Every field is guarded, because the timeout path reads the observations after killing the container
-     * without waiting for the stream to finish: the callback thread may still be delivering frames while the
-     * launcher builds its outcome.
-     */
-    private static final class BoundedOutput extends ResultCallback.Adapter<Frame> {
-        private final int maximumBytes;
-        private final Map<String, String> observations = new LinkedHashMap<>();
-
-        /** How many times each key appeared. See {@link #record} for why a map alone is not enough. */
-        private final Map<String, Integer> occurrences = new LinkedHashMap<>();
-
-        /** The keys that appeared more than once, which is the only part of the count a caller needs. */
-        private java.util.Set<String> duplicated() {
-            java.util.Set<String> repeated = new java.util.LinkedHashSet<>();
-            occurrences.forEach((key, count) -> {
-                if (count > 1) {
-                    repeated.add(key);
-                }
-            });
-            return repeated;
-        }
-        private final StringBuilder pending = new StringBuilder();
-        private final AtomicBoolean truncated = new AtomicBoolean();
-        private int bytes;
-
-        private BoundedOutput(int maximumBytes) {
-            this.maximumBytes = maximumBytes;
-        }
-
-        @Override
-        public synchronized void onNext(Frame frame) {
-            if (truncated.get()) {
-                return;
-            }
-            byte[] payload = frame.getPayload();
-            if (bytes + payload.length > maximumBytes) {
-                truncated.set(true);
-                return;
-            }
-            bytes += payload.length;
-            pending.append(new String(payload, java.nio.charset.StandardCharsets.UTF_8));
-            drain();
-        }
-
-        private void drain() {
-            int newline;
-            while ((newline = pending.indexOf("\n")) >= 0) {
-                record(pending.substring(0, newline));
-                pending.delete(0, newline + 1);
-            }
-        }
-
-        private void record(String line) {
-            int equals = line.indexOf('=');
-            if (equals <= 0) {
-                return;
-            }
-            // Control characters are stripped here, at the boundary, rather than wherever this is eventually
-            // rendered. Terminal escape sequences in untrusted output are an attack on whoever reads the logs.
-            String key = sanitize(line.substring(0, equals));
-            String value = sanitize(line.substring(equals + 1));
-            // HOW MANY TIMES A KEY WAS SEEN, not only what it last said.
-            //
-            // A map keeps the last value and forgets there was another, which is fine for a diagnostic and
-            // wrong for a result. Tenant code runs in this sandbox and can print anything, so a workload that
-            // announces its own outcome and then lets the adapter announce the real one would leave a map
-            // holding one plausible answer with no trace of the other. Counting is what lets the runner
-            // refuse a stream that reported twice instead of picking whichever it preferred.
-            occurrences.merge(key, 1, Integer::sum);
-            observations.put(key, value);
-        }
-
-        private static String sanitize(String value) {
-            StringBuilder safe = new StringBuilder(value.length());
-            value.codePoints()
-                    // Control characters go, and so do the format characters that survive them: a
-                    // right-to-left override or a zero-width joiner in untrusted output can reorder how a
-                    // whole evidence line reads to a human without changing a byte of its meaning. Stripping
-                    // happens here, at the collector, before any other code sees the value.
-                    .filter(codePoint -> !Character.isISOControl(codePoint))
-                    .filter(codePoint -> Character.getType(codePoint) != Character.FORMAT)
-                    .filter(codePoint -> Character.getType(codePoint) != Character.LINE_SEPARATOR)
-                    .filter(codePoint -> Character.getType(codePoint) != Character.PARAGRAPH_SEPARATOR)
-                    .forEach(safe::appendCodePoint);
-            return safe.toString().trim();
-        }
-
-        private synchronized Map<String, String> observations() {
-            drain();
-            return Map.copyOf(observations);
-        }
-
-        private boolean truncated() {
-            return truncated.get();
-        }
-
-        /**
-         * How many bytes the collector actually kept.
-         *
-         * <p>Reported so the ceiling can be checked against what was retained rather than against the
-         * collector's own claim that it truncated. A flag set while every byte was still being kept is a
-         * flag, not a bound.
-         */
-        private synchronized int retainedBytes() {
-            return bytes;
         }
     }
 

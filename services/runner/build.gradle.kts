@@ -117,9 +117,25 @@ tasks.withType<Test>().configureEach {
         .withPathSensitivity(PathSensitivity.RELATIVE)
     val enginePath = engineImageContext.elements.map { it.single().asFile.absolutePath }
 
+    // Where a suite writes the evidence its CI gate reads back: a directory the BUILD names, per task, so a
+    // suite run anywhere produces evidence and a suite that cannot write it fails rather than returning quietly.
+    val evidenceDirectory = layout.buildDirectory.dir("evidence/$name").map { it.asFile.absolutePath }
+
+    // LOCAL DEVELOPMENT ONLY: run the mediated-runtime suites under another runtime on a machine without runsc.
+    // Never set in CI, and it cannot make a gate pass there: every mediated suite records the runtime the DAEMON
+    // reports it assigned, and the gates require runsc in that evidence.
+    val localRuntime = providers.gradleProperty("kaasLocalMediatedRuntime")
+
+    // A random fragment the secret-execution gate embeds in every value its suites generate, so a step outside
+    // the JVM can scan reports for any leaked value without ever being told one. Absent locally.
+    val sentinelNonce = providers.environmentVariable("KAAS_SENTINEL_NONCE")
+
     doFirst {
         systemProperty("kaas.egress.proxy.context", contextPath.get())
         systemProperty("kaas.karate.engine.context", enginePath.get())
+        systemProperty("kaas.evidence.dir", evidenceDirectory.get())
+        localRuntime.orNull?.let { systemProperty("kaas.test.mediated-runtime", it) }
+        sentinelNonce.orNull?.let { systemProperty("kaas.test.sentinel-nonce", it) }
     }
 }
 
@@ -229,6 +245,22 @@ val karateExecutionTest = tasks.register<Test>("karateExecutionTest") {
     filter { includeTestsMatching("com.kaas.runner.sandbox.KarateExecutionTests") }
 }
 
+/**
+ * Secret-bearing Karate inside the sandbox: the channel, the redactor, and the leakage surfaces, measured from
+ * both sides of the boundary under the mediating runtime.
+ *
+ * <p>Its own task and part of the {@code secret-execution-gate} job, beside the end-to-end pipeline suite that
+ * adds Vault, the control plane and a controlled target. NOT wired into {@code check}, for the reason every
+ * mediated-runtime suite is not: a green local build proves nothing about runsc.
+ */
+val secretExecutionTest = tasks.register<Test>("secretExecutionTest") {
+    group = "verification"
+    description = "Secret-bearing Karate 2.1.2 under the mediating runtime: delivery, redaction, leakage surfaces."
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    filter { includeTestsMatching("com.kaas.runner.sandbox.SecretBearingKarateExecutionTests") }
+}
+
 tasks.named<Test>("test") {
     dependsOn(jvmProbeImageContext)
     // Excluded here because they run in egressSecurityTest above. Running them in both would double a
@@ -245,6 +277,8 @@ tasks.named<Test>("test") {
         // Runs in karateExecutionTest above, which needs that same runtime: the frozen source filesystem the
         // engine executes on cannot be closed under the baseline one.
         excludeTestsMatching("com.kaas.runner.sandbox.KarateExecutionTests")
+        // Runs in secretExecutionTest, under the same runtime and for the same reason.
+        excludeTestsMatching("com.kaas.runner.sandbox.SecretBearingKarateExecutionTests")
     }
 }
 

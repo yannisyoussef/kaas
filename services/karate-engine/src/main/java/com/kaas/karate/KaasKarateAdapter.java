@@ -2,12 +2,19 @@ package com.kaas.karate;
 
 import io.karatelabs.core.Runner;
 import io.karatelabs.core.SuiteResult;
+import java.io.DataInputStream;
+import java.io.FileDescriptor;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The platform's engine adapter: the only thing that decides what Karate is asked to run.
@@ -83,6 +90,26 @@ public final class KaasKarateAdapter {
         // be on the classpath and requires that engine to say what version it is.
         emitEngineIdentity();
 
+        // THE ENGINE FRAME, before any tenant code exists in this process.
+        //
+        // The bootstrap consumed exactly the source frame from standard input and handed over; what is left in
+        // the pipe is this frame, written by the runner, carrying the run's secret values and -- under an
+        // allowlist -- where the egress proxy is. It is read exactly, the pipe is required to be empty after
+        // it, and standard input is then CLOSED, so the descriptor tenant code could have read leftover bytes
+        // from no longer exists by the time Karate parses a single feature.
+        EngineFrame frame;
+        try {
+            frame = EngineFrame.read(new FileInputStream(FileDescriptor.in));
+        } catch (IOException | RuntimeException unreadable) {
+            closeStandardInput();
+            // A category only. The frame may carry secret values, and an exception message about it could
+            // quote part of one.
+            fail("SECRET_CHANNEL");
+            return 2;
+        }
+        closeStandardInput();
+        System.out.println("kaas.secrets=CONSUMED");
+
         List<String> features;
         try {
             features = authorizedFeatures(MANIFEST, FILES);
@@ -103,6 +130,12 @@ public final class KaasKarateAdapter {
         try {
             Files.createDirectories(WORK);
             result = Runner.path(features)
+                    // THE ONLY WAY A SECRET REACHES TENANT CODE: a JS global the platform binds, named `kaas`,
+                    // read as `kaas.secrets.<BINDING_KEY>`. Programmatic, so there is no source rewriting, no
+                    // environment variable, no system property, no file. It is readable by every scenario, and
+                    // that is intended: the run was authorized to use these values. It is not protected from
+                    // tenant code by Java visibility or an unmodifiable map, and nothing here pretends it is.
+                    .global("kaas", frame.globals())
                     // EVERY REPORT FORM OFF. Karate's default is to write an HTML report, and rich
                     // tenant-controlled output is a separate decision this slice has not made. The files
                     // would also outlive nothing -- the container takes them -- but "it gets deleted" is a
@@ -133,6 +166,109 @@ public final class KaasKarateAdapter {
         // contract; a number the platform cannot corroborate is a number tenant code chooses.
         emit(result.isFailed() ? "FAILED" : "PASSED");
         return 0;
+    }
+
+    /**
+     * Closes descriptor 0 and replaces {@link System#in} with an empty stream.
+     *
+     * <p>Closing the {@link FileInputStream} over {@link FileDescriptor#in} closes the process's descriptor 0.
+     * After this there is nothing at {@code /proc/self/fd/0} or {@code /dev/stdin} for tenant code to open, and
+     * {@code System.in} reads end-of-stream immediately. Done on every path, including a malformed frame, so a
+     * refusal cannot leave secret bytes readable behind it.
+     */
+    private static void closeStandardInput() {
+        try {
+            new FileInputStream(FileDescriptor.in).close();
+        } catch (IOException | RuntimeException ignored) {
+            // Already closed is the state this wants.
+        }
+        System.setIn(InputStream.nullInputStream());
+    }
+
+    /**
+     * The engine frame, as the runner wrote it after the source frame.
+     *
+     * <p>See the runner's {@code EngineInput} and {@code packages/api-contracts/engine-frame.md}. Read with exact
+     * reads from an unbuffered stream, bounded before anything is allocated, and refused whole on any
+     * deviation. Values are decoded into strings only because Karate variables are strings; the byte arrays
+     * they came from are cleared.
+     */
+    record EngineFrame(Map<String, String> secrets, String proxyUri, String proxyToken) {
+        private static final byte[] MAGIC = "KAASENG1".getBytes(StandardCharsets.US_ASCII);
+        private static final byte[] TRAILER = "KAASEND1".getBytes(StandardCharsets.US_ASCII);
+
+        static EngineFrame read(InputStream stdin) throws IOException {
+            DataInputStream in = new DataInputStream(stdin);
+            require(in, MAGIC);
+            int count = in.readInt();
+            if (count < 0 || count > 50) {
+                throw new IOException("frame");
+            }
+            Map<String, String> secrets = new LinkedHashMap<>();
+            long total = 0;
+            for (int index = 0; index < count; index++) {
+                int keyLength = in.readUnsignedShort();
+                if (keyLength < 1 || keyLength > 128) {
+                    throw new IOException("frame");
+                }
+                String key = new String(in.readNBytes(keyLength), StandardCharsets.US_ASCII);
+                int valueLength = in.readInt();
+                total += valueLength;
+                if (valueLength < 1 || valueLength > 8192 || total > 65536) {
+                    throw new IOException("frame");
+                }
+                byte[] value = in.readNBytes(valueLength);
+                if (value.length != valueLength || secrets.containsKey(key)) {
+                    throw new IOException("frame");
+                }
+                secrets.put(key, new String(value, StandardCharsets.UTF_8));
+                Arrays.fill(value, (byte) 0);
+            }
+            String proxyUri = null;
+            String proxyToken = null;
+            int egress = in.readUnsignedByte();
+            if (egress == 1) {
+                String host = new String(in.readNBytes(in.readUnsignedShort()), StandardCharsets.US_ASCII);
+                int port = in.readUnsignedShort();
+                proxyToken = new String(in.readNBytes(in.readUnsignedShort()), StandardCharsets.US_ASCII);
+                proxyUri = "http://" + host + ":" + port;
+            } else if (egress != 0) {
+                throw new IOException("frame");
+            }
+            require(in, TRAILER);
+            // Nothing may follow. The runner writes exactly the source frame and this one; a byte after the
+            // trailer is a stream that is not what the platform wrote.
+            if (stdin.available() != 0) {
+                throw new IOException("frame");
+            }
+            return new EngineFrame(Map.copyOf(secrets), proxyUri, proxyToken);
+        }
+
+        private static void require(DataInputStream in, byte[] expected) throws IOException {
+            byte[] actual = in.readNBytes(expected.length);
+            if (!Arrays.equals(actual, expected)) {
+                throw new IOException("frame");
+            }
+        }
+
+        /**
+         * The `kaas` global: {@code secrets} always (empty for a secret-free run), and {@code egress} only under
+         * an allowlist. The platform's own karate-config.js reads {@code kaas.egress} to point Karate's HTTP
+         * client at the proxy.
+         */
+        Map<String, Object> globals() {
+            Map<String, Object> globals = new LinkedHashMap<>();
+            globals.put("secrets", secrets);
+            if (proxyUri != null) {
+                globals.put("egress", Map.of("uri", proxyUri, "token", proxyToken));
+            }
+            return globals;
+        }
+
+        @Override
+        public String toString() {
+            return "EngineFrame[secrets=" + secrets.size() + ", egress=" + (proxyUri != null) + "]";
+        }
     }
 
     /**

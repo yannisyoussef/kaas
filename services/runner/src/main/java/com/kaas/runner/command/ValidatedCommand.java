@@ -46,7 +46,24 @@ public record ValidatedCommand(
          * pass somewhere. What it carries is enough to REFUSE a bundle that is not the authorized one, which
          * is the whole of its job.
          */
-        SourceBundleAuthorization sourceBundle) {
+        SourceBundleAuthorization sourceBundle,
+        /**
+         * The secrets the command authorizes, as the run pinned them: key, reference, version. Never a value.
+         * Empty for a secret-free run, which is then issued no secret capability at all.
+         */
+        List<SecretBinding> secretBindings) {
+
+    public ValidatedCommand {
+        secretBindings = List.copyOf(secretBindings);
+    }
+
+    /** One secret the command authorizes: the key the engine sees, the reference, and the pinned version. */
+    public record SecretBinding(String bindingKey, UUID referenceId, int version) {}
+
+    /** The authorized keys, which a secret bundle must match exactly. */
+    public java.util.Set<String> secretKeys() {
+        return secretBindings.stream().map(SecretBinding::bindingKey).collect(java.util.stream.Collectors.toSet());
+    }
 
     /** What the command says the bundle must be. Covered by the command digest, like every other field. */
     public record SourceBundleAuthorization(String contentDigest, List<Feature> features) {

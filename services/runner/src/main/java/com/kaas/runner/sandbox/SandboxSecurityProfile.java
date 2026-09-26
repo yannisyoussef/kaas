@@ -71,12 +71,28 @@ public record SandboxSecurityProfile(
      *     it is memory: an unbounded tmpfs full of tenant bytes is a memory-exhaustion primitive with extra
      *     steps.
      */
-    public record SourceDelivery(byte[] frame, long filesystemBytes) {
+    public record SourceDelivery(byte[] frame, long filesystemBytes, EngineInput engineInput) {
         public SourceDelivery {
             java.util.Objects.requireNonNull(frame, "Source delivery carries a framed bundle.");
             if (filesystemBytes <= 0) {
                 throw new IllegalArgumentException("A source filesystem is bounded.");
             }
+        }
+
+        /**
+         * Source alone, for a sandbox whose workload reads nothing after the bootstrap hands over — the
+         * platform's own source verifier and boundary probes. The engine always gets an {@link EngineInput},
+         * secret-free or not; see {@link DockerSandboxLauncher#run}.
+         */
+        public SourceDelivery(byte[] frame, long filesystemBytes) {
+            this(frame, filesystemBytes, null);
+        }
+
+        /** Never the bytes: a frame carries tenant source, and an engine input can carry secrets. */
+        @Override
+        public String toString() {
+            return "SourceDelivery[frameBytes=" + frame.length + ", filesystemBytes=" + filesystemBytes
+                    + ", engineInput=" + engineInput + "]";
         }
     }
 

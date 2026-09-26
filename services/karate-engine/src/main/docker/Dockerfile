@@ -38,5 +38,7 @@ USER 65534:65534
 # The classpath is a fixed platform string. Tenant source cannot extend it, reorder it, or name a jar: there
 # is no argument here that anything outside this repository supplies.
 ENTRYPOINT ["/opt/java/openjdk/bin/java", "-XX:MaxRAMPercentage=60", \
+            "-XX:-HeapDumpOnOutOfMemoryError", "-XX:+ExitOnOutOfMemoryError", \
+            "-XX:-CreateCoredumpOnCrash", "-XX:ErrorFile=/tmp/hs_err.log", \
             "-Djava.io.tmpdir=/tmp", "-Duser.home=/tmp/kaas-home", \
             "-cp", "/engine/lib/*", "com.kaas.karate.KaasKarateAdapter"]

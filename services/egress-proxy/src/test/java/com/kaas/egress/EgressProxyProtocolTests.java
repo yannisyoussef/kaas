@@ -110,6 +110,65 @@ class EgressProxyProtocolTests {
                 .satisfies(question -> assertThat(question.token()).isEqualTo(TOKEN));
     }
 
+    @Test
+    @DisplayName("a Basic challenge is offered, and a Basic answer carries the capability as its password")
+    void aBasicAnswerCarriesTheSameCapability() throws IOException {
+        // Karate's HTTP client authenticates to a proxy only by answering a challenge, so the 407 has to issue
+        // one, and the answer has to reach the authority as the same capability a Bearer header would carry.
+        ProxyClient.Response challenged = send("GET http://api.example.com/x HTTP/1.1\r\nHost: api.example.com\r\n\r\n");
+        assertThat(challenged.status()).isEqualTo(407);
+        assertThat(challenged.headers()).contains("Proxy-Authenticate: Basic realm=\"kaas-egress\"");
+
+        dns.answering("api.example.com", GLOBAL);
+        String basic = java.util.Base64.getEncoder()
+                .encodeToString(("kaas:" + TOKEN).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        send("GET http://api.example.com/x HTTP/1.1\r\nHost: api.example.com\r\n"
+                + "Proxy-Authorization: Basic " + basic + "\r\n\r\n");
+        assertThat(authorizer.asked()).singleElement()
+                .satisfies(question -> assertThat(question.token()).isEqualTo(TOKEN));
+    }
+
+    @Test
+    @DisplayName("nothing a request carries -- headers, cookies, path, query, body -- is written to the proxy's output")
+    void theProxyWritesNothingARequestCarries() throws IOException {
+        // STRUCTURAL NON-LOGGING, measured. The sensitive value is placed everywhere a tenant might put a
+        // secret: the Authorization header, a cookie, a custom header, the path, the query, and the body. The
+        // proxy is given no registry of secrets to redact; the property is that it writes none of this at all.
+        String sensitive = "kaas-sensitive-" + java.util.UUID.randomUUID();
+        dns.answering("api.example.com", GLOBAL);
+        java.io.PrintStream originalOut = System.out;
+        java.io.PrintStream originalErr = System.err;
+        java.io.ByteArrayOutputStream captured = new java.io.ByteArrayOutputStream();
+        java.io.PrintStream capture = new java.io.PrintStream(captured, true, java.nio.charset.StandardCharsets.UTF_8);
+        System.setOut(capture);
+        System.setErr(capture);
+        try {
+            // The positive control: the capture really is where this process writes.
+            System.err.println("capture-control");
+            String body = "{\"token\":\"" + sensitive + "\"}";
+            send("POST http://api.example.com/v1/" + sensitive + "?key=" + sensitive + " HTTP/1.1\r\n"
+                    + "Host: api.example.com\r\n"
+                    + "Proxy-Authorization: Bearer " + TOKEN + "\r\n"
+                    + "Authorization: Bearer " + sensitive + "\r\n"
+                    + "Cookie: session=" + sensitive + "\r\n"
+                    + "X-Api-Key: " + sensitive + "\r\n"
+                    + "Content-Length: " + body.length() + "\r\n\r\n" + body);
+            // And the refusal paths, which are the ones most likely to describe what they refused.
+            authorizer.deny(DenialReason.DESTINATION_NOT_ALLOWED);
+            send("GET http://api.example.com/" + sensitive + "?q=" + sensitive + " HTTP/1.1\r\n"
+                    + "Host: api.example.com\r\n"
+                    + "Proxy-Authorization: Bearer " + TOKEN + "\r\n"
+                    + "Authorization: Bearer " + sensitive + "\r\n\r\n");
+            send("GET http://api.example.com/" + sensitive + " HTTP/1.1\r\nHost: other.example.com\r\n\r\n");
+        } finally {
+            System.setOut(originalOut);
+            System.setErr(originalErr);
+        }
+        String output = captured.toString(java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(output).contains("capture-control");
+        assertThat(output).doesNotContain(sensitive).doesNotContain(TOKEN);
+    }
+
     // ---------------------------------------------------------------- ordering
 
     @Test

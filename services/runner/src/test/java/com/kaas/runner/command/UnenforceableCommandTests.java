@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -87,21 +88,87 @@ class UnenforceableCommandTests {
     }
 
     @Test
-    @DisplayName("a correctly digested command binding secrets is refused")
-    void secretBearingCommandsAreRefused() throws Exception {
-        ObjectNode command = sealed(node -> {
-            ObjectNode secret =
-                    ((tools.jackson.databind.node.ArrayNode) node.get("secretCapabilities")).addObject();
-            secret.put("capabilityId", UUID.randomUUID().toString());
-            secret.put("provider", "aws-secrets-manager");
-            secret.put("referenceId", "ref-1");
-            secret.put("bindingKey", "API_TOKEN");
-            secret.put("expiresAt", NOW.plusSeconds(300).toString());
-        });
+    @DisplayName("a correctly digested command binding secrets is refused by a runner whose workload cannot receive them")
+    void secretBindingsAreRefusedForTheSyntheticWorkload() throws Exception {
+        ObjectNode command = sealed(node -> bind(node, "API_TOKEN", "vault-transit", 3));
 
         assertThatThrownBy(() -> new CommandValidator(mapper).validate(command.toString(), NOW))
                 .isInstanceOf(CommandRejected.class)
-                .hasMessageContaining("redeems no secrets");
+                .hasMessageContaining("cannot receive secrets");
+    }
+
+    @Test
+    @DisplayName("an engine runner accepts pinned secret bindings and reads back exactly what the command names")
+    void anEngineRunnerAcceptsPinnedBindings() throws Exception {
+        ObjectNode command = sealed(node -> {
+            karate(node);
+            bind(node, "BETA", "vault-transit", 2);
+            bind(node, "ALPHA", "vault-transit", 1);
+        });
+
+        var validated = karateValidator().validate(command.toString(), NOW);
+
+        assertThat(validated.secretKeys()).containsExactlyInAnyOrder("ALPHA", "BETA");
+        assertThat(validated.secretBindings())
+                .extracting(ValidatedCommand.SecretBinding::version)
+                .containsExactlyInAnyOrder(1, 2);
+    }
+
+    @Test
+    @DisplayName("a binding's version is covered by the digest, so it cannot be moved in flight")
+    void theVersionIsDigested() throws Exception {
+        ObjectNode command = sealed(node -> {
+            karate(node);
+            bind(node, "API_TOKEN", "vault-transit", 3);
+        });
+        // Re-pointed at another version after the digest was computed, exactly as a tamperer would.
+        ((ObjectNode) command.get("secretBindings").get(0)).put("version", 4);
+
+        assertThatThrownBy(() -> karateValidator().validate(command.toString(), NOW))
+                .isInstanceOf(CommandRejected.class)
+                .hasMessageContaining("digest");
+    }
+
+    @Test
+    @DisplayName("an unknown provider, a duplicate key, a version of zero or an extra field is refused")
+    void malformedBindingsAreRefused() throws Exception {
+        for (java.util.function.Consumer<ObjectNode> mutation : List.<java.util.function.Consumer<ObjectNode>>of(
+                node -> bind(node, "API_TOKEN", "aws-secrets-manager", 1),
+                node -> {
+                    bind(node, "API_TOKEN", "vault-transit", 1);
+                    bind(node, "API_TOKEN", "vault-transit", 2);
+                },
+                node -> bind(node, "API_TOKEN", "vault-transit", 0),
+                node -> ((ObjectNode) bind(node, "API_TOKEN", "vault-transit", 1)).put("value", "leaked"))) {
+            // Sealed inside the assertion: an unknown field is refused by the digest function itself, before the
+            // validator's own checks, and either refusal is the answer.
+            assertThatThrownBy(() -> karateValidator().validate(sealed(node -> {
+                                karate(node);
+                                mutation.accept(node);
+                            }).toString(), NOW))
+                    .isInstanceOf(CommandRejected.class);
+        }
+    }
+
+    private CommandValidator karateValidator() {
+        return new CommandValidator(
+                mapper, java.util.Set.of(), java.util.Optional.empty(),
+                CommandValidator.KARATE_ENGINE, CommandValidator.KARATE_VERSION);
+    }
+
+    private static void karate(ObjectNode node) {
+        ObjectNode engine = (ObjectNode) node.get("engine");
+        engine.put("type", "KARATE");
+        engine.put("version", CommandValidator.KARATE_VERSION);
+    }
+
+    private static ObjectNode bind(ObjectNode node, String key, String provider, int version) {
+        ObjectNode secret = ((tools.jackson.databind.node.ArrayNode) node.get("secretBindings")).addObject();
+        secret.put("bindingKey", key);
+        secret.put("provider", provider);
+        secret.put("referenceId", UUID.randomUUID().toString());
+        secret.put("version", version);
+        return secret;
     }
 
     @Test
@@ -207,7 +274,7 @@ class UnenforceableCommandTests {
         feature.put("logicalPath", "features/one.feature");
         feature.put("contentDigest", "sha256:" + "c".repeat(64));
 
-        root.putArray("secretCapabilities");
+        root.putArray("secretBindings");
 
         ObjectNode network = root.putObject("networkPolicy");
         network.put("policyRevisionId", "88888888-8888-4888-8888-888888888888");

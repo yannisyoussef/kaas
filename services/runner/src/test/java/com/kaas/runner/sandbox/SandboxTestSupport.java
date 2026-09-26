@@ -146,6 +146,18 @@ final class SandboxTestSupport {
         return SandboxSecurityProfile.version1(probeImage());
     }
 
+    /**
+     * The runtime a mediated-runtime suite runs under: GVISOR, unless a developer overrode it locally.
+     *
+     * <p>The override exists only so these suites can be exercised on a machine with no runsc. It is never set
+     * in CI, and it cannot make a gate pass: the suites record the runtime the daemon reports it assigned, and
+     * the gates require {@code runsc} in that evidence.
+     */
+    static ExecutionRuntimeType mediatedRuntime() {
+        String override = System.getProperty("kaas.test.mediated-runtime");
+        return override == null || override.isBlank() ? ExecutionRuntimeType.GVISOR : ExecutionRuntimeType.valueOf(override);
+    }
+
     static DockerSandboxLauncher launcher(SandboxSecurityProfile profile, String generation) {
         return new DockerSandboxLauncher(docker(), profile, generation);
     }

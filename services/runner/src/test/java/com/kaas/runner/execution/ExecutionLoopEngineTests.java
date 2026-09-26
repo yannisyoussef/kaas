@@ -42,7 +42,7 @@ class ExecutionLoopEngineTests {
     @Test
     @DisplayName("a Karate loop reads its verdict from the protocol, and a synthetic loop does not see one")
     void theEngineVerdictIsWhatTheKarateLoopReads() {
-        SandboxOutcome passed = outcome(Map.of(EngineOutcome.PROTOCOL, "PASSED"), Set.of(), 0);
+        SandboxOutcome passed = outcome(ENGINE + "kaas.karate-result.v1=PASSED\n", 0);
 
         assertThat(karateLoop().infrastructureFailureDetail(passed)).isNull();
         assertThat(karateLoop().testPassed(passed)).isTrue();
@@ -57,7 +57,7 @@ class ExecutionLoopEngineTests {
     @Test
     @DisplayName("a failing suite is a completed run, not an infrastructure failure")
     void aFailedSuiteIsStillACompletedRun() {
-        SandboxOutcome failed = outcome(Map.of(EngineOutcome.PROTOCOL, "FAILED"), Set.of(), 0);
+        SandboxOutcome failed = outcome(ENGINE + "kaas.karate-result.v1=FAILED\n", 0);
 
         assertThat(karateLoop().infrastructureFailureDetail(failed)).isNull();
         assertThat(karateLoop().testPassed(failed)).isFalse();
@@ -68,7 +68,7 @@ class ExecutionLoopEngineTests {
     void anAbsentVerdictIsNotAPass() {
         // The System.exit(0) shape, at the loop rather than at the sandbox. Nothing else in this file matters
         // more: a container that exited cleanly having run no assertion must not become a passing run.
-        SandboxOutcome silent = outcome(Map.of(), Set.of(), 0);
+        SandboxOutcome silent = outcome(ENGINE, 0);
 
         assertThat(karateLoop().infrastructureFailureDetail(silent))
                 .isNotNull()
@@ -78,10 +78,10 @@ class ExecutionLoopEngineTests {
     @Test
     @DisplayName("a duplicated verdict is an infrastructure failure, whichever verdict came last")
     void aDuplicatedVerdictIsRefused() {
-        // The map holds the LAST value seen, so a forger who prints after the adapter leaves PASSED here. The
-        // loop must refuse on the duplicate rather than on the value.
-        SandboxOutcome forged =
-                outcome(Map.of(EngineOutcome.PROTOCOL, "PASSED"), Set.of(EngineOutcome.PROTOCOL), 0);
+        // A map would hold the LAST value seen, so a forger who prints after the adapter leaves PASSED. The loop
+        // must refuse on the duplicate rather than on the value.
+        SandboxOutcome forged = outcome(
+                ENGINE + "kaas.karate-result.v1=FAILED\nkaas.karate-result.v1=PASSED\n", 0);
 
         assertThat(karateLoop().infrastructureFailureDetail(forged))
                 .isNotNull()
@@ -92,9 +92,7 @@ class ExecutionLoopEngineTests {
     @DisplayName("an engine error is an infrastructure failure, not a failing test")
     void anEngineErrorIsNotATestResult() {
         SandboxOutcome broken = outcome(
-                Map.of(EngineOutcome.PROTOCOL, "ENGINE_ERROR", "engine_error", "NO_AUTHORIZED_FEATURES"),
-                Set.of(),
-                0);
+                ENGINE + "kaas.karate-result.v1=ENGINE_ERROR\nengine_error=NO_AUTHORIZED_FEATURES\n", 0);
 
         assertThat(karateLoop().infrastructureFailureDetail(broken))
                 .isNotNull()
@@ -119,7 +117,40 @@ class ExecutionLoopEngineTests {
         assertThat(karateLoop().infrastructureFailureDetail(killed)).isNotNull();
     }
 
+    @Test
+    @DisplayName("the runner itself refuses a verdict from an engine that is not the adjudicated Karate")
+    void theEngineIdentityIsEnforcedByTheRunner() {
+        // Until KAAS-22 only tests and CI looked at this line. A deployment carrying another engine, or none,
+        // would have produced verdicts the platform believed.
+        for (String identity : new String[] {
+            "", "kaas.engine=karate 2.1.3\n", "kaas.engine=unknown\n",
+            "kaas.engine=karate 2.1.2\nkaas.engine=karate 2.1.2\n"
+        }) {
+            SandboxOutcome outcome = outcome(
+                    identity + "kaas.secrets=CONSUMED\nkaas.karate-result.v1=PASSED\n", 0);
+            assertThat(karateLoop().infrastructureFailureDetail(outcome))
+                    .as("identity lines %s", identity.replace("\n", "|"))
+                    .isNotNull()
+                    .contains("UNIDENTIFIED");
+        }
+    }
+
+    @Test
+    @DisplayName("a verdict without exactly one secret-channel confirmation is not a result")
+    void theSecretChannelMustBeConfirmedExactlyOnce() {
+        for (String channel : new String[] {"", "kaas.secrets=CONSUMED\nkaas.secrets=CONSUMED\n", "kaas.secrets=OPEN\n"}) {
+            SandboxOutcome outcome = outcome(
+                    "kaas.engine=karate 2.1.2\n" + channel + "kaas.karate-result.v1=PASSED\n", 0);
+            assertThat(karateLoop().infrastructureFailureDetail(outcome))
+                    .isNotNull()
+                    .contains("SECRET_CHANNEL_UNCONFIRMED");
+        }
+    }
+
     // ------------------------------------------------------------------ harness
+
+    /** What the adapter prints before any verdict: the engine it loaded, and that it closed the channel. */
+    private static final String ENGINE = "kaas.engine=karate 2.1.2\nkaas.secrets=CONSUMED\n";
 
     private static ExecutionLoop karateLoop() {
         return loop(CommandValidator.KARATE_ENGINE);
@@ -143,16 +174,35 @@ class ExecutionLoopEngineTests {
                 engine);
     }
 
-    private static SandboxOutcome outcome(Map<String, String> observations, Set<String> duplicated, int exit) {
+    /**
+     * The outcome a sandbox printing exactly {@code stdout} produces, read by the same protocol scanner the
+     * launcher uses. The protocol is what the loop reads; the observation map is kept only for the synthetic
+     * path, which still reads its own identity from it.
+     */
+    private static SandboxOutcome outcome(String stdout, int exit) {
+        var scanner = new com.kaas.runner.sandbox.ProtocolScanner();
+        byte[] bytes = stdout.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        scanner.write(bytes, 0, bytes.length);
+        scanner.finish();
+        Map<String, String> observations = new LinkedHashMap<>();
+        java.util.Set<String> duplicated = new java.util.LinkedHashSet<>();
+        for (String line : stdout.split("\n")) {
+            int equals = line.indexOf('=');
+            if (equals > 0 && observations.put(line.substring(0, equals), line.substring(equals + 1)) != null) {
+                duplicated.add(line.substring(0, equals));
+            }
+        }
         return new SandboxOutcome(
                 Optional.of(exit),
-                new LinkedHashMap<>(observations),
+                observations,
                 duplicated,
                 false,
                 0,
                 Duration.ofSeconds(1),
                 false,
-                Optional.empty());
+                Optional.empty(),
+                scanner.observed(),
+                SandboxOutcome.Redaction.NONE);
     }
 
     /** A launcher nothing in this suite reaches; the loop only needs its profile to exist. */

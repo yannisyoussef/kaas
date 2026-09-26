@@ -6,6 +6,8 @@ import com.kaas.runner.command.CommandRejected;
 import com.kaas.runner.command.CommandValidator;
 import com.kaas.runner.command.ValidatedCommand;
 import com.kaas.runner.sandbox.EgressExecution;
+import com.kaas.runner.sandbox.EngineInput;
+import com.kaas.runner.secret.SecretBundle;
 import com.kaas.runner.sandbox.EgressExecutions;
 import com.kaas.runner.sandbox.EgressFailure;
 import com.kaas.runner.sandbox.EgressPlan;
@@ -148,6 +150,23 @@ public final class ExecutionLoop {
             EgressExecutions egressExecutions,
             boolean deliversTenantSource,
             String engine) {
+        this(controlPlane, validator, launcher, mapper, clock, workload, egressExecutions, deliversTenantSource,
+                engine, ExecutionObserver.NONE);
+    }
+
+    /** The full form, with an observer told what each sandbox produced. */
+    public ExecutionLoop(
+            ControlPlaneClient controlPlane,
+            CommandValidator validator,
+            SandboxLauncher launcher,
+            ObjectMapper mapper,
+            Clock clock,
+            SyntheticProbe workload,
+            EgressExecutions egressExecutions,
+            boolean deliversTenantSource,
+            String engine,
+            ExecutionObserver observer) {
+        this.observer = java.util.Objects.requireNonNull(observer, "observer");
         this.engine = engine;
         this.controlPlane = controlPlane;
         this.validator = validator;
@@ -190,6 +209,7 @@ public final class ExecutionLoop {
         ValidatedCommand command;
         EgressPlan plan;
         String sourceToken;
+        String secretToken;
         try {
             JsonNode envelope = mapper.readTree(authorization.body());
             JsonNode document = envelope.get("command");
@@ -210,6 +230,10 @@ public final class ExecutionLoop {
             // document. It exists in this variable and nowhere else.
             JsonNode token = envelope.get("sourceCapabilityToken");
             sourceToken = token == null || !token.isString() ? null : token.stringValue();
+            // Present only for a run that binds secrets, and read from the envelope for the same reasons as
+            // the source token: it rotates on every delivery and must never be inside a digested document.
+            JsonNode secret = envelope.get("secretCapabilityToken");
+            secretToken = secret == null || !secret.isString() ? null : secret.stringValue();
         } catch (CommandRejected rejected) {
             return ExecutionReport.rejected(rejected.getMessage());
         } catch (RuntimeException unreadable) {
@@ -247,7 +271,7 @@ public final class ExecutionLoop {
                 SAFETY_MARGIN,
                 INITIAL_AUTHORITY_BUDGET,
                 "kaas-authority-" + runId)) {
-            return execute(runId, attemptId, assignmentEpoch, command, plan, sourceToken, authority);
+            return execute(runId, attemptId, assignmentEpoch, command, plan, sourceToken, secretToken, authority);
         }
     }
 
@@ -368,6 +392,19 @@ public final class ExecutionLoop {
         return bundle;
     }
 
+    /** The source delivery with this execution's engine input attached, or unchanged when there is none. */
+    private static SandboxSecurityProfile.SourceDelivery withEngineInput(
+            SandboxSecurityProfile.SourceDelivery delivery, EngineInput engineInput) {
+        if (delivery == null || engineInput == null) {
+            return delivery;
+        }
+        return new SandboxSecurityProfile.SourceDelivery(delivery.frame(), delivery.filesystemBytes(), engineInput);
+    }
+
+    private String engine() {
+        return engine;
+    }
+
     /** The policy type whose executions run behind a proxy. Every other type uses the no-network path. */
     private static final String ALLOWLIST = "ALLOWLIST";
 
@@ -433,6 +470,82 @@ public final class ExecutionLoop {
             ValidatedCommand command,
             EgressPlan plan,
             String sourceCapabilityToken,
+            String secretCapabilityToken,
+            ExecutionAuthority authority)
+            throws ControlPlaneUnavailable {
+        return redeemAndRun(
+                runId, attemptId, assignmentEpoch, command, plan, sourceCapabilityToken, secretCapabilityToken,
+                authority);
+    }
+
+    /**
+     * Redeems the run's exact secret set, or returns nothing for a run with none.
+     *
+     * <p>While the run is still CLAIMED, like the source bundle, and for the same reason: redemption requires
+     * it, and a worker that lost its assignment mid-redemption must not go on to deliver plaintext into a
+     * sandbox for a run it no longer owns. Authority is re-read before the request and after the bundle
+     * arrives.
+     *
+     * <p>The bundle is compared with the COMMAND's bindings, not with anything the bundle says about itself: the
+     * key set must be equal, so a bundle with a secret the command did not name is refused rather than trimmed.
+     */
+    List<EngineInput.Secret> redeemSecrets(
+            ValidatedCommand command, String capabilityToken, ExecutionAuthority authority)
+            throws SecretRefused, ControlPlaneUnavailable {
+        if (command.secretBindings().isEmpty()) {
+            if (capabilityToken != null) {
+                // A capability for nothing is not a harmless extra. The control plane issues none for a
+                // secret-free run, so one arriving here was not issued for this command.
+                throw new SecretRefused("CAPABILITY_UNEXPECTED");
+            }
+            return List.of();
+        }
+        if (capabilityToken == null || capabilityToken.isBlank()) {
+            throw new SecretRefused("CAPABILITY_ABSENT");
+        }
+        if (authority.lost()) {
+            throw new SecretRefused("AUTHORITY_LOST");
+        }
+        ControlPlaneClient.SecretRedemption redemption =
+                controlPlane.redeemSecrets(capabilityToken, SecretBundle.MAX_FRAME_BYTES);
+        if (redemption.bundle() == null) {
+            throw new SecretRefused(redemption.refusal());
+        }
+        List<EngineInput.Secret> secrets;
+        try {
+            secrets = SecretBundle.parse(redemption.bundle(), command.secretKeys());
+        } catch (SecretBundle.Rejected rejected) {
+            throw new SecretRefused("BUNDLE_" + rejected.reason().name());
+        }
+        if (authority.lost()) {
+            SecretBundle.clear(secrets);
+            throw new SecretRefused("AUTHORITY_LOST");
+        }
+        return secrets;
+    }
+
+    /** A secret set that could not be obtained. The category travels; nothing else does. */
+    static final class SecretRefused extends Exception {
+        private final String category;
+
+        SecretRefused(String category) {
+            super(category, null, false, false);
+            this.category = category.replaceAll("[^A-Z_]", "_");
+        }
+
+        String category() {
+            return category;
+        }
+    }
+
+    private ExecutionReport redeemAndRun(
+            UUID runId,
+            UUID attemptId,
+            int assignmentEpoch,
+            ValidatedCommand command,
+            EgressPlan plan,
+            String sourceCapabilityToken,
+            String secretCapabilityToken,
             ExecutionAuthority authority)
             throws ControlPlaneUnavailable {
 
@@ -451,6 +564,40 @@ public final class ExecutionLoop {
                     runId, attemptId, assignmentEpoch,
                     "The authorized source bundle was refused (" + rejected.reason() + ").");
         }
+
+        // 2c. THE AUTHORIZED SECRETS, all or none, while the run is still CLAIMED.
+        //
+        // A secret-bearing run whose set cannot be obtained -- revoked, provider unavailable, a bundle that is
+        // not exactly the command's set, authority lost -- ends here, before PROVISIONING, with no sandbox and no
+        // engine. That is an infrastructure failure and never a test result: no tenant assertion ran.
+        List<EngineInput.Secret> secrets;
+        try {
+            secrets = redeemSecrets(command, secretCapabilityToken, authority);
+        } catch (SecretRefused refused) {
+            return infrastructureFailure(
+                    runId, attemptId, assignmentEpoch,
+                    "The authorized secret bundle was refused (" + refused.category() + ").");
+        }
+        try {
+            return provisionAndRun(runId, attemptId, assignmentEpoch, command, plan, redeemedSource, secrets,
+                    authority);
+        } finally {
+            // Best effort, and stated as such: these arrays are the runner's own copies, and clearing them does
+            // not reach whatever copies the JVM or the transport made on the way in.
+            SecretBundle.clear(secrets);
+        }
+    }
+
+    private ExecutionReport provisionAndRun(
+            UUID runId,
+            UUID attemptId,
+            int assignmentEpoch,
+            ValidatedCommand command,
+            EgressPlan plan,
+            SourceBundle redeemedSource,
+            List<EngineInput.Secret> secrets,
+            ExecutionAuthority authority)
+            throws ControlPlaneUnavailable {
 
         // 3. PROVISIONING, announced before the sandbox exists. Announcing afterwards would leave a window in
         //    which a container is running and no deadline covers it.
@@ -522,12 +669,17 @@ public final class ExecutionLoop {
         // engine to find.
         SandboxOutcome outcome;
         String egressDetail = null;
+        boolean engine = CommandValidator.KARATE_ENGINE.equals(engine());
+        EngineInput engineInput = null;
         try {
-            SandboxSecurityProfile.SourceDelivery delivery = frameSource(redeemedSource, authority);
-            // The launcher that will actually run the workload. Derived from the configured one, so it
-            // differs in exactly one respect: it carries this execution's source. A separate launcher built
-            // from scratch could differ in others without anybody noticing.
-            SandboxLauncher workloadLauncher = delivery == null ? launcher : launcher.withSource(delivery);
+            // The engine always receives an engine frame, secret-free or not: the adapter reads it and closes
+            // standard input before Karate starts, so descriptor 0 is closed for every tenant run. Under an
+            // allowlist the frame also carries the proxy endpoint, and is built once the proxy exists.
+            if (engine && !ALLOWLIST.equals(command.networkPolicyType())) {
+                engineInput = EngineInput.of(secrets, null);
+            }
+            SandboxSecurityProfile.SourceDelivery delivery = withEngineInput(
+                    frameSource(redeemedSource, authority), engineInput);
             if (ALLOWLIST.equals(command.networkPolicyType())) {
                 // Refused, never degraded. The command validator already refuses an allowlist this host cannot
                 // enforce, so arriving here without a mechanism or without egress material is a wiring mistake
@@ -561,6 +713,13 @@ public final class ExecutionLoop {
                                 runId, attemptId, assignmentEpoch,
                                 "The egress sandbox profile is not the one this command authorized.");
                     }
+                    if (engine) {
+                        // THE ENGINE BEHIND THE PROXY. Its frame names the proxy and carries the credential
+                        // the proxy checks against the control plane on every request; the allowlist itself is
+                        // enforced there, not here and not in the sandbox.
+                        engineInput = EngineInput.of(secrets, egress.engineEgress(plan.capabilityToken()));
+                        delivery = withEngineInput(delivery, engineInput);
+                    }
                     // The egress workload, not the configured one. Which workload an allowlist execution runs is
                     // a property of the policy rather than of this runner's configuration: an allowlist run whose
                     // workload never touched the network would complete successfully having demonstrated nothing.
@@ -569,7 +728,10 @@ public final class ExecutionLoop {
                     // exactly one -- rather than being rebuilt and quietly differing somewhere else.
                     outcome = runWorkload(
                             delivery == null ? egress.launcher() : egress.launcher().withSource(delivery),
-                            SyntheticProbe.WORKLOAD_EGRESS,
+                            // The engine, when this runner is an engine runner: Karate under the allowlist,
+                            // reaching exactly what the policy permits through the proxy. Otherwise the
+                            // platform's own egress workload, whose run proves the enforcement.
+                            engine ? SyntheticProbe.KARATE_ENGINE : SyntheticProbe.WORKLOAD_EGRESS,
                             expected,
                             runId,
                             authority);
@@ -593,8 +755,12 @@ public final class ExecutionLoop {
                             "The egress mechanism could not be started (" + cannotStart.failure() + ").");
                 }
             } else {
+                // The launcher that will actually run the workload. Derived from the configured one, so it
+                // differs in exactly one respect: it carries this execution's source and engine input. A
+                // separate launcher built from scratch could differ in others without anybody noticing.
+                SandboxLauncher launched = delivery == null ? launcher : launcher.withSource(delivery);
                 outcome = runWorkload(
-                        workloadLauncher, workload, command.sandboxProfileVersion(), runId, authority);
+                        launched, workload, command.sandboxProfileVersion(), runId, authority);
             }
         } catch (SourceBundleRejected rejected) {
             // Refused BEFORE a sandbox exists. The run fails as INFRASTRUCTURE rather than as a test: no
@@ -606,6 +772,15 @@ public final class ExecutionLoop {
             return infrastructureFailure(
                     runId, attemptId, assignmentEpoch,
                     "The authorized source bundle was refused (" + rejected.reason() + ").");
+        } finally {
+            if (engineInput != null) {
+                engineInput.close();
+            }
+        }
+        try {
+            observer.sandboxFinished(runId, outcome);
+        } catch (RuntimeException ignored) {
+            // An observation that failed is not a run that failed.
         }
         // ABSENT OR INCOMPLETE EVIDENCE IS AN INFRASTRUCTURE FAILURE, NOT A TEST RESULT.
         //
@@ -689,11 +864,14 @@ public final class ExecutionLoop {
             // completed on its own evidence. The control plane went to some trouble to return a distinguishable
             // code for exactly this, and nothing here was reading it.
             if (RESULT_ALREADY_SUBMITTED.equals(code)) {
-                return ExecutionReport.completed(outcome.observations().get("workload_outcome"));
+                return ExecutionReport.completed(testPassed(outcome) ? "PASSED" : "FAILED");
             }
             return ExecutionReport.refused("RESULT", code);
         }
-        return ExecutionReport.completed(outcome.observations().get("workload_outcome"));
+        // The verdict the submitted document carries, from the same reading of the outcome that produced it.
+        // It used to be the synthetic workload's own key, which an engine run never prints, so every Karate run
+        // reported a null outcome to its caller while submitting the right one to the control plane.
+        return ExecutionReport.completed(testPassed(outcome) ? "PASSED" : "FAILED");
     }
 
     /**
@@ -815,6 +993,27 @@ public final class ExecutionLoop {
      * tenant any say in it.
      */
     private final SyntheticProbe workload;
+
+    /** Told about every sandbox this loop ran. See {@link ExecutionObserver}. */
+    private final ExecutionObserver observer;
+
+    /**
+     * What a deployment observes about each sandbox: the outcome as the trusted collector produced it.
+     *
+     * <p>Called once per sandbox, after it is gone and before anything is reported to the control plane. What it
+     * receives is already redacted and bounded -- the transcripts, the observation map, the protocol counts --
+     * together with the redactor's own match counts, which are the metric a deployment exports to see that
+     * tenant code is printing secrets. Nothing in it is raw sandbox output.
+     *
+     * <p>An observer that throws does not change the run: the call is guarded, because an observability hook
+     * that could turn a completed run into an infrastructure failure would be a control, not an observation.
+     */
+    @FunctionalInterface
+    public interface ExecutionObserver {
+        ExecutionObserver NONE = (runId, outcome) -> {};
+
+        void sandboxFinished(UUID runId, SandboxOutcome outcome);
+    }
 
     /** The control plane's answer to "you already did this". */
     private static final String RESULT_ALREADY_SUBMITTED = "RESULT_ALREADY_SUBMITTED";

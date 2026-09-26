@@ -1,103 +1,89 @@
 package com.kaas.runner.execution;
 
+import com.kaas.runner.command.CommandValidator;
+import com.kaas.runner.sandbox.ProtocolScanner;
 import com.kaas.runner.sandbox.SandboxOutcome;
-import java.util.Set;
 
 /**
- * What the engine reported, read as untrusted input.
+ * What the engine said, read strictly.
  *
- * <h2>Why this is deliberately tiny</h2>
+ * <p>The adapter prints four platform lines: which engine it loaded, that it consumed the secret channel, and
+ * a verdict (with a category when the verdict is an engine error). They are read from the RAW protocol branch
+ * ({@link ProtocolScanner}), before redaction, as counts and closed-vocabulary words — so a tenant secret that
+ * happens to equal {@code PASSED} cannot change a verdict, and no line a tenant printed is ever kept verbatim.
  *
- * <p>Everything this parses was printed inside a sandbox running arbitrary tenant code. The engine adapter is
- * platform-owned, but it shares a JVM with the tenant's program, so nothing it prints arrives with any more
- * authority than anything the tenant printed itself.
+ * <p>Every key must appear EXACTLY ONCE. Tenant code runs in the same process and can print any of these lines;
+ * it cannot be stopped from doing so. A key seen twice is a stream that answered twice, and the platform refuses
+ * it rather than choosing between the answers. That rule, from KAAS-21, now covers the engine's identity and the
+ * secret-channel marker as well as the verdict.
  *
- * <p>So the surface is one key and three values. There is no run identity here, no timing, no provenance, no
- * counts, no paths and no free text — the runner reconstructs all of that from the command and from the
- * control plane, because a field a hostile process can choose is a field the platform does not own.
+ * <h2>Why the identity is enforced here and not only in CI</h2>
  *
- * <h2>What tenant code can and cannot do to a result</h2>
- *
- * <p>It CAN influence its own test outcome. That is a property of running arbitrary code, not a defect to be
- * engineered away, and ADR-032 accepted it explicitly: the platform's requirement is that a tenant cannot
- * forge platform authority or affect another tenant, not that a tenant cannot lie about its own assertion.
- *
- * <p>It CANNOT forge a platform field, because none is read from here. And it cannot quietly substitute an
- * outcome either: a stream carrying the result key twice is refused rather than resolved, so printing a
- * verdict and letting the adapter print the real one turns the run into an infrastructure failure instead of
- * a forged pass.
+ * <p>Until KAAS-22 the runner never looked at {@code kaas.engine}; only tests and the CI gate did. A deployment
+ * whose image carried a different engine would have produced results the platform believed. The runner now
+ * refuses any verdict from an engine that did not name itself {@code karate} at the exact adjudicated version.
+ * Tenant code can print that line too — and printing it a second time makes the identity ambiguous, which is
+ * refused, not believed.
  */
 public record EngineOutcome(Verdict verdict, String detail) {
 
-    /** The result key. Versioned so a runner that does not understand a later shape refuses rather than guesses. */
-    public static final String PROTOCOL = "kaas.karate-result.v1";
+    public static final String PROTOCOL = ProtocolScanner.RESULT_KEY;
 
-    /** What the adapter may say. A closed set: anything else is malformed, never "probably a failure". */
+    /** The only engine identity this runner accepts: the adjudicated version, and nothing else. */
+    public static final String EXPECTED_IDENTITY = "karate " + CommandValidator.KARATE_VERSION;
+
     public enum Verdict {
-        /** The authorized suite ran and passed. */
         PASSED,
-        /** The authorized suite ran and something in it failed. A tenant result, not a platform one. */
         FAILED,
-        /** The engine could not run the suite. A platform problem, and never reported as a test failure. */
         ENGINE_ERROR,
-        /** Nothing usable was reported. The engine died, was killed, or never reached its own reporting. */
         ABSENT,
-        /** The stream carried more than one verdict, or a value outside the closed set. */
-        MALFORMED
+        MALFORMED,
+        /** The engine did not name itself as the adjudicated Karate, or named itself twice. */
+        UNIDENTIFIED,
+        /** The adapter did not confirm, exactly once, that it consumed and closed the secret channel. */
+        SECRET_CHANNEL_UNCONFIRMED
     }
 
-    /**
-     * Reads the engine's verdict out of a sandbox outcome.
-     *
-     * <p>Ordering matters. Duplicates are checked before the value, so a stream that answered twice is
-     * malformed regardless of what the answers were — otherwise the last one wins and the first is invisible.
-     */
     public static EngineOutcome of(SandboxOutcome sandbox) {
-        Set<String> duplicated = sandbox.duplicatedObservations();
-        if (duplicated.contains(PROTOCOL)) {
-            return new EngineOutcome(
-                    Verdict.MALFORMED, "The engine reported more than one result.");
+        ProtocolScanner.Observed protocol = sandbox.protocol();
+        int results = protocol.count(PROTOCOL);
+        if (results > 1) {
+            return new EngineOutcome(Verdict.MALFORMED, "The engine reported more than one result.");
         }
-        String reported = sandbox.observations().get(PROTOCOL);
-        if (reported == null) {
-            // The adapter's last act is to print this. Its absence means the process did not get there:
-            // a crash, a kill, an OOM, or a hostile System.exit before the suite finished. None of those is
-            // a test outcome, and inferring one from a zero exit status is how "the JVM vanished" becomes
-            // "the tests passed".
+        if (results == 0) {
+            // The adapter's last act is to print this. Its absence means the process did not get there: a
+            // crash, a kill, an OOM, or a hostile System.exit before the suite finished. None of those is a test
+            // outcome, and inferring one from a zero exit status is how "the JVM vanished" becomes "the tests
+            // passed".
             return new EngineOutcome(Verdict.ABSENT, "The engine reported no result.");
+        }
+        String reported = protocol.single(PROTOCOL);
+        if (reported == null) {
+            return new EngineOutcome(Verdict.MALFORMED, "The engine reported an unrecognised result.");
+        }
+        if ("ENGINE_ERROR".equals(reported)) {
+            // The adapter's own category, from a closed platform vocabulary. A free-text field would be
+            // tenant-chosen text in a control-plane record.
+            String category = protocol.single(ProtocolScanner.ENGINE_ERROR_KEY);
+            return new EngineOutcome(Verdict.ENGINE_ERROR, category == null ? "UNSPECIFIED" : category);
+        }
+        if (!EXPECTED_IDENTITY.equals(protocol.single(ProtocolScanner.ENGINE_KEY))) {
+            return new EngineOutcome(
+                    Verdict.UNIDENTIFIED, "The engine did not identify itself as " + EXPECTED_IDENTITY + ".");
+        }
+        if (!"CONSUMED".equals(protocol.single(ProtocolScanner.SECRET_CHANNEL_KEY))) {
+            return new EngineOutcome(
+                    Verdict.SECRET_CHANNEL_UNCONFIRMED,
+                    "The engine did not confirm it consumed and closed its secret channel.");
         }
         return switch (reported) {
             case "PASSED" -> new EngineOutcome(Verdict.PASSED, null);
             case "FAILED" -> new EngineOutcome(Verdict.FAILED, null);
-            case "ENGINE_ERROR" -> new EngineOutcome(
-                    Verdict.ENGINE_ERROR,
-                    // The adapter's own category, which is a closed platform vocabulary, and only when the
-                    // adapter said ENGINE_ERROR. A free-text field would be tenant-chosen text in a
-                    // control-plane record.
-                    categoryOf(sandbox.observations().get("engine_error")));
             default -> new EngineOutcome(Verdict.MALFORMED, "The engine reported an unrecognised result.");
         };
     }
 
-    /** Whether the engine ran the suite at all, whatever the suite then did. */
     public boolean completed() {
         return verdict == Verdict.PASSED || verdict == Verdict.FAILED;
-    }
-
-    /**
-     * Maps an adapter category onto the closed set this runner will repeat.
-     *
-     * <p>Not passed through. The adapter is platform-owned but shares a process with tenant code, so a value
-     * from it is a value a tenant could have printed — and an unrecognised one becomes a fixed word rather
-     * than travelling into a control-plane record.
-     */
-    private static String categoryOf(String reported) {
-        if (reported == null) {
-            return "UNSPECIFIED";
-        }
-        return switch (reported) {
-            case "SOURCE_UNREADABLE", "NO_AUTHORIZED_FEATURES", "ENGINE_FAILURE" -> reported;
-            default -> "UNSPECIFIED";
-        };
     }
 }

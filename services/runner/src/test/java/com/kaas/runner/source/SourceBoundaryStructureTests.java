@@ -28,12 +28,18 @@ class SourceBoundaryStructureTests {
     @Test
     @DisplayName("nothing a tenant supplies can choose the filesystem, its flags, or the program that builds it")
     void theFilesystemIsNotSelectable() throws Exception {
-        // The delivery record carries bytes and a size. There is no component for a path, a mount option, a
-        // filesystem type, an image or a command, so there is no argument a caller could pass to weaken the
-        // boundary and no validation anyone could forget.
+        // The delivery record carries bytes, a size, and the engine input (KAAS-22). There is no component for a
+        // path, a mount option, a filesystem type, an image or a command, so there is no argument a caller could
+        // pass to weaken the boundary and no validation anyone could forget.
         assertThat(SandboxSecurityProfile.SourceDelivery.class.getRecordComponents())
                 .extracting(RecordComponent::getName)
-                .containsExactly("frame", "filesystemBytes");
+                .containsExactly("frame", "filesystemBytes", "engineInput");
+        // And the engine input is itself only bytes the platform framed: it exposes no path, option, image or
+        // command either -- only a count, for evidence.
+        assertThat(java.util.Arrays.stream(com.kaas.runner.sandbox.EngineInput.class.getMethods())
+                        .filter(method -> method.getDeclaringClass() == com.kaas.runner.sandbox.EngineInput.class)
+                        .map(java.lang.reflect.Method::getName))
+                .allMatch(name -> List.of("of", "secretFree", "secretCount", "close", "toString").contains(name));
 
         String launcher = Files.readString(source("sandbox/DockerSandboxLauncher.java"));
         // The SOURCE filesystem's options, matched together with the size that identifies which mount they

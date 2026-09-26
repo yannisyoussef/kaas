@@ -65,6 +65,17 @@ public final class EgressExecution implements AutoCloseable {
     }
 
     /** Whether the proxy is still up. Used to classify an execution truthfully, never to contain it. */
+    /**
+     * Where the engine inside this execution's sandbox reaches its proxy, with the credential it presents.
+     *
+     * <p>For the engine only. The platform's own egress workload is told the same thing through its
+     * environment; the engine's JVM runs with an empty environment (the bootstrap execs it with none), so the
+     * endpoint travels in the engine frame instead, beside the secrets, over the same one-shot channel.
+     */
+    public EngineInput.Egress engineEgress(String capabilityToken) {
+        return new EngineInput.Egress(proxy.addressOn(network.networkId()), EgressProxy.LISTEN_PORT, capabilityToken);
+    }
+
     public boolean proxyIsRunning() {
         return proxy.isRunning();
     }

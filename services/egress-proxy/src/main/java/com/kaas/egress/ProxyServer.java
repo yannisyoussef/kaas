@@ -120,7 +120,13 @@ public final class ProxyServer implements AutoCloseable {
                 // 407 rather than 403: the client is being told to authenticate to the proxy, which is a
                 // different fact from the destination being disallowed, and conflating them would let a
                 // missing credential read as a policy decision in the execution's evidence.
-                respond(client, 407, "Proxy Authentication Required", DenialReason.CAPABILITY_INVALID);
+                // The challenge a client answers with its credential. Without it a client that only speaks
+                // challenge-response -- Apache HttpClient, which Karate uses -- would never send one at all.
+                write(client, "HTTP/1.1 407 Proxy Authentication Required\r\n"
+                        + DENIAL_HEADER + ": " + DenialReason.CAPABILITY_INVALID.name() + "\r\n"
+                        + "Proxy-Authenticate: Basic realm=\"kaas-egress\"\r\n"
+                        + "Content-Length: 0\r\n"
+                        + "Connection: close\r\n\r\n");
                 return;
             }
             if (request.isConnect()) {
@@ -274,18 +280,42 @@ public final class ProxyServer implements AutoCloseable {
      * credential's protection is that it authorizes exactly one execution at one epoch for one policy — but
      * that is not a reason to also leak it into somewhere it outlives the execution.
      */
-    private static String bearerCredential(ProxyRequest request) {
+    static String bearerCredential(ProxyRequest request) {
         String header = request.singleHeader(CREDENTIAL_HEADER);
         if (header == null) {
             return null;
         }
-        String prefix = "bearer ";
-        if (header.length() <= prefix.length()
-                || !header.substring(0, prefix.length()).toLowerCase(Locale.ROOT).equals(prefix)) {
-            return null;
+        String bearer = "bearer ";
+        if (header.length() > bearer.length()
+                && header.substring(0, bearer.length()).toLowerCase(Locale.ROOT).equals(bearer)) {
+            String token = header.substring(bearer.length()).strip();
+            return token.isEmpty() ? null : token;
         }
-        String token = header.substring(prefix.length()).strip();
-        return token.isEmpty() ? null : token;
+        // BASIC, carrying the same capability as its password. Not a second kind of credential: the password
+        // IS the capability token, checked against the control plane exactly as a bearer one is, and the
+        // username means nothing. It exists because an HTTP client inside the sandbox -- the Karate engine's --
+        // authenticates to a proxy only by answering a Basic challenge, and a platform that requires Bearer
+        // would leave the engine with no way to use the allowlist it was authorized for.
+        String basic = "basic ";
+        if (header.length() > basic.length()
+                && header.substring(0, basic.length()).toLowerCase(Locale.ROOT).equals(basic)) {
+            String encoded = header.substring(basic.length()).strip();
+            if (encoded.isEmpty() || encoded.length() > 1024) {
+                return null;
+            }
+            try {
+                String decoded = new String(java.util.Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+                int colon = decoded.indexOf(':');
+                if (colon < 0) {
+                    return null;
+                }
+                String token = decoded.substring(colon + 1);
+                return token.isEmpty() ? null : token;
+            } catch (IllegalArgumentException malformed) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private void respond(Socket client, int status, String phrase, DenialReason reason) throws IOException {

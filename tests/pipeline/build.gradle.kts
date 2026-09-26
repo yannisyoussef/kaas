@@ -24,6 +24,13 @@ val proxyImageContext: Configuration by configurations.creating {
     attributes { attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage::class.java, "kaas-proxy-image-context")) }
 }
 
+/** The Karate engine image's build context, resolved the same way, for the secret-execution pipeline suite. */
+val engineImageContext: Configuration by configurations.creating {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+    attributes { attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage::class.java, "kaas-engine-image-context")) }
+}
+
 dependencies {
     testImplementation(project(":apps:api"))
     testImplementation(project(":services:runner"))
@@ -37,6 +44,10 @@ dependencies {
     // actually tested against.
     testImplementation(testFixtures(project(":services:egress-proxy")))
     proxyImageContext(project(":services:egress-proxy"))
+    engineImageContext(project(":services:karate-engine"))
+    // A real Vault Transit, provisioned the way the Operations contract describes production. Shared with the
+    // control plane's own suites rather than written twice.
+    testImplementation(testFixtures(project(":apps:api")))
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-starter-web")
@@ -112,5 +123,41 @@ tasks.withType<Test>().configureEach {
         .withPathSensitivity(PathSensitivity.RELATIVE)
 
     val contextPath = proxyImageContext.elements.map { it.single().asFile.absolutePath }
-    doFirst { systemProperty("kaas.egress.proxy.context", contextPath.get()) }
+
+    // The engine image, on the same terms: its whole classpath is an input, because the classpath is a security
+    // control under the hostile-execution model.
+    inputs.files(engineImageContext)
+        .withPropertyName("karateEngineImageContext")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    val enginePath = engineImageContext.elements.map { it.single().asFile.absolutePath }
+
+    // Evidence, the local-only runtime override and the gate's sentinel nonce, exactly as in :services:runner.
+    val evidenceDirectory = layout.buildDirectory.dir("evidence/$name").map { it.asFile.absolutePath }
+    val localRuntime = providers.gradleProperty("kaasLocalMediatedRuntime")
+    val sentinelNonce = providers.environmentVariable("KAAS_SENTINEL_NONCE")
+
+    doFirst {
+        systemProperty("kaas.egress.proxy.context", contextPath.get())
+        systemProperty("kaas.karate.engine.context", enginePath.get())
+        systemProperty("kaas.evidence.dir", evidenceDirectory.get())
+        localRuntime.orNull?.let { systemProperty("kaas.test.mediated-runtime", it) }
+        sentinelNonce.orNull?.let { systemProperty("kaas.test.sentinel-nonce", it) }
+    }
+}
+
+/**
+ * Secret-bearing Karate end to end: real Vault Transit, the real control plane, the real runner, the real proxy,
+ * a controlled target, and the engine under the MEDIATING RUNTIME. Part of the secret-execution-gate job, and
+ * excluded from `test` because the synthetic-pipeline job has no runsc and the engine cannot run without it.
+ */
+val secretExecutionPipelineTest = tasks.register<Test>("secretExecutionPipelineTest") {
+    group = "verification"
+    description = "Secret-bearing Karate from tenant write to redacted result, with real Vault and runsc."
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    filter { includeTestsMatching("com.kaas.pipeline.SecretExecutionPipelineTests") }
+}
+
+tasks.named<Test>("test") {
+    filter { excludeTestsMatching("com.kaas.pipeline.SecretExecutionPipelineTests") }
 }

@@ -76,9 +76,23 @@ final class EgressPipelineTopology implements AutoCloseable {
 
     final String targetAddress;
 
+    private final Map<String, String> targetEnvironment;
+
+    private String targetId;
+
     EgressPipelineTopology(DockerClient docker, String probeImage) throws IOException {
+        this(docker, probeImage, Map.of());
+    }
+
+    /**
+     * A topology whose target is configured with the given environment -- for the secret-execution suite, the
+     * SHA-256 of the one bearer token its {@code /auth} path accepts. Never the token itself.
+     */
+    EgressPipelineTopology(DockerClient docker, String probeImage, Map<String, String> targetEnvironment)
+            throws IOException {
         this.docker = docker;
         this.probeImage = probeImage;
+        this.targetEnvironment = Map.copyOf(targetEnvironment);
         this.dns = new TestDnsServer(false);
         try {
             this.proxyImage = EgressProxyImage.build(docker, proxyContext());
@@ -128,13 +142,123 @@ final class EgressPipelineTopology implements AutoCloseable {
     }
 
     private String startTarget() {
+        List<String> environment = new ArrayList<>();
+        targetEnvironment.forEach((name, value) -> environment.add(name + "=" + value));
         CreateContainerResponse created = docker.createContainerCmd(targetImage())
                 .withHostConfig(HostConfig.newHostConfig().withNetworkMode(egressNetworkId))
                 .withLabels(Map.of("kaas.managed", "true", "kaas.resource", "egress-pipeline"))
+                .withEnv(environment)
                 .exec();
         containers.add(created.getId());
         docker.startContainerCmd(created.getId()).exec();
+        targetId = created.getId();
         return created.getId();
+    }
+
+    /** Requests the target's {@code /auth} path accepted, from the target's own log. */
+    int authenticatedRequests() {
+        return count("auth_result=AUTHENTICATED");
+    }
+
+    /** Requests the target's {@code /auth} path refused, from the target's own log. */
+    int rejectedRequests() {
+        return count("auth_result=REJECTED");
+    }
+
+    private int count(String verdict) {
+        String logs = logsOf(targetId);
+        int count = 0;
+        for (String line : logs.split("\n")) {
+            if (line.strip().equals(verdict)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private String logsOf(String containerId) {
+        var collected = new java.io.ByteArrayOutputStream();
+        try {
+            docker.logContainerCmd(containerId).withStdOut(true).withStdErr(true).withFollowStream(false)
+                    .exec(new com.github.dockerjava.api.async.ResultCallback.Adapter<com.github.dockerjava.api.model.Frame>() {
+                        @Override
+                        public void onNext(com.github.dockerjava.api.model.Frame frame) {
+                            collected.writeBytes(frame.getPayload());
+                        }
+                    })
+                    .awaitCompletion(10, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        return collected.toString(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Watches every egress proxy of a runner generation for as long as it lives, and keeps what it logged.
+     *
+     * <p>A proxy container is removed with its execution, and its log with it, so "the proxy did not log the
+     * secret" has to be observed while the proxy exists. The watcher reads each proxy's full log repeatedly
+     * until the proxy is gone, keeping the longest copy it saw.
+     */
+    ProxyLogWatcher watchProxies(String generation) {
+        return new ProxyLogWatcher(generation);
+    }
+
+    final class ProxyLogWatcher implements AutoCloseable {
+        private final java.util.Map<String, String> logs = new java.util.concurrent.ConcurrentHashMap<>();
+        private final Thread thread;
+        private volatile boolean stopped;
+
+        private ProxyLogWatcher(String generation) {
+            thread = new Thread(() -> {
+                while (!stopped) {
+                    try {
+                        for (var proxy : docker.listContainersCmd()
+                                .withLabelFilter(Map.of(
+                                        "kaas.launcher.generation", generation, "kaas.resource", "egress-proxy"))
+                                .exec()) {
+                            String log = logsOf(proxy.getId());
+                            logs.merge(proxy.getId(), log, (old, fresh) -> fresh.length() >= old.length() ? fresh : old);
+                        }
+                        Thread.sleep(250);
+                    } catch (InterruptedException interrupted) {
+                        return;
+                    } catch (RuntimeException gone) {
+                        // A proxy removed between listing and reading. The previous copy stands.
+                    }
+                }
+            }, "proxy-log-watcher");
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        /** Everything every watched proxy logged. */
+        String captured() {
+            return String.join("\n", logs.values());
+        }
+
+        int proxiesSeen() {
+            return logs.size();
+        }
+
+        @Override
+        public void close() throws InterruptedException {
+            stopped = true;
+            thread.join(5_000);
+        }
+    }
+
+    /** Anything this runner generation left behind: containers and networks that should be gone. */
+    List<String> leftovers(String generation) {
+        List<String> left = new ArrayList<>();
+        docker.listContainersCmd().withShowAll(true)
+                .withLabelFilter(Map.of("kaas.launcher.generation", generation))
+                .exec()
+                .forEach(container -> left.add("container " + container.getId()));
+        docker.listNetworksCmd().withFilter("label", List.of("kaas.launcher.generation=" + generation))
+                .exec()
+                .forEach(network -> left.add("network " + network.getId()));
+        return left;
     }
 
     private String targetImage() {
@@ -153,6 +277,11 @@ final class EgressPipelineTopology implements AutoCloseable {
      * in this JVM, on the host; in a real deployment it is whatever reaches them.
      */
     EgressDeployment deployment(int controlPlanePort, String serviceAuthorization) {
+        return deployment(controlPlanePort, serviceAuthorization, ExecutionRuntimeType.DOCKER);
+    }
+
+    /** The same deployment, with its sandboxes under the given runtime. */
+    EgressDeployment deployment(int controlPlanePort, String serviceAuthorization, ExecutionRuntimeType runtime) {
         return new EgressDeployment(
                 proxyImage,
                 probeImage,
@@ -167,7 +296,7 @@ final class EgressPipelineTopology implements AutoCloseable {
                 Duration.ofMillis(AUTHORIZATION_TIMEOUT_MS),
                 Duration.ofMillis(REVALIDATION_INTERVAL_MS),
                 Duration.ofSeconds(3),
-                ExecutionRuntimeType.DOCKER);
+                runtime);
     }
 
     private String addressOn(String containerId, String networkId) {

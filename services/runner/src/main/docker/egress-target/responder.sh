@@ -12,11 +12,19 @@ read -r method target version 2>/dev/null || exit 0
 
 # Drain the remaining headers. Responding before the request has been read can make the peer see a reset
 # instead of the response when the socket closes, which would look like an unreachable target.
+#
+# The Authorization header is kept, in this process only, for the /auth and /echo-auth paths. It is never
+# written to this container's output: the target records a VERDICT, not a credential.
 count=0
+authorization=""
 while [ "$count" -lt 64 ]; do
     read -r line 2>/dev/null || break
-    # The blank line separating headers from body, still carrying its CR.
-    [ -z "$(printf '%s' "$line" | tr -d '\r')" ] && break
+    line=$(printf '%s' "$line" | tr -d '\r')
+    # The blank line separating headers from body.
+    [ -z "$line" ] && break
+    case "$line" in
+    [Aa]uthorization:*) authorization=${line#*: } ;;
+    esac
     count=$((count + 1))
 done
 
@@ -33,6 +41,27 @@ case "$target" in
     # The sentinel the probe looks for. Its presence is what distinguishes "the proxy carried the request"
     # from "something answered".
     send 'HTTP/1.1 200 OK' 'KAAS_EGRESS_TARGET_OK'
+    ;;
+*/auth)
+    # A CONTROLLED TARGET for secret-bearing execution. It accepts exactly one bearer token: the one whose
+    # SHA-256 the test configured in KAAS_EXPECTED_AUTH_SHA256. The token itself is never configured here and
+    # never logged; only its digest is known to this container, and only the verdict is written to stderr,
+    # which is this container's log. An absent or empty expectation accepts nothing.
+    token=${authorization#Bearer }
+    presented=$(printf '%s' "$token" | sha256sum | cut -d' ' -f1)
+    if [ -n "${KAAS_EXPECTED_AUTH_SHA256:-}" ] && [ "$presented" = "$KAAS_EXPECTED_AUTH_SHA256" ]; then
+        echo "auth_result=AUTHENTICATED" >&2
+        send 'HTTP/1.1 200 OK' 'KAAS_SECRET_AUTHENTICATED'
+    else
+        echo "auth_result=REJECTED" >&2
+        send 'HTTP/1.1 401 Unauthorized' 'KAAS_SECRET_REJECTED'
+    fi
+    ;;
+*/echo-auth)
+    # A hostile-shaped target: it refuses and reflects the credential it was sent in the failure body, which is
+    # what a real API error page sometimes does. The engine's failure output then carries the secret, and the
+    # platform must not keep it.
+    send 'HTTP/1.1 500 Internal Server Error' "rejected credential: ${authorization}"
     ;;
 */redirect*)
     # Escape by redirect. The proxy does not follow this; the client may, and that second request is a new

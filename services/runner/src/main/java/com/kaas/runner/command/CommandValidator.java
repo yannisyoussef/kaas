@@ -43,7 +43,7 @@ public final class CommandValidator {
     private static final Set<String> KNOWN_ROOT_FIELDS = Set.of(
             "schemaVersion", "commandId", "commandDigest", "organizationId", "projectId", "runId", "runVersion",
             "attemptId", "attemptNumber", "assignmentEpoch", "runSnapshotDigest", "issuedAt", "expiresAt",
-            "engine", "sourceBundle", "secretCapabilities", "networkPolicy", "sandboxSecurityProfile",
+            "engine", "sourceBundle", "secretBindings", "networkPolicy", "sandboxSecurityProfile",
             "configurationSnapshot", "selection", "parallelism", "scenarioRetry", "executionTimeoutSeconds",
             "artifactPolicy");
 
@@ -51,8 +51,16 @@ public final class CommandValidator {
     private static final Set<String> KNOWN_BUNDLE_FIELDS = Set.of("contentDigest", "features");
     private static final Set<String> KNOWN_FEATURE_FIELDS =
             Set.of("featureId", "revisionId", "logicalPath", "contentDigest");
-    private static final Set<String> KNOWN_SECRET_FIELDS =
-            Set.of("capabilityId", "provider", "referenceId", "bindingKey", "expiresAt");
+    private static final Set<String> KNOWN_SECRET_FIELDS = Set.of("bindingKey", "provider", "referenceId", "version");
+
+    /** The one secret provider a command may name. Fixed by the Operations decision (ADR-034). */
+    public static final String SECRET_PROVIDER = "vault-transit";
+
+    private static final java.util.regex.Pattern BINDING_KEY =
+            java.util.regex.Pattern.compile("^[A-Za-z_][A-Za-z0-9_.-]{0,127}$");
+
+    /** The most secrets one command may bind, matching the control plane's own bound. */
+    private static final int MAX_SECRET_BINDINGS = 50;
     private static final Set<String> KNOWN_NETWORK_FIELDS =
             Set.of("policyRevisionId", "type", "version", "digest");
     private static final Set<String> KNOWN_SANDBOX_FIELDS =
@@ -304,10 +312,12 @@ public final class CommandValidator {
         if (!bundle.get("features").isArray()) {
             throw new CommandRejected("A source bundle carries a feature array.");
         }
-        if (!root.get("secretCapabilities").isArray() || !root.get("secretCapabilities").isEmpty()) {
-            // No production secret provider exists, so a command carrying secret capabilities is describing
-            // something that cannot have been issued honestly.
-            throw new CommandRejected("This runner redeems no secrets, and this command binds some.");
+        List<ValidatedCommand.SecretBinding> secretBindings = secretBindings(root);
+        if (!secretBindings.isEmpty() && !KARATE_ENGINE.equals(executableEngine)) {
+            // The only workload that can receive a secret is the engine adapter, which reads its engine frame
+            // after the bootstrap hands over. The platform's synthetic workload has no such channel, so a
+            // command binding secrets for it is describing something that cannot happen honestly.
+            throw new CommandRejected("This runner's workload cannot receive secrets, and this command binds some.");
         }
 
         List<String> tags = new ArrayList<>();
@@ -337,7 +347,40 @@ public final class CommandValidator {
                 text(sandbox, "profileVersion"),
                 text(sandbox, "sandboxRuntime"),
                 Collections.unmodifiableList(tags),
-                sourceBundleAuthorization(root));
+                sourceBundleAuthorization(root),
+                secretBindings);
+    }
+
+    /**
+     * The secrets the command authorizes: key, reference and version, validated one by one.
+     *
+     * <p>These are the ONLY keys the runner will accept in a secret bundle. The bundle is compared against this
+     * set exactly, so a control plane that delivered one secret more than the command named would be refused
+     * rather than believed.
+     */
+    private static List<ValidatedCommand.SecretBinding> secretBindings(JsonNode root) throws CommandRejected {
+        JsonNode secrets = root.get("secretBindings");
+        if (secrets.size() > MAX_SECRET_BINDINGS) {
+            throw new CommandRejected("A command binds at most fifty secrets.");
+        }
+        List<ValidatedCommand.SecretBinding> bindings = new ArrayList<>();
+        java.util.Set<String> keys = new java.util.HashSet<>();
+        for (JsonNode secret : secrets) {
+            String key = text(secret, "bindingKey");
+            if (!BINDING_KEY.matcher(key).matches() || !keys.add(key)) {
+                throw new CommandRejected("A command's secret binding keys are well-formed and distinct.");
+            }
+            if (!SECRET_PROVIDER.equals(text(secret, "provider"))) {
+                throw new CommandRejected("A command names a secret provider this runner does not know.");
+            }
+            UUID reference = uuid(secret, "referenceId");
+            long version = integral(secret, "version");
+            if (version < 1 || version > 100_000) {
+                throw new CommandRejected("A command pins a secret version between 1 and 100000.");
+            }
+            bindings.add(new ValidatedCommand.SecretBinding(key, reference, (int) version));
+        }
+        return List.copyOf(bindings);
     }
 
     /**
@@ -430,20 +473,24 @@ public final class CommandValidator {
                 update(sha, stripSha256(text(feature, "contentDigest")));
             }
 
-            JsonNode secrets = root.get("secretCapabilities");
+            JsonNode secrets = root.get("secretBindings");
+            if (secrets == null || !secrets.isArray()) {
+                throw new CommandRejected("A command carries a secretBindings array.");
+            }
             update(sha, "SECRET_BINDING_COUNT");
             update(sha, Integer.toString(secrets.size()));
             List<JsonNode> orderedSecrets = new ArrayList<>();
             secrets.forEach(orderedSecrets::add);
-            orderedSecrets.sort(java.util.Comparator.comparing(node -> node.get("bindingKey").asString()));
+            orderedSecrets.sort(java.util.Comparator.comparing(node -> String.valueOf(node.get("bindingKey"))));
             for (JsonNode secret : orderedSecrets) {
-                rejectUnknown(secret, KNOWN_SECRET_FIELDS, "secretCapabilities[]");
+                rejectUnknown(secret, KNOWN_SECRET_FIELDS, "secretBindings[]");
                 update(sha, "SECRET_BINDING");
                 update(sha, text(secret, "bindingKey"));
                 update(sha, text(secret, "provider"));
                 update(sha, text(secret, "referenceId"));
-                update(sha, text(secret, "capabilityId"));
-                update(sha, text(secret, "expiresAt"));
+                // The pinned version: a command whose version could be edited in flight could be pointed at
+                // a rotated or revoked value without its digest noticing.
+                update(sha, Long.toString(integral(secret, "version")));
             }
 
             JsonNode network = root.get("networkPolicy");

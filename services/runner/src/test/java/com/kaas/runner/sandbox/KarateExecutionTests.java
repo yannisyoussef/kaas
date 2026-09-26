@@ -418,22 +418,15 @@ class KarateExecutionTests {
      * test expected. A constant here would make the gate assert the test's own opinion.
      */
     private static void record(SandboxOutcome outcome) {
-        String directory = System.getenv("RUNNER_TEMP");
-        if (directory == null || directory.isBlank()) {
-            return; // Off CI there is no gate to read it.
-        }
-        String evidence = "engine_identity=" + outcome.observations().getOrDefault("kaas.engine", "ABSENT")
-                + "\nengine_verdict=" + EngineOutcome.of(outcome).verdict() + "\n";
-        try {
-            java.nio.file.Files.writeString(
-                    java.nio.file.Path.of(directory, "karate-execution-evidence.txt"),
-                    evidence,
-                    StandardCharsets.UTF_8,
-                    java.nio.file.StandardOpenOption.CREATE,
-                    java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
-        } catch (java.io.IOException unwritable) {
-            throw new java.io.UncheckedIOException(unwritable);
-        }
+        // The runtime is the one the DAEMON reported it assigned, read back before the engine started -- not the
+        // one the profile asked for. The launcher refuses any other, so a value here is a runtime that ran.
+        String identity = outcome.protocol().single(com.kaas.runner.sandbox.ProtocolScanner.ENGINE_KEY);
+        SandboxEvidence.write("karate-execution-evidence.txt",
+                "engine_identity=" + (identity == null ? "ABSENT" : identity) + "\n"
+                        + "engine_verdict=" + EngineOutcome.of(outcome).verdict() + "\n"
+                        + "runtime=" + outcome.assignedRuntime() + "\n"
+                        + "secret_channel=" + outcome.protocol().single(
+                                com.kaas.runner.sandbox.ProtocolScanner.SECRET_CHANNEL_KEY) + "\n");
     }
 
     /**
@@ -484,9 +477,12 @@ class KarateExecutionTests {
                 // GVISOR, and not a preference. The bootstrap's freeze is a `mount`, and the baseline runtime
                 // refuses it: without this every test below measures a container that never started an engine.
                 SandboxSecurityProfile.version1(
-                        SandboxTestSupport.karateEngineImage(), ExecutionRuntimeType.GVISOR),
+                        SandboxTestSupport.karateEngineImage(), SandboxTestSupport.mediatedRuntime()),
+                // A secret-free engine input: the adapter reads it and closes standard input for every run, so a
+                // secret-free execution takes exactly the path a secret-bearing one does, minus the values.
                 new SandboxSecurityProfile.SourceDelivery(
-                        SourceFrame.of(bundle), SourceBundleContract.SOURCE_FILESYSTEM_BYTES));
+                        SourceFrame.of(bundle), SourceBundleContract.SOURCE_FILESYSTEM_BYTES,
+                        EngineInput.secretFree()));
 
         return SandboxTestSupport.launcher(profile, generation)
                 .run(new SandboxLaunchRequest(

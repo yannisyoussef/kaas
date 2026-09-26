@@ -262,7 +262,8 @@ class ExecutionLoopSourceTests {
                 "DOCKER",
                 List.of(),
                 new ValidatedCommand.SourceBundleAuthorization(
-                        SourceBundle.bundleDigest(expected), List.of(feature)));
+                        SourceBundle.bundleDigest(expected), List.of(feature)),
+                List.of());
     }
 
     private static byte[] archiveOf(Map<String, byte[]> entries) {
