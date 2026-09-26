@@ -25,9 +25,9 @@ review P1s were harness and test-gate defects and are fixed. Every P2 is fixed o
 mutation battery (§53) killed every mutant but one equivalent mutant, after one real survivor (K22-17) exposed a
 fail-open leak scan, which is now fixed and its mutant killed.
 
-**CI status of this report's code:** the ten-job CI run of record is on `287c45e` (all green, §56). The review
-fixes after it (`bc44606`, `3a7b3b5`, and the commit adding this report) had **not been through CI** when this
-was written: the push was not permitted in the implementing session. See §63.
+**CI status:** the final SHA `5ecf07a` passed all ten CI jobs in run **36274892142**, with complete secret-gate
+evidence under runsc (§56, §63). The implementation had passed earlier as `287c45e` (run 36269755525); the final
+run covers the review fixes made after it.
 
 ## 2. Starting commit
 
@@ -475,9 +475,22 @@ container metadata, environment, cmdline or system properties, `engine_stdin_aft
 `secret_authenticated_request=true`, revoked version refused, provider outage refused, secret-free run with the
 provider down `PASSED`, `sentinel_in_reports=false`, `containers=0 networks=0 runsc_processes=0`.
 
-**Not yet through CI:** `bc164cc` (docs, `SecretScopeExactnessTest`), `bc44606` (review fixes), `3a7b3b5` (docs)
-and the commit adding this report. Local results for them: API 365, runner 264, engine 11, proxy 118 — all green,
-nothing skipped; secret suite 6/6 and E2E 5/5 as battery baselines (runc, guard relaxed for the E2E).
+**Final run: 36274892142 on `5ecf07a`**, which includes everything after `287c45e` — `bc164cc` (docs,
+`SecretScopeExactnessTest`), `bc44606` (review fixes), `3a7b3b5` (docs) and `5ecf07a` (this report). All ten jobs
+`success`. Its secret gate, under runsc: `SecretBearingKarateExecutionTests` executed 6 and
+`SecretExecutionPipelineTests` executed 5, skipped 0, failures 0; `secret_provider=vault-transit`,
+`secret_provider_auth=VALID`, `secret_encryption=VALID`, `secret_version_pinned=true`, `secret_capability=VALID`,
+`secret_redemption=VALID`, `secret_authenticated_request=true`, raw stdout and stderr secrets observed,
+`persisted_raw_secret=false`, `redaction=VALID`, `docker_log_driver=none`, `docker_persistent_secret=false`, no
+value in container metadata, environment, cmdline, system properties, database, queue, host files or proxy logs,
+`engine_stdin_after_frame=-1`, engine `karate 2.1.2` `PASSED`, `runtime=runsc`, `revoked_version_refused=true`,
+`provider_outage_refused_secret_run=true`, `secret_free_run_with_provider_down=PASSED`,
+`sentinel_nonce_applied=true`, `sentinel_in_reports=false`, `containers=0 networks=0 runsc_processes=0`.
+Values in the final run's evidence are computed from observations (§52), and the host-file scan is the
+fail-closed version (§44).
+
+Local results before that push: API 365, runner 264, engine 11, proxy 118 — all green, nothing skipped; secret
+suite 6/6 and E2E 5/5 as battery baselines (runc, guard relaxed for the E2E; corroboration only).
 
 ## 57. Existing gate hardening
 
@@ -529,12 +542,23 @@ control plane only; the CA file; runsc on execution hosts; https (or loopback) f
 
 ## 63. Final verdict
 
-The implementation of record (`287c45e`) passed all ten CI jobs with complete secret-gate evidence. The review
-fixes after it are verified locally only, and the push that would put them through CI was not permitted in the
-implementing session. Under this slice's own rule — do not call the slice complete from local tests — the verdict
-recorded here is:
+**SECRET-BEARING KARATE EXECUTION COMPLETE**
 
-**SECRET EXECUTION INCOMPLETE** — pending a green ten-job CI run on the final SHA. Nothing else is outstanding.
+| | |
+| --- | --- |
+| Final SHA | `5ecf07a2c39d10385108b4503bc6a80febb751e3` |
+| CI run | 36274892142 |
+| Jobs | 10 of 10 `success`: backend, hostile-execution-gate, synthetic-execution-pipeline, execution-egress-gate, strong-runtime-gate, karate-execution-gate, secret-execution-gate, web, contracts, infrastructure |
+| Secret gate | 6 + 5 tests executed, 0 skipped; every evidence key as required, under `runtime=runsc` (§56) |
+
+Earlier drafts of this section recorded **SECRET EXECUTION INCOMPLETE**. The review fixes had only been
+verified locally, and the push was not permitted in the implementing session. That was superseded once the
+final SHA was pushed and passed CI.
+
+This verdict is about application capability. It is **not** deployment readiness: the production runner daemon
+and all deployment work remain deferred (§60), and Ops must grant the AppRole `read` on
+`transit/keys/kaas-tenant-secrets` (§61). GitHub branch-protection state was not read, so nothing here claims
+which checks are required.
 
 ## 64. Recommended next slice
 
