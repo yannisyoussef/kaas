@@ -92,10 +92,11 @@ side:
 `MALFORMED` is the anti-forgery rule. Tenant code can print the protocol line — measured, via
 `System.out.println` through Java interop; Karate's own `print` does not reach stdout at all. Rather than
 choosing between two answers, the platform refuses a stream that answered twice. **Forging turns a run into an
-infrastructure failure, not into a pass** — as long as the adapter gets to answer too. It starts its verdict with
-a newline so that tenant code cannot hide it on an unterminated line (KAAS-22 review). A tenant that forges and
-then calls `System.exit` before the adapter answers is **not** caught: there is then exactly one verdict, and it
-is the tenant's. That is the tenant choosing its own outcome, which ADR-032 already accepted.
+infrastructure failure, not into a pass** — as long as the adapter gets to answer too. A tenant that forges and
+then calls `System.exit` before the adapter answers, or that replaces `System.out`, is **not** caught: there is
+then exactly one verdict, and it is the tenant's. That is the tenant choosing its own outcome, which ADR-032
+already accepted. (Leaving stdout mid-line to swallow the adapter's line does not work: Karate's console summary
+ends the line first, and the adapter starts its verdict with a newline besides.)
 
 ## What is deliberately not confined
 

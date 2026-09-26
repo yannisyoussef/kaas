@@ -334,12 +334,13 @@ public final class KaasKarateAdapter {
     /**
      * The verdict, on a line of its own whatever tenant code left on stdout.
      *
-     * <p>The leading newline is the point. Tenant code shares this stream, and a tenant that printed a forged
-     * {@code PASSED} on stderr and then left stdout mid-line would otherwise have this line glued onto its own
-     * unterminated one -- where the runner would never count it, and the forgery would be the only verdict. With
-     * it, this line is always a line, a forgery is always a second occurrence, and a second occurrence is
-     * {@code MALFORMED}. (A tenant that forges and then exits before this runs is not stopped by anything the
-     * adapter prints; that is recorded as part of the tenant-owned outcome in ADR-034.)
+     * <p>The leading newline is defence in depth. Tenant code shares this stream, and a tenant that printed a
+     * forged {@code PASSED} on stderr and then left stdout mid-line would, without it, have this line glued onto
+     * its own unterminated one, where the runner would never count it. Under Karate 2.1.2 that does not happen
+     * today -- Karate's console summary ends any open line first (measured) -- but this line should not depend
+     * on what the engine happens to print before it. A tenant that forges and then exits, or that replaces
+     * {@code System.out}, is not stopped by anything the adapter prints; that is the tenant-owned outcome
+     * recorded in ADR-034.
      */
     private static void emit(String outcome) {
         System.out.print("\n" + PROTOCOL + "=" + outcome + "\n");

@@ -199,11 +199,16 @@ deployment readiness.**
   state are re-read after the Vault call, but a revocation committing between that check and the socket write is
   not seen, and a sandbox that already holds a value keeps it until it ends. Revocation stops every *later*
   redemption and every new run; it does not reach into a running JVM.
-- **The verdict remains tenant-controlled, by design.** The adapter starts its verdict with a newline, so a
-  tenant cannot hide the verdict by leaving stdout mid-line: a forged result then always appears twice and is
-  `MALFORMED`. A tenant that prints a forged `PASSED` and then exits the JVM before the adapter runs is not
-  stopped: the adapter shares a JVM with tenant code, so no secret it holds could authenticate its line. This
-  is the tenant choosing its own outcome, which it can also do by writing a test that always passes.
+- **The verdict remains tenant-controlled, by design.** A tenant that prints a forged `PASSED` and then exits
+  the JVM before the adapter runs, or that replaces `System.out` and so controls every byte the adapter prints,
+  is not stopped: the adapter shares a JVM with tenant code, so no secret it holds could authenticate its line.
+  This is the tenant choosing its own outcome, which it can also do by writing a test that always passes. The
+  narrower trick of leaving stdout mid-line to swallow the verdict does not work under Karate 2.1.2 (its console
+  summary ends the open line first, measured); the adapter also starts its verdict with a newline so that
+  does not depend on the engine.
+- **The engine image has no SLF4J provider** (measured: SLF4J falls back to its no-op logger), so Karate's
+  HTTP client logs nothing, including request headers. Adding a logging backend to the engine would change that
+  and would need the encoded-forms decision below first.
 - **Encoded forms are not redacted**, including ones a tenant's HTTP client produces unprompted: an
   `Authorization: Basic` header carries `base64(user:password)`, a JSON body escapes a PEM's newlines, a URL
   percent-encodes. The one encoding the *platform* introduces — its proxy credential as

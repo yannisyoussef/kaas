@@ -156,9 +156,13 @@ class KarateExecutionTests {
                 .isEqualTo(EngineOutcome.Verdict.MALFORMED);
         assertThat(engine.completed()).isFalse();
 
-        // The quieter variant: forge on stderr, then leave stdout mid-line so the adapter's own verdict is glued
-        // onto the tenant's unterminated text and never counted. The adapter starts its verdict with a newline,
-        // so its line is a line whatever was left open, and the forgery is a second occurrence.
+        // The quieter variant: forge on stderr, then leave stdout mid-line, hoping the adapter's own verdict is
+        // glued onto the tenant's unterminated text and never counted. MEASURED: under Karate 2.1.2 this does not
+        // work even against an adapter that prints no leading newline, because Karate writes its console
+        // summary to stdout after the scenario and that summary ends the open line first (K22-41 survives for
+        // that reason, recorded as an equivalent mutant). The adapter's leading newline is defence in depth for
+        // an engine that stops printing one. A tenant that replaces System.out outright controls every byte the
+        // adapter prints; that is the tenant-owned verdict ADR-034 records, not something this test can refuse.
         SandboxOutcome swallowed = execute(Map.of(
                 "features/swallower.feature",
                 """
