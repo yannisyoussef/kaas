@@ -24,18 +24,21 @@
 | [024](024-synthetic-execution-lifecycle.md) | The four execution phases, bounded phase deadlines, orthogonal outcomes, result provenance, and a truthfully named synthetic engine | IMPLEMENTED; what executes is a platform-owned synthetic workload, not a test engine |
 | [025](025-execution-egress-remains-deny-all.md) | Egress stays deny-all until it can be enforced, with the eight requirements an allowlist must satisfy | ACCEPTED; PARTIALLY SUPERSEDED by 026 |
 | [026](026-enforceable-assignment-scoped-execution-egress.md) | Enforceable assignment-scoped egress through a purpose-built trusted proxy the sandbox cannot route around | ACCEPTED; allowlist enforceable for synthetic execution |
-| [027](027-signed-runtime-security-attestations.md) | Sandbox security evidence is signed by the gate that observed it and verified against a pinned key, replacing a self-consistency digest an operator wrote | ACCEPTED; v3 required, v2 refused |
-| [028](028-mediated-sandbox-runtime.md) | The sandbox runs under a mediating runtime with no fallback to the baseline, and the mandatory control set is scoped to the runtime that produced the evidence | ACCEPTED; v4 required, v3 refused; ADR-022 stays open |
+| [027](027-signed-runtime-security-attestations.md) | Sandbox security evidence is signed by the gate that observed it and verified against a pinned key, replacing a self-consistency digest an operator wrote | ACCEPTED; introduced v3 (v5 is current, see 032) |
+| [028](028-mediated-sandbox-runtime.md) | The sandbox runs under a mediating runtime with no fallback to the baseline, and the mandatory control set is scoped to the runtime that produced the evidence | ACCEPTED; introduced v4 (v5 is current, see 032); ADR-022 closed by 032 |
 | [022](022-hostile-execution-boundary-and-synthetic-probe.md) *(amended)* | The hostile-content runtime prerequisite is satisfied **for the mediated runtime**, permitting inert tenant-byte delivery only | AMENDED 2026-09-05; execution still not approved |
 | [029](029-continuous-execution-authority.md) | The lease bounds how long a worker may keep executing, not only what it may write: revocation stops a running sandbox, and an unrenewable lease stops it fail-closed | ACCEPTED; ADR-022 stays open |
 | [030](030-inert-tenant-source-delivery.md) | Tenant-authored bytes enter the sandbox as data — mounted read-only, hashed, compared — and are never parsed, executed or interpreted; the mediated mount does not carry `noexec`, and that gap is reported rather than downgraded | ACCEPTED; ADR-022 stays open |
 | [031](031-sandbox-private-hardened-source-filesystem.md) | The source filesystem is a sandbox-private tmpfs a trusted bootstrap populates and then freezes, with no host mount of tenant source at all: `noexec` becomes real, and `nodev` remains unimplemented by the runtime and is reported as a gap | ACCEPTED; supersedes ADR-030's mechanism; ADR-022 stays open |
 | [032](032-tenant-execution-readiness.md) | Tenant Karate is arbitrary JVM code and containment is the boundary; signed evidence binds the runtime binary (attestation v5); the missing `nodev` is accepted with tested compensating controls; one secret-free execution slice is authorized under binding restrictions | ACCEPTED; closes ADR-022's runtime prerequisite |
+| [034](034-assignment-scoped-secrets-vault-transit.md) | Vault Transit is a key service only and KaaS PostgreSQL holds ciphertext; runs pin (reference, version); one assignment-scoped capability redeems exactly the pinned set, revalidated before and after decryption; secrets reach Karate only through the engine frame after the freeze; tenant-code sandboxes keep no Docker log and exact values are redacted before the output ceiling; transformed exfiltration is out of scope | ACCEPTED; re-adjudicates 033's secret-free restriction for Karate; deployment prerequisites open |
 | [033](033-first-secret-free-karate-execution.md) | Real Karate 2.1.2 executes tenant features in an isolated engine module whose classpath is the security control; the version pin is verified where the image is built; a duplicated result key is refused rather than resolved; absent evidence is never a pass; source resolution is deliberately NOT confined — measurement showed a wrapper would not be a boundary, so what there is to read is confined instead; zero secret bindings, refused before the provider check | ACCEPTED; reverses ADR-032's read-confinement expectation |
 
-Deferred topics without active decisions remain: concrete object-storage/upload adapter, secret **delivery**
-mechanism and a real secret provider, outbox and CREATED-run retention policy, self-service quarantine
-recovery, OpenTelemetry implementation, worker heartbeating during execution, and test-engine integration.
+Deferred topics without active decisions remain: concrete object-storage/upload adapter, outbox and CREATED-run
+retention policy, self-service quarantine recovery, OpenTelemetry implementation, persisted tenant output and
+structured results, and deployment readiness (runner daemon, health, migrate-only entrypoint, attestation and
+service-token refresh). Secret delivery and a real provider are decided by ADR-034, test-engine integration by
+ADR-033, and worker heartbeating during execution by ADR-029.
 
 Source capability issuance and the egress policy **model** are decided by ADR-023 and are no longer deferred —
 what remains deferred for each is the part this platform cannot yet do: delivering a source bundle into a
@@ -119,6 +122,9 @@ closes the runtime-identity gap two earlier slices carried, accepts the runtime'
 compensating controls, and permits exactly one secret-free execution slice under restrictions listed in
 `docs/security/tenant-execution-readiness.md`.
 
-**Secrets, artifacts and report persistence remain unadjudicated by any ADR.**
+ADR-034 adjudicates secrets: the Operations-selected provider (Vault Transit as a key service, ciphertext in
+PostgreSQL), pinned versions, assignment-scoped capabilities, runtime-only delivery, and exact-value
+redaction with no Docker log store for tenant code. **Artifacts and report persistence remain unadjudicated
+by any ADR.**
 
 `IMPLEMENTED` means verified by repository code or tooling. `PROPOSED` means design intent only. `DEFERRED` means no decision is active and implementation must not assume one.

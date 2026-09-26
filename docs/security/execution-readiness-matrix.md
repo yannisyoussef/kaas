@@ -104,19 +104,19 @@ inventory and the classification of each.
 | Java interop reaches any classpath class | **ALLOWED** — unrestricted by the engine, contained by the sandbox, bounded by classpath minimality |
 | JavaScript engine | `karate-js`, no host-access gate; treated as arbitrary code |
 | reflection, dynamic loading, native access | **ALLOWED**, contained |
-| `read()` / `call()` / `classpath:` path containment | **REQUIRES PLATFORM WRAPPER IN KAAS-21** — must be bounded to `/kaas/source` and proven, not inherited from the engine's own normalisation |
-| `read()` of a URL | **UNKNOWN — must be established in KAAS-21** before it can be permitted or refused |
-| classpath minimality | **REQUIRED OF THE FUTURE IMAGE** — the classpath is the control governing what exists to be reached |
+| `read()` / `call()` / `classpath:` path containment | **NOT CONFINED, BY DECISION (ADR-033)** — KAAS-20 expected a wrapper bounded to `/kaas/source`; measurement in KAAS-21 showed a wrapper would not be a boundary while `Files.readAllBytes` is one `Java.type` away, so the platform confines what there is to read (a digest-pinned image, three environment variables, no host mount) and what gets *executed* (the manifest) |
+| `read()` of a URL | **MEASURED (KAAS-21)** — not a network operation in 2.1.2 |
+| classpath minimality | **ENFORCED** — `services/karate-engine` is the only module carrying Karate; the image classpath is the security control |
 
 ## Output
 
 | property | status |
 |---|---|
-| stdout/stderr bounded and sanitised | **ENFORCED** — existing collector, ceiling and sanitiser |
-| the result is platform-shaped | **REQUIRED IN KAAS-21** — a platform-owned adapter, not engine stdout as a protocol |
+| stdout/stderr bounded and sanitised | **ENFORCED** — tenant output is read live (LogConfig=none), redacted of exact secret values before the ceiling, decoded incrementally, sanitised (ADR-034) |
+| the result is platform-shaped | **ENFORCED (KAAS-21)** — a platform-owned adapter; the protocol is read from the raw stream as counts and vocabulary words; the runner enforces the engine identity itself (KAAS-22) |
 | test vs infrastructure outcome orthogonality | **ENFORCED** — and must not be collapsed onto an engine exit code |
-| no rich artifacts, no HTML reports | **REQUIRED RESTRICTION FOR KAAS-21** |
-| secrets | **OUT OF SCOPE** — first execution is secret-free and must refuse a run with secret bindings |
+| no rich artifacts, no HTML reports | **ENFORCED RESTRICTION** — every Karate report form is off |
+| secrets | **IMPLEMENTED (ADR-034)** — pinned versions, one assignment-scoped capability, delivery after the freeze through the engine frame, exact-value redaction; transformed values are out of scope |
 
 ## Supply chain
 
@@ -125,5 +125,6 @@ inventory and the classification of each.
 | runtime binary | pinned by release and digest; now bound into signed evidence |
 | probe image | pinned by digest; bootstrap compiled from repository source with `-Werror` |
 | JVM probe image | pinned by digest, corroborated from two sources |
-| Karate dependency | **NOT ADDED** — evaluated as an artifact only |
-| Karate transitive set | recorded in the threat model; versions to be pinned when the dependency is added |
+| Karate dependency | **PINNED** — `io.karatelabs:karate-core:2.1.2` in `services/karate-engine` only (KAAS-21); netty forced to 4.2.17.Final |
+| Karate transitive set | resolved by Gradle into the engine image context; the image build refuses a wrong, missing or duplicate engine |
+| Vault (CI) | `hashicorp/vault:1.18.5` pinned by multi-architecture index digest (KAAS-22) |

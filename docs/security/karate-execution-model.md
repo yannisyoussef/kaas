@@ -61,18 +61,18 @@ And the following are REQUIREMENTS, each observed rather than argued:
 
 | requirement | evidence |
 |---|---|
-| no capability at all | `java_capabilities=EMPTY`, `NoNewPrivs=1` |
+| no capability at all | `java_capabilities=EMPTY`; `NoNewPrivs` is **not observable** under the mediating runtime (`java_no_new_privs=unsupported` in CI) and is covered jointly by the empty bounding set and the absence of setuid binaries |
 | cannot execute generated code | `java_tmp_write=true` **and** `java_tmp_exec=false` |
 | cannot write, chmod, execute or remount the source filesystem | all `false`, attacked from Java |
 | cannot create a device node | `java_mknod=false` |
 | no network at all under `DENY_ALL` | DNS and three socket destinations all `false` |
 | no platform credential, no daemon socket | environment names asserted; `java_docker_socket=false` |
-| bounded concurrency | thread ceiling reached and reported |
+| bounded concurrency | **not a control under the mediating runtime**: threads are not charged against the PID ceiling (`java_threads_bounded=false`, asserted in CI). Memory and the wall clock bound a thread explosion; this is an accepted residual |
 
 ## The consequence for the classpath
 
 Under this model the classpath **is** a security control, and the only one governing which classes exist to be
-reached. The future engine image must contain a JRE, Karate, and its declared dependencies — and nothing else.
+reached. The engine image (`services/karate-engine`, since ADR-033) contains a JRE, Karate, its declared dependencies and the platform adapter — and nothing else.
 No control-plane client, no Docker client, no cloud SDK, no database driver, no secret-provider client, no
 package manager, no compiler.
 
@@ -80,20 +80,26 @@ package manager, no compiler.
 
 ## What this model does not excuse
 
-It does not make the missing `nodev` acceptable by itself, it does not make an unbound runtime identity
-acceptable, and it does not authorize secrets. Those are adjudicated separately in
-[`tenant-execution-readiness.md`](tenant-execution-readiness.md).
+It does not make the missing `nodev` acceptable by itself, and it does not make an unbound runtime identity
+acceptable. Those are adjudicated separately in [`tenant-execution-readiness.md`](tenant-execution-readiness.md).
+Secrets are adjudicated by [ADR-034](../adr/034-assignment-scoped-secrets-vault-transit.md): under this model a
+secret delivered to the engine is readable by tenant code by design, so its protection is authorization, scope,
+isolation, lifetime and the platform's own redaction — see
+[`tenant-secret-execution.md`](tenant-secret-execution.md).
 
 It also does not mean the engine's own features are irrelevant. `read()`, `call()` and `classpath:` resolution
-decide what tenant source can reach *within* the sandbox, and the first execution slice must bound them to the
-authorized bundle — see [`karate-hostile-execution-threat-model.md`](karate-hostile-execution-threat-model.md).
+decide what tenant source can reach *within* the sandbox. ADR-032 expected the first execution slice to bound
+them to the authorized bundle; **ADR-033 reversed that after measurement** — a wrapper over `read()` would not
+be a boundary while `Files.readAllBytes` is one `Java.type` away — so the platform confines what there is to
+read instead, and source resolution is **not** claimed to be confined to `/kaas/source`. See
+[`karate-hostile-execution-threat-model.md`](karate-hostile-execution-threat-model.md) and ADR-033.
 
 ## Sources
 
 Version and dependency facts were read from Maven Central metadata and from the published artifacts
 themselves; interop behaviour was read by disassembling `karate-js-2.1.2.jar` and `karate-core-2.1.2.jar` with
-`javap`. The jars were fetched into a scratch directory for inspection and **no Karate dependency was added to
-any build file**.
+`javap`. At the time of this evaluation (KAAS-20) the jars were fetched into a scratch directory for inspection
+and no Karate dependency was added; KAAS-21 later added exactly 2.1.2 to `services/karate-engine` only.
 
 - `https://repo1.maven.org/maven2/io/karatelabs/karate-core/maven-metadata.xml` — latest release 2.1.2,
   published 2026-08-14; the older `com.intuit.karate` coordinates stop at 1.4.1 (2023-10-16).

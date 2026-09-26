@@ -224,9 +224,11 @@ the suite is out of `check` on the same terms as every other mediated-runtime su
 `StrongRuntimeKarateExecutionTests` was deleted: with the main suite running under `runsc`, its three
 questions were a strict subset of the eleven.
 
-**Stated plainly: the 11 engine tests have never been executed under the runtime they now target.** Their
-first real run is in CI, which is the same position every mediated-runtime suite in this repository has been
-in since ADR-028. What *was* verified on this machine, under the baseline runtime, is that the probes
+**Stated plainly, at the time of writing: the 11 engine tests had not yet been executed under the runtime they
+target.** Their first real run was in CI, which is the same position every mediated-runtime suite in this
+repository has been in since ADR-028. *(Reconciled in KAAS-22: CI run 34269358606 at `d1ad2ff` executed all 11
+under runsc, 0 skipped, with `engine_identity=karate 2.1.2` and `engine_verdict=PASSED` — see section 12's
+defect 12.)* What *was* verified on this machine, under the baseline runtime, is that the probes
 themselves work and that their assertions hold once an engine actually starts.
 
 ## 13. What the CI gate refuses to accept

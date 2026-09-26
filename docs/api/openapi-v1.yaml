@@ -240,8 +240,9 @@ paths:
       operationId: createSecretReference
       summary: Create logical secret-reference metadata
       description: >-
-        Creates a non-capability project-scoped identity. The API cannot accept, store, reveal, or redeem a secret value,
-        provider, provider path, URI, token, ciphertext, or credential.
+        Creates a non-capability project-scoped identity. This request carries no value, provider, provider path,
+        URI, token, ciphertext, or credential; values are written as immutable versions of the reference, and no
+        API reveals or redeems one.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -281,6 +282,95 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/SecretReference'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+  /api/v1/projects/{projectId}/secret-references/{secretReferenceId}/versions:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/SecretReferenceId'
+    get:
+      tags: [Secret References]
+      operationId: listSecretVersions
+      summary: List a secret's immutable versions, as metadata
+      description: >-
+        Version number, author, creation time and revocation state. There is no read of a value, a ciphertext, a
+        length or a digest, for any version.
+      responses:
+        '200':
+          description: Every version ever written, oldest first, including revoked ones.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/SecretVersion'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [Secret References]
+      operationId: createSecretVersion
+      summary: Write the next immutable version of a secret
+      description: >-
+        The body is the value itself, exactly: application/octet-stream, 1 to 8192 bytes of strictly valid UTF-8,
+        preserved byte for byte (no trimming, no normalisation, no line-ending conversion). The control plane
+        encrypts it with Vault Transit under a key derived for this organization and project and stores only the
+        ciphertext. The value is never echoed, logged, counted or fingerprinted, so this request is deliberately
+        not idempotent: a retry writes the next version. New runs pin the latest unrevoked version; runs already
+        created keep the version they pinned.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              maxLength: 8192
+      responses:
+        '201':
+          description: The new version's metadata.
+          headers:
+            Location: {$ref: '#/components/headers/ResourceLocation'}
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretVersion'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationProblem'}
+        '503':
+          description: >-
+            The secret provider is not configured or cannot be reached. Code SECRET_PROVIDER_UNAVAILABLE, with no
+            further detail about the provider.
+          content:
+            application/problem+json:
+              schema: {$ref: '#/components/schemas/ProblemDetail'}
+  /api/v1/projects/{projectId}/secret-references/{secretReferenceId}/versions/{version}/revocation:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/SecretReferenceId'
+      - name: version
+        in: path
+        required: true
+        schema: {type: integer, minimum: 1, maximum: 100000}
+    post:
+      tags: [Secret References]
+      operationId: revokeSecretVersion
+      summary: Revoke one version permanently and destroy its ciphertext
+      description: >-
+        Emergency revocation. Every run pinned to this version fails with SECRET_VERSION_REVOKED from its next
+        authorization or redemption onward and never advances to another version. The ciphertext is deleted in
+        the same transaction; the version's metadata and the revocation record remain. Revoking a revoked
+        version returns it unchanged; there is no un-revoke.
+      responses:
+        '200':
+          description: The version, now revoked.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/CacheControlNoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretVersion'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
         '422': {$ref: '#/components/responses/ValidationProblem'}
@@ -1180,7 +1270,9 @@ components:
       additionalProperties: false
     SecretReference:
       type: object
-      description: Logical metadata only. This UUID is not a capability and no secret value or provider location is stored or redeemable.
+      description: >-
+        Logical metadata only. This UUID is not a capability. Values are held as immutable versions, encrypted, and
+        never returned by any API; see SecretVersion.
       required: [secretReferenceId, projectId, name, createdBy, createdAt]
       properties:
         secretReferenceId: {type: string, format: uuid}
@@ -1242,6 +1334,30 @@ components:
       type: string
       pattern: '^[A-Za-z_][A-Za-z0-9_.-]{0,127}$'
       description: Exact case-sensitive portable key; duplicate plain/secret keys in one revision are rejected.
+    SecretVersion:
+      type: object
+      description: One immutable version of a secret, as metadata. No field can carry a value, a ciphertext, a length or a digest.
+      required: [secretReferenceId, version, createdBy, createdAt, revoked, revokedAt]
+      properties:
+        secretReferenceId: {type: string, format: uuid}
+        version: {type: integer, minimum: 1, maximum: 100000}
+        createdBy: {type: string, minLength: 1, maxLength: 255}
+        createdAt: {type: string, format: date-time}
+        revoked: {type: boolean}
+        revokedAt: {type: [string, 'null'], format: date-time}
+      additionalProperties: false
+    PinnedSecretBinding:
+      type: object
+      description: >-
+        A secret binding as a run pinned it at creation: key, reference and exact version. The version is null only
+        for a snapshot written before versions existed, and such a run is refused at authorization rather than
+        executed against a version chosen later.
+      required: [key, secretReferenceId, version]
+      properties:
+        key: {$ref: '#/components/schemas/ConfigurationKey'}
+        secretReferenceId: {type: string, format: uuid}
+        version: {type: [integer, 'null'], minimum: 1, maximum: 100000}
+      additionalProperties: false
     SecretBinding:
       type: object
       description: Binds a key to non-capability SecretReference metadata. It contains no secret value.
@@ -1686,7 +1802,7 @@ components:
         secretBindings:
           type: array
           maxItems: 100
-          items: {$ref: '#/components/schemas/SecretBinding'}
+          items: {$ref: '#/components/schemas/PinnedSecretBinding'}
         selection: {$ref: '#/components/schemas/ProfileSelection'}
         parallelism: {type: integer, minimum: 1, maximum: 32}
         scenarioRetry: {$ref: '#/components/schemas/ScenarioRetry'}

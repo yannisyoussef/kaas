@@ -36,7 +36,7 @@ launch an engine without linking one. Guards on both sides:
 
 | Guard | Where | Fails on |
 | --- | --- | --- |
-| `verifyLauncherHasNoUserContentDependencies` | runner, api, egress-proxy Gradle | a Karate coordinate on any classpath |
+| `verifyLauncherHasNoUserContentDependencies` / `verifyNoExecutionDependencies` / `verifyProxyHasNoPrivilegedDependencies` | runner / api / egress-proxy Gradle | a Karate coordinate on any classpath |
 | `EngineTrustBoundaryTest` | runner JVM | a Karate class being loadable at runtime |
 | `KaasKarateAdapterTest` | engine JVM | a platform launcher, signer, API, or datasource class being present |
 | `ControlPlaneArchitectureTest` | api | a claim-path package depending on either Karate package |
@@ -45,6 +45,10 @@ The Gradle guard inspects a dependency graph; the runtime tests inspect what a c
 vendored into a resources directory passes the first and fails the second.
 
 ## What "secret-free" actually means here
+
+*(KAAS-22: ADR-034 now authorizes secret-bearing Karate runs, so statements 1 and 2 below describe KAAS-21 and
+now apply to the synthetic workload only. Statement 3 still holds for every run, secret-bearing or not: secrets
+travel in the engine frame, never in the environment. See [tenant-secret-execution.md](tenant-secret-execution.md).)*
 
 Three independent statements, in increasing strength:
 
