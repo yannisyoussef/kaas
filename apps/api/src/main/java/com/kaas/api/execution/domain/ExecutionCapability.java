@@ -38,17 +38,58 @@ public record ExecutionCapability(
      */
     public static final int MAX_REDEMPTIONS = 64;
 
+    /**
+     * How many times a SECRET capability may be redeemed: the delivery, and one retry for a response lost in
+     * transit.
+     *
+     * <p>Not the source ceiling. A source bundle is tenant-authored test content, and re-serving it costs
+     * bandwidth; a secret bundle is plaintext, and every redemption is another copy of it in flight. Two is the
+     * smallest number that survives an ordinary network ambiguity -- the control plane decrypted and sent, the
+     * worker never received -- without letting a stolen token be replayed at leisure. The database enforces the
+     * same number with a CHECK, so a writer that forgot this constant still cannot exceed it.
+     */
+    public static final int MAX_SECRET_REDEMPTIONS = 2;
+
     public ExecutionCapability {
         secretReferenceIds = List.copyOf(secretReferenceIds);
-        if (capabilityType == CapabilityType.SOURCE && !secretReferenceIds.isEmpty()) {
-            throw new IllegalArgumentException("A source capability has no secret scope.");
+        if (capabilityType != CapabilityType.SECRET && !secretReferenceIds.isEmpty()) {
+            throw new IllegalArgumentException("Only a secret capability has a secret scope.");
         }
+        // A secret capability with nothing in scope authorizes nothing, and a run with no secrets receives NO
+        // secret capability rather than an empty one. An empty one would be a live bearer token whose only
+        // effect is to exist -- and a closed-set model whose set can be empty is one refactor away from a
+        // model where "empty" is read as "unrestricted".
+        //
+        // Enforced on construction only when the scope is being CREATED (a capability read back from the
+        // database is reconstructed without its scope, which lives in a separate table and is loaded on its
+        // own), so the check lives where issuance builds one: see ExecutionAuthorizationService.
+    }
+
+    /** A secret capability's scope at issuance: never empty. */
+    public static ExecutionCapability secret(
+            java.util.UUID capabilityId,
+            java.util.UUID authorizationId,
+            String tokenSha256,
+            java.time.Instant issuedAt,
+            java.time.Instant expiresAt,
+            List<SecretScope> scope) {
+        if (scope == null || scope.isEmpty()) {
+            throw new IllegalArgumentException("A secret capability must name at least one secret.");
+        }
+        return new ExecutionCapability(
+                capabilityId, authorizationId, CapabilityType.SECRET, tokenSha256, issuedAt, expiresAt, 0, null,
+                null, scope);
+    }
+
+    /** The redemption ceiling for this capability's type. */
+    public int maximumRedemptions() {
+        return capabilityType == CapabilityType.SECRET ? MAX_SECRET_REDEMPTIONS : MAX_REDEMPTIONS;
     }
 
     public boolean withinWindow(Instant now) {
-        return revokedAt == null && now.isBefore(expiresAt) && redemptionCount < MAX_REDEMPTIONS;
+        return revokedAt == null && now.isBefore(expiresAt) && redemptionCount < maximumRedemptions();
     }
 
-    /** One SecretReference a secret capability may resolve, and the snapshot key it was bound under. */
-    public record SecretScope(UUID secretReferenceId, String bindingKey) {}
+    /** One secret a capability may resolve: the reference, the key it is bound to, and the exact version. */
+    public record SecretScope(UUID secretReferenceId, String bindingKey, int version) {}
 }

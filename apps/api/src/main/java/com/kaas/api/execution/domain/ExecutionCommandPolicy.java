@@ -104,17 +104,19 @@ public final class ExecutionCommandPolicy {
             // meant two commands binding API_TOKEN to different references, from different providers, in
             // different tenants, produced one digest — demonstrated. A reference is not per-issuance identity;
             // it is the single most execution-relevant fact about a secret binding.
+            //
+            // And WHICH VERSION. A rotation after the run was queued must not be able to change what an
+            // already-issued command means, so the pinned version is part of the digest both sides recompute.
             update(sha, "SECRET_BINDING_COUNT");
-            update(sha, Integer.toString(command.secretCapabilities().size()));
-            for (ExecutionCommand.SecretCapabilityReference secret : command.secretCapabilities().stream()
-                    .sorted(Comparator.comparing(ExecutionCommand.SecretCapabilityReference::bindingKey))
+            update(sha, Integer.toString(command.secretBindings().size()));
+            for (ExecutionCommand.SecretBindingReference secret : command.secretBindings().stream()
+                    .sorted(Comparator.comparing(ExecutionCommand.SecretBindingReference::bindingKey))
                     .toList()) {
                 update(sha, "SECRET_BINDING");
                 update(sha, secret.bindingKey());
                 update(sha, secret.provider());
-                update(sha, secret.referenceId());
-                update(sha, secret.capabilityId().toString());
-                update(sha, secret.expiresAt().toString());
+                update(sha, secret.secretReferenceId().toString());
+                update(sha, Integer.toString(secret.version()));
             }
 
             update(sha, "NETWORK_POLICY");
@@ -213,16 +215,15 @@ public final class ExecutionCommandPolicy {
                     node.put("contentDigest", feature.sourceDigest());
                 });
 
-        ArrayNode secrets = root.putArray("secretCapabilities");
-        command.secretCapabilities().stream()
-                .sorted(Comparator.comparing(ExecutionCommand.SecretCapabilityReference::bindingKey))
+        ArrayNode secrets = root.putArray("secretBindings");
+        command.secretBindings().stream()
+                .sorted(Comparator.comparing(ExecutionCommand.SecretBindingReference::bindingKey))
                 .forEach(secret -> {
                     ObjectNode node = secrets.addObject();
-                    node.put("capabilityId", secret.capabilityId().toString());
-                    node.put("provider", secret.provider());
-                    node.put("referenceId", secret.referenceId());
                     node.put("bindingKey", secret.bindingKey());
-                    node.put("expiresAt", secret.expiresAt().toString());
+                    node.put("provider", secret.provider());
+                    node.put("referenceId", secret.secretReferenceId().toString());
+                    node.put("version", secret.version());
                 });
 
         ObjectNode network = root.putObject("networkPolicy");

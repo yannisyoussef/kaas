@@ -718,6 +718,7 @@ class SchedulingHttpIntegrationTests {
                         json(Map.of("name", "schedulingClientSecret"))))
                 .get("secretReferenceId")
                 .stringValue();
+        SecretVersionFixtures.seed(jdbc, secretId);
         String environmentRevision = json(post(
                         "/api/v1/projects/" + projectId + "/environments",
                         bearer,

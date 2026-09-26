@@ -80,6 +80,11 @@ public class ConfigurationService {
     @Transactional(readOnly = true)
     public SecretReference getSecretReference(
             TenantPrincipal principal, UUID projectId, UUID secretReferenceId) {
+        // The query below is already scoped to organization AND project, so a reference owned by a sibling
+        // project was never readable through another project's path -- the takeover audit's suspicion, checked
+        // and pinned by a regression test. The project check is here anyway so this read fails the same way,
+        // for the same reason, as every other read in this service.
+        requireProject(principal, projectId);
         return repository
                 .findSecretReference(principal.organizationId(), projectId, secretReferenceId)
                 .orElseThrow(ApiException::notFound);

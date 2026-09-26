@@ -387,18 +387,19 @@ class ExecutionAuthorizationTests {
         }
     }
 
-    // ---------------------------------------------------------------- secret-free engine execution
+    // ---------------------------------------------------------------- which engines may carry secrets
     //
-    // ADR-033 authorized executing tenant code for SECRET-FREE runs only. Every acceptance behind that
-    // authorization -- the missing nodev, the construction privilege, ambient file access under a fully
-    // hostile model -- was reasoned with no secret anywhere in the sandbox. These three tests are what makes
-    // "zero secret bindings" a property of the system rather than a sentence in a document.
+    // ADR-033 authorized tenant code for secret-free runs only; ADR-034 re-adjudicates that for Karate, with a
+    // provider, a capability, and a trusted redaction boundary. The synthetic workload has no channel a secret
+    // could reach, so it still refuses one. These three are what keep those two rules separate: collapsing them
+    // either blocks Karate forever or lets a provider's absence be the only thing standing between a secret and
+    // an engine that cannot use it.
 
     @Test
     @Timeout(120)
-    void aKarateRunCarryingASecretBindingIsRefused() throws Exception {
+    void aSyntheticRunCarryingASecretBindingIsRefusedAsSecretFree() throws Exception {
         UUID runId = claimedRun();
-        withKarateEngineAndSecret(runId, true, () -> assertThat(
+        withSecretBinding(runId, () -> assertThat(
                         authorizations.authorize(runId, attemptId(runId), 1, WORKER).denial())
                 .contains(ExecutionDenial.ENGINE_REQUIRES_SECRET_FREE_RUN));
     }
@@ -406,8 +407,8 @@ class ExecutionAuthorizationTests {
     @Test
     @Timeout(120)
     void aKarateRunCarryingNoSecretIsNotRefusedForThatReason() throws Exception {
-        // The other axis. Without it the assertion above is satisfied by a rule that refuses every KARATE run,
-        // which would pass the test and ship an engine nothing can ever execute.
+        // The other axis. Without it the assertion above is satisfied by a rule that refuses every run, which
+        // would pass the test and ship an engine nothing can ever execute.
         UUID runId = claimedRun();
         withKarateEngineAndSecret(runId, false, () -> assertThat(
                         authorizations.authorize(runId, attemptId(runId), 1, WORKER).denial())
@@ -416,16 +417,16 @@ class ExecutionAuthorizationTests {
 
     @Test
     @Timeout(120)
-    void aSyntheticRunCarryingASecretBindingIsRefusedForADifferentReason() throws Exception {
-        // The third axis: the refusal is scoped to the engines whose authorization depends on it, not applied
-        // to everything that mentions a secret. A synthetic run with a binding is still refused -- no provider
-        // is configured -- but it must be refused for THAT, or the two rules have been collapsed into one and
-        // configuring a provider would silently unblock the Karate path as well.
+    void aKarateRunCarryingASecretIsRefusedForTheMissingProviderNotForTheEngine() throws Exception {
+        // This context configures no Vault. A Karate run binding a secret is refused -- nothing can resolve it
+        // -- but for THAT reason: Karate is no longer a secret-free-only engine, and a refusal still naming the
+        // engine would mean configuring a provider changed nothing.
         UUID runId = claimedRun();
-        withSecretBinding(runId, () -> {
-            var denial = authorizations.authorize(runId, attemptId(runId), 1, WORKER).denial();
-            assertThat(denial).isNotEqualTo(java.util.Optional.of(ExecutionDenial.ENGINE_REQUIRES_SECRET_FREE_RUN));
-            assertThat(denial).isPresent();
+        withKarateEngineAndSecret(runId, true, () -> {
+            assertThat(authorizations.authorize(runId, attemptId(runId), 1, WORKER).denial())
+                    .contains(ExecutionDenial.SECRET_PROVIDER_UNAVAILABLE);
+            assertThat(jdbc.queryForObject("select count(*) from execution_authorizations", Integer.class))
+                    .isZero();
         });
     }
 
@@ -447,7 +448,10 @@ class ExecutionAuthorizationTests {
         }
     }
 
-    /** Adds one real SECRET_REFERENCE configuration entry to the run's sealed snapshot, and removes it after. */
+    /**
+     * Adds one real SECRET_REFERENCE configuration entry, pinned to a real version, to the run's sealed
+     * snapshot, and removes both after.
+     */
     private void withSecretBinding(UUID runId, Runnable assertion) {
         Map<String, Object> scope = jdbc.queryForMap(
                 "select organization_id, project_id from test_runs where run_id = ?", runId);
@@ -457,6 +461,8 @@ class ExecutionAuthorizationTests {
         // DELETE. That immutability is deliberate -- a secret's identity is what capabilities and audit
         // records point at -- so the fixture suspends it only to clean up after itself.
         jdbc.update("alter table secret_references disable trigger all");
+        jdbc.update("alter table secret_versions disable trigger all");
+        jdbc.update("alter table secret_version_ciphertexts disable trigger all");
         try {
             // A REAL reference row, not a dangling id: the entry has a foreign key to it, and a test that
             // could not satisfy the key would be testing the database rather than the decision. It names no
@@ -465,15 +471,21 @@ class ExecutionAuthorizationTests {
                     "insert into secret_references (secret_reference_id, organization_id, project_id, name,"
                             + " created_by, created_at) values (?, ?, ?, ?, 'kaas.test', now())",
                     secretId, scope.get("organization_id"), scope.get("project_id"), "TEST_BINDING_" + secretId.toString().substring(0, 8));
+            int version = SecretVersionFixtures.seed(jdbc, secretId);
             jdbc.update(
                     "insert into run_snapshot_configuration_entries (organization_id, project_id, run_id,"
-                            + " config_key, value_kind, secret_reference_id)"
-                            + " values (?, ?, ?, 'API_TOKEN', 'SECRET_REFERENCE', ?)",
-                    scope.get("organization_id"), scope.get("project_id"), runId, secretId);
+                            + " config_key, value_kind, secret_reference_id, secret_version_number)"
+                            + " values (?, ?, ?, 'API_TOKEN', 'SECRET_REFERENCE', ?, ?)",
+                    scope.get("organization_id"), scope.get("project_id"), runId, secretId, version);
             assertion.run();
         } finally {
             jdbc.update("delete from run_snapshot_configuration_entries where run_id = ? and config_key = 'API_TOKEN'", runId);
+            jdbc.update("delete from secret_version_ciphertexts where secret_version_id in"
+                    + " (select secret_version_id from secret_versions where secret_reference_id = ?)", secretId);
+            jdbc.update("delete from secret_versions where secret_reference_id = ?", secretId);
             jdbc.update("delete from secret_references where secret_reference_id = ?", secretId);
+            jdbc.update("alter table secret_version_ciphertexts enable trigger all");
+            jdbc.update("alter table secret_versions enable trigger all");
             jdbc.update("alter table secret_references enable trigger all");
             jdbc.update("alter table run_snapshot_configuration_entries enable trigger all");
         }
@@ -522,16 +534,16 @@ class ExecutionAuthorizationTests {
 
     @Test
     @Timeout(120)
-    void aSecretBearingRunIsRefusedBecauseNoProviderExists() throws Exception {
+    void aSecretBearingSyntheticRunIsRefusedBeforeAnythingIsIssued() throws Exception {
         Tenant tenant = tenant(true);
         UUID runId = createRun(tenant);
         scheduler.scheduleDue();
         claims.claim(dispatchFor(runId), WORKER);
 
-        // Honest failure at authorization rather than a command promising secrets nothing can deliver. The
-        // failure happens before any sandbox exists, with a reason that names the actual problem.
+        // Honest failure at authorization rather than a command promising secrets nothing can consume. This
+        // deployment's engine is the synthetic workload, which cannot receive a secret, so that is the reason.
         assertThat(authorizations.authorize(runId, attemptId(runId), 1, WORKER).denial())
-                .contains(ExecutionDenial.SECRET_PROVIDER_UNAVAILABLE);
+                .contains(ExecutionDenial.ENGINE_REQUIRES_SECRET_FREE_RUN);
         assertThat(jdbc.queryForObject("select count(*) from execution_authorizations", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("select count(*) from execution_commands", Integer.class)).isZero();
     }
@@ -901,7 +913,7 @@ class ExecutionAuthorizationTests {
         // rather than left to the runner to refuse.
         assertThat(document.at("/engine/type").stringValue()).isEqualTo("SYNTHETIC");
         assertThat(document.toString()).doesNotContain("KARATE");
-        assertThat(document.get("secretCapabilities")).isEmpty();
+        assertThat(document.get("secretBindings")).isEmpty();
         assertThat(document.get("assignmentEpoch").intValue()).isEqualTo(1);
         String snapshot = jdbc.queryForObject(
                 "select snapshot_sha256 from test_runs where run_id = ?", String.class, runId);
@@ -966,15 +978,23 @@ class ExecutionAuthorizationTests {
         // names another tenant's secret is not merely rejected by application code — it cannot be written. A
         // single-column key constrains existence and never ownership, and the previous version of this schema
         // accepted exactly this row while its own comment claimed the key prevented it.
+        //
+        // The row carries a real version number of the foreign secret, so the refusal cannot come from the NOT
+        // NULL on the version column added in V13 -- it has to come from ownership, which is the claim.
         assertThatThrownBy(() -> jdbc.update(
                         """
                         insert into execution_capability_secret_references
-                            (capability_id, organization_id, project_id, secret_reference_id, binding_key)
+                            (capability_id, organization_id, project_id, secret_reference_id, binding_key,
+                             secret_version_number)
                         values (?, (select organization_id from execution_capabilities where capability_id = ?),
-                                (select project_id from execution_capabilities where capability_id = ?), ?, 'STOLEN')
+                                (select project_id from execution_capabilities where capability_id = ?), ?, 'STOLEN',
+                                1)
                         """,
                         capabilityId, capabilityId, capabilityId, foreignSecret))
-                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class)
+                .satisfies(refused -> assertThat(refused.getMessage())
+                        .containsAnyOf(
+                                "fk_execution_capability_secret_reference", "fk_execution_capability_secret_version"));
     }
 
     @Test
@@ -1155,7 +1175,8 @@ class ExecutionAuthorizationTests {
         assertThat(response.headers().firstValue("Cache-Control").orElseThrow()).contains("no-store");
         JsonNode body = objectMapper.readTree(response.body());
         assertThat(body.get("sourceCapabilityToken").stringValue()).startsWith("kaas_src_");
-        assertThat(body.get("secretCapabilityTokens")).isEmpty();
+        // A secret-free run is issued NO secret capability: absent, not empty, not null.
+        assertThat(body.has("secretCapabilityToken")).isFalse();
     }
 
     @Test
@@ -1347,6 +1368,7 @@ class ExecutionAuthorizationTests {
                             .body())
                     .get("secretReferenceId")
                     .stringValue();
+            SecretVersionFixtures.seed(jdbc, secretReferenceId);
             secretBindings.add(Map.of("key", "API_TOKEN", "secretReferenceId", secretReferenceId));
         }
         String environmentRevision = objectMapper

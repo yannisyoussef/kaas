@@ -20,7 +20,7 @@
     "expiresAt",
     "engine",
     "sourceBundle",
-    "secretCapabilities",
+    "secretBindings",
     "networkPolicy",
     "sandboxSecurityProfile",
     "configurationSnapshot",
@@ -107,13 +107,13 @@
     "sourceBundle": {
       "$ref": "#/$defs/sourceBundle"
     },
-    "secretCapabilities": {
+    "secretBindings": {
       "type": "array",
-      "maxItems": 100,
+      "maxItems": 50,
       "items": {
-        "$ref": "#/$defs/secretCapability"
+        "$ref": "#/$defs/secretBinding"
       },
-      "description": "Empty whenever no production secret provider exists, because a secret-bearing run is refused at authorization rather than issued a command it cannot honour."
+      "description": "The exact secrets the run pinned: binding key, reference and version, in key order. Never a value, a ciphertext, a path, or a capability. The bearer credential that redeems exactly this set travels in the delivery envelope, because it rotates on every delivery and a digested document cannot carry it. Empty for a secret-free run, which is issued no secret capability at all."
     },
     "networkPolicy": {
       "$ref": "#/$defs/networkPolicy"
@@ -296,36 +296,32 @@
       "additionalProperties": false,
       "description": "What the bundle IS, not where it is or which credential fetches it. It deliberately carries no capability identifier: capabilities rotate on every delivery, so an identifier baked into an immutable document is stale from the second request onward, and a field the digest cannot cover is a field an attacker chooses and a consumer cannot verify. Capability identity is returned in the delivery envelope instead."
     },
-    "secretCapability": {
+    "secretBinding": {
       "type": "object",
       "required": [
-        "capabilityId",
+        "bindingKey",
         "provider",
         "referenceId",
-        "bindingKey",
-        "expiresAt"
+        "version"
       ],
       "properties": {
-        "capabilityId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "provider": {
-          "type": "string",
-          "pattern": "^[a-z][a-z0-9.-]{1,63}$"
-        },
-        "referenceId": {
-          "type": "string",
-          "pattern": "^secret-ref:[A-Za-z0-9._~-]{8,240}$",
-          "description": "Opaque identifier that reveals no provider path and grants no access by possession."
-        },
         "bindingKey": {
           "type": "string",
           "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,127}$"
         },
-        "expiresAt": {
+        "provider": {
+          "const": "vault-transit"
+        },
+        "referenceId": {
           "type": "string",
-          "format": "date-time"
+          "format": "uuid",
+          "description": "The SecretReference. An identifier grants nothing by possession."
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000,
+          "description": "The version the run pinned at creation. Never 'latest': a rotation after the run was queued does not change it, and a revocation makes the run fail rather than advance."
         }
       },
       "additionalProperties": false

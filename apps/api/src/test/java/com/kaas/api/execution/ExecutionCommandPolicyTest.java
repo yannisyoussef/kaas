@@ -59,13 +59,24 @@ class ExecutionCommandPolicyTest {
 
     @Test
     void bindingTheSameKeyToADifferentSecretChangesTheDigest() {
-        // vault/secret-ref:AAAA versus aws.secretsmanager/secret-ref:BBBB under one binding key. These digested
-        // identically before, which meant a substituted cross-tenant reference passed digest verification.
-        String original = digestOf(draft -> withSecret(draft, "vault", "secret-ref:aaaaaaaa"));
-        String substituted = digestOf(draft -> withSecret(draft, "aws.secretsmanager", "secret-ref:bbbbbbbb"));
+        // Two references under one binding key. These digested identically once, which meant a substituted
+        // cross-tenant reference passed digest verification.
+        String original = digestOf(draft -> withSecret(draft, SECRET_A, 1));
+        String substituted = digestOf(draft -> withSecret(draft, SECRET_B, 1));
 
         assertThat(original).isNotEqualTo(substituted);
     }
+
+    @Test
+    void pinningADifferentVersionOfTheSameSecretChangesTheDigest() {
+        // The pinned version is what makes a run reproducible: a rotation after issuance must not be able to
+        // change what an issued command means, so version 1 and version 2 of one reference are different commands.
+        assertThat(digestOf(draft -> withSecret(draft, SECRET_A, 1)))
+                .isNotEqualTo(digestOf(draft -> withSecret(draft, SECRET_A, 2)));
+    }
+
+    private static final UUID SECRET_A = UUID.fromString("3f8a2b10-0000-4000-8000-0000000000e1");
+    private static final UUID SECRET_B = UUID.fromString("3f8a2b10-0000-4000-8000-0000000000e2");
 
     @Test
     void aDifferentNetworkPolicyRevisionChangesTheDigest() {
@@ -97,7 +108,7 @@ class ExecutionCommandPolicyTest {
         List<String> covered = List.of(
                 "schemaVersion", "commandId", "issuedAt", "expiresAt", "organizationId", "projectId", "runId",
                 "runVersion", "attemptId", "attemptNumber", "assignmentEpoch", "runSnapshotDigest", "engine",
-                "sourceBundle", "secretCapabilities", "networkPolicy", "sandboxSecurityProfile",
+                "sourceBundle", "secretBindings", "networkPolicy", "sandboxSecurityProfile",
                 "configurationSnapshot", "selection", "parallelism", "scenarioRetry", "executionTimeoutSeconds",
                 "artifactPolicy");
 
@@ -126,7 +137,7 @@ class ExecutionCommandPolicyTest {
                 command.commandId(), command.authorizationId(), command.organizationId(), command.projectId(),
                 command.runId(), command.runVersion(), command.attemptId(), command.attemptNumber(),
                 command.assignmentEpoch(), command.runSnapshotSha256(), command.engine(),
-                command.sourceBundle(), command.secretCapabilities(), command.networkPolicy(),
+                command.sourceBundle(), command.secretBindings(), command.networkPolicy(),
                 new ExecutionCommand.SandboxSecurityProfileReference(
                         profile.profileVersion(), runtime, profile.assessmentDigest()),
                 command.configuration(), command.selection(), command.parallelism(), command.scenarioRetry(),
@@ -180,25 +191,20 @@ class ExecutionCommandPolicyTest {
     }
 
     private static ExecutionCommand withExpiry(ExecutionCommand command, Instant expiresAt) {
-        return rebuild(command, command.commandId(), expiresAt, command.secretCapabilities(), command.networkPolicy());
+        return rebuild(command, command.commandId(), expiresAt, command.secretBindings(), command.networkPolicy());
     }
 
     private static ExecutionCommand withCommandId(ExecutionCommand command, UUID commandId) {
         return rebuild(
-                command, commandId, command.expiresAt(), command.secretCapabilities(), command.networkPolicy());
+                command, commandId, command.expiresAt(), command.secretBindings(), command.networkPolicy());
     }
 
-    private static ExecutionCommand withSecret(ExecutionCommand command, String provider, String referenceId) {
+    private static ExecutionCommand withSecret(ExecutionCommand command, UUID referenceId, int version) {
         return rebuild(
                 command,
                 command.commandId(),
                 command.expiresAt(),
-                List.of(new ExecutionCommand.SecretCapabilityReference(
-                        UUID.fromString("3f8a2b10-0000-4000-8000-0000000000f9"),
-                        provider,
-                        referenceId,
-                        "API_TOKEN",
-                        Instant.parse("2026-08-29T09:05:00Z"))),
+                List.of(new ExecutionCommand.SecretBindingReference("API_TOKEN", referenceId, version, "vault-transit")),
                 command.networkPolicy());
     }
 
@@ -207,7 +213,7 @@ class ExecutionCommandPolicyTest {
                 command,
                 command.commandId(),
                 command.expiresAt(),
-                command.secretCapabilities(),
+                command.secretBindings(),
                 new ExecutionCommand.NetworkPolicyReference(
                         policyRevisionId,
                         command.networkPolicy().type(),
@@ -219,7 +225,7 @@ class ExecutionCommandPolicyTest {
             ExecutionCommand command,
             UUID commandId,
             Instant expiresAt,
-            List<ExecutionCommand.SecretCapabilityReference> secrets,
+            List<ExecutionCommand.SecretBindingReference> secrets,
             ExecutionCommand.NetworkPolicyReference policy) {
         return new ExecutionCommand(
                 commandId, command.authorizationId(), command.organizationId(), command.projectId(),

@@ -125,6 +125,35 @@ class JdbcConfigurationRepository implements ConfigurationRepository {
     }
 
     @Override
+    public java.util.Map<UUID, Integer> findActiveSecretVersions(
+            UUID organizationId, UUID projectId, Set<UUID> referenceIds) {
+        java.util.Map<UUID, Integer> active = new java.util.HashMap<>();
+        if (referenceIds.isEmpty()) {
+            return active;
+        }
+        namedJdbc.query(
+                """
+                select v.secret_reference_id, max(v.version_number) as version_number
+                  from secret_versions v
+                  join secret_version_ciphertexts c on c.secret_version_id = v.secret_version_id
+                 where v.organization_id = :organizationId
+                   and v.project_id = :projectId
+                   and v.secret_reference_id in (:referenceIds)
+                   and not exists (select 1 from secret_version_revocations r
+                                    where r.secret_version_id = v.secret_version_id)
+                 group by v.secret_reference_id
+                """,
+                new MapSqlParameterSource()
+                        .addValue("organizationId", organizationId)
+                        .addValue("projectId", projectId)
+                        .addValue("referenceIds", referenceIds),
+                row -> {
+                    active.put(row.getObject("secret_reference_id", UUID.class), row.getInt("version_number"));
+                });
+        return active;
+    }
+
+    @Override
     public boolean allSecretReferencesExist(
             UUID organizationId, UUID projectId, Set<UUID> referenceIds) {
         if (referenceIds.isEmpty()) {

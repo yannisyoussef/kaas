@@ -1329,6 +1329,10 @@ class ConfigurationHttpIntegrationTests {
                         secretPath(projectA), tokenA, key(), json(Map.of("name", "runClientSecret"))))
                 .get("secretReferenceId")
                 .stringValue();
+        // A run pins a version of every secret it binds, so one has to exist. See SecretVersionFixtures for why
+        // this suite seeds it rather than writing it through Transit.
+        SecretVersionFixtures.seed(jdbc, secretId);
+        SecretVersionFixtures.seed(jdbc, secretId);
         JsonNode environment = json(post(
                 environmentPath(projectA),
                 tokenA,
@@ -1424,6 +1428,8 @@ class ConfigurationHttpIntegrationTests {
         assertThat(snapshot.at("/effectiveConfiguration/0/value").stringValue())
                 .isEqualTo("https://override.example");
         assertThat(snapshot.at("/secretBindings/0/secretReferenceId").stringValue()).isEqualTo(secretId);
+        // The LATEST usable version at creation, pinned as a number -- never "latest", never a value.
+        assertThat(snapshot.at("/secretBindings/0/version").asInt()).isEqualTo(2);
         assertThat(snapshot.at("/selection/tags").toString()).isEqualTo("[\"@regression\",\"@smoke\"]");
         assertThat(snapshot.get("parallelism").asInt()).isEqualTo(4);
         assertThat(snapshot.at("/scenarioRetry/maxAttempts").asInt()).isEqualTo(2);

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
@@ -16,13 +17,19 @@ class RunSnapshotPolicyTest {
     private static final UUID PROFILE_REVISION = UUID.fromString("50000000-0000-4000-8000-000000000005");
     private static final UUID SECRET = UUID.fromString("60000000-0000-4000-8000-000000000006");
 
+    /** The version the snapshot pins for SECRET. Resolved from metadata by the caller, never decrypted. */
+    private static final Map<UUID, Integer> ACTIVE = Map.of(SECRET, 3);
+
     @Test
     void materializationHasAGoldenDigestCanonicalOrderAndExactMerge() {
         RunSnapshot first = snapshot(List.of(feature("z.feature", 8), feature("a.feature", 7)), "2.0.0");
         RunSnapshot reordered = snapshot(List.of(feature("a.feature", 7), feature("z.feature", 8)), "2.0.0");
 
+        // Changed in KAAS-22, deliberately: this snapshot binds a secret, and the pinned version is now part of
+        // what the run is. The previous vector was sha256:53a5de2c... and described a run that named a secret
+        // without saying which version of it -- the ambiguity this change removes.
         assertThat(first.snapshotDigest())
-                .isEqualTo("sha256:53a5de2ceda4d720b70e43ab3629ee57fc8093e77c47c69caa3ca21de9b62f88")
+                .isEqualTo("sha256:796b513e8f1b5bd35536e9fe48c9386c8133949e2bcb765f424389e19e50d304")
                 .isEqualTo(reordered.snapshotDigest());
         assertThat(first.features()).extracting(SnapshotFeature::logicalPath)
                 .containsExactly("a.feature", "z.feature");
@@ -31,7 +38,7 @@ class RunSnapshotPolicyTest {
                 .containsExactly(
                         org.assertj.core.groups.Tuple.tuple("baseUrl", "https://override.example"),
                         org.assertj.core.groups.Tuple.tuple("timeout", 10_000L));
-        assertThat(first.secretBindings()).containsExactly(new SecretBinding("clientSecret", SECRET));
+        assertThat(first.secretBindings()).containsExactly(new PinnedSecretBinding("clientSecret", SECRET, 3));
         assertThat(snapshot(List.of(feature("a.feature", 7), feature("z.feature", 8)), "2.0.1")
                         .snapshotDigest())
                 .isNotEqualTo(first.snapshotDigest());
@@ -41,7 +48,8 @@ class RunSnapshotPolicyTest {
     void runIdentityAndAuditDoNotAffectTheSemanticDigest() {
         RunSnapshot first = snapshot(List.of(feature("a.feature", 7)), "2.0.0");
         RunSnapshot otherRun = RunSnapshotPolicy.materialize(
-                UUID.randomUUID(), PROJECT, first.features(), environment(), profile(), new EngineDescriptor("KARATE", "2.0.0"));
+                UUID.randomUUID(), PROJECT, first.features(), environment(), profile(), new EngineDescriptor("KARATE", "2.0.0"),
+                ACTIVE);
         assertThat(otherRun.snapshotDigest()).isEqualTo(first.snapshotDigest());
     }
 
@@ -56,6 +64,7 @@ class RunSnapshotPolicyTest {
                         semanticMutation(baseline, "profile"),
                         semanticMutation(baseline, "configuration"),
                         semanticMutation(baseline, "secret"),
+                        semanticMutation(baseline, "secretVersion"),
                         semanticMutation(baseline, "selection"),
                         semanticMutation(baseline, "parallelism"),
                         semanticMutation(baseline, "retry"),
@@ -73,8 +82,56 @@ class RunSnapshotPolicyTest {
                 first.featureId(), UUID.randomUUID(), 8, first.logicalPath(), "sha256:" + "3".repeat(64));
         assertThatThrownBy(() -> RunSnapshotPolicy.materialize(
                         UUID.randomUUID(), PROJECT, List.of(first, otherRevision), environment(), profile(),
-                        new EngineDescriptor("KARATE", "2.0.0")))
+                        new EngineDescriptor("KARATE", "2.0.0"), ACTIVE))
                 .isInstanceOf(RunSnapshotPolicy.DuplicateFeatureSelectionException.class);
+    }
+
+    @Test
+    void aRunPinsTheVersionItWasCreatedWithAndRefusesASecretWithNone() {
+        RunSnapshot pinnedToThree = snapshot(List.of(feature("a.feature", 7)), "2.0.0");
+        RunSnapshot pinnedToFour = RunSnapshotPolicy.materialize(
+                UUID.randomUUID(), PROJECT, pinnedToThree.features(), environment(), profile(),
+                new EngineDescriptor("KARATE", "2.0.0"), Map.of(SECRET, 4));
+
+        // A rotation between two runs changes the second run and nothing about the first.
+        assertThat(pinnedToThree.secretBindings().getFirst().version()).isEqualTo(3);
+        assertThat(pinnedToFour.secretBindings().getFirst().version()).isEqualTo(4);
+        assertThat(pinnedToFour.snapshotDigest()).isNotEqualTo(pinnedToThree.snapshotDigest());
+
+        // No usable version -- never written, or all revoked -- is refused at creation. A snapshot is immutable,
+        // so one without a version for a binding would be a run that could never execute.
+        assertThatThrownBy(() -> RunSnapshotPolicy.materialize(
+                        UUID.randomUUID(), PROJECT, pinnedToThree.features(), environment(), profile(),
+                        new EngineDescriptor("KARATE", "2.0.0"), Map.of()))
+                .isInstanceOf(SecretVersionUnavailableException.class);
+    }
+
+    @Test
+    void aSecretFreeSnapshotDigestsExactlyAsItDidBeforeVersionsExisted() {
+        // Pinned from before KAAS-22: an environment with no secret bindings produces the same digest, because
+        // the version is fed to the digest only inside the per-binding loop. A change that altered secret-free
+        // digests would change the identity of every existing run.
+        var content = ConfigurationPolicy.environment(
+                List.of(new ConfigurationVariable("timeout", ConfigurationValueType.INTEGER, 10_000L)), List.of());
+        var environment = new EnvironmentRevision(
+                ENVIRONMENT_REVISION, ENVIRONMENT, PROJECT, 3, content.variables(), content.secretBindings(),
+                content.digest(), "creator", Instant.EPOCH);
+        var profileContent = ConfigurationPolicy.runProfile(
+                environment, List.of("@smoke"), 1, new ScenarioRetry(1, 0), 300,
+                new ArtifactPolicy(List.of(ArtifactType.RAW_RESULT), 1_000, 2_000), List.of());
+        var profile = new RunProfileRevision(
+                PROFILE_REVISION, PROFILE, PROJECT, 5, ENVIRONMENT_REVISION, profileContent.selection(),
+                profileContent.parallelism(), profileContent.scenarioRetry(), profileContent.executionTimeoutSeconds(),
+                profileContent.artifactPolicy(), profileContent.configurationOverrides(), profileContent.digest(),
+                "creator", Instant.EPOCH);
+        RunSnapshot secretFree = RunSnapshotPolicy.materialize(
+                UUID.randomUUID(), PROJECT, List.of(feature("a.feature", 7)), environment, profile,
+                new EngineDescriptor("KARATE", "2.1.2"), Map.of());
+        assertThat(secretFree.secretBindings()).isEmpty();
+        // Computed by the pre-KAAS-22 RunSnapshotPolicy (commit d1ad2ff) over the same inputs, and identical: the
+        // value below is what that code produced, not what this code produces and was then copied.
+        assertThat(secretFree.snapshotDigest())
+                .isEqualTo("sha256:9828b56d194a5dffd464b9b759000f8678cb02be86385f6d21fe1a12d9e595c0");
     }
 
     @Test
@@ -94,7 +151,8 @@ class RunSnapshotPolicyTest {
 
     private static RunSnapshot snapshot(List<SnapshotFeature> features, String engineVersion) {
         return RunSnapshotPolicy.materialize(
-                UUID.randomUUID(), PROJECT, features, environment(), profile(), new EngineDescriptor("KARATE", engineVersion));
+                UUID.randomUUID(), PROJECT, features, environment(), profile(), new EngineDescriptor("KARATE", engineVersion),
+                ACTIVE);
     }
 
     private static SnapshotFeature feature(String path, int suffix) {
@@ -132,8 +190,10 @@ class RunSnapshotPolicyTest {
                                 "baseUrl", ConfigurationValueType.STRING, "https://changed.example"))
                         : value.effectiveConfiguration(),
                 dimension.equals("secret")
-                        ? List.of(new SecretBinding("clientSecret", UUID.randomUUID()))
-                        : value.secretBindings(),
+                        ? List.of(new PinnedSecretBinding("clientSecret", UUID.randomUUID(), 3))
+                        : dimension.equals("secretVersion")
+                                ? List.of(new PinnedSecretBinding("clientSecret", SECRET, 4))
+                                : value.secretBindings(),
                 dimension.equals("selection") ? new RunSelection(List.of("@changed")) : value.selection(),
                 dimension.equals("parallelism") ? value.parallelism() + 1 : value.parallelism(),
                 dimension.equals("retry")

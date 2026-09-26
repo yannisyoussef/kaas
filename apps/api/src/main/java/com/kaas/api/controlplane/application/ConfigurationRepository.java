@@ -27,6 +27,12 @@ public interface ConfigurationRepository {
 
     boolean allSecretReferencesExist(UUID organizationId, UUID projectId, Set<UUID> referenceIds);
 
+    /**
+     * The version a new run would pin for each reference: the highest version that is not revoked and still has
+     * ciphertext. A reference with no such version is absent from the result. Metadata only; nothing decrypts.
+     */
+    java.util.Map<UUID, Integer> findActiveSecretVersions(UUID organizationId, UUID projectId, Set<UUID> referenceIds);
+
     EnvironmentRevision insertEnvironmentWithInitialRevision(
             UUID organizationId,
             UUID projectId,

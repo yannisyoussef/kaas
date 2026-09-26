@@ -7,7 +7,7 @@ import com.kaas.api.controlplane.domain.ConfigurationVariable;
 import com.kaas.api.controlplane.domain.EngineDescriptor;
 import com.kaas.api.controlplane.domain.RunSelection;
 import com.kaas.api.controlplane.domain.ScenarioRetry;
-import com.kaas.api.controlplane.domain.SecretBinding;
+import com.kaas.api.controlplane.domain.PinnedSecretBinding;
 import com.kaas.api.controlplane.domain.SnapshotFeature;
 import com.kaas.api.execution.application.ExecutionAuthorizationRepository;
 import com.kaas.api.execution.domain.EgressDestination;
@@ -104,10 +104,11 @@ class JdbcExecutionAuthorizationRepository implements ExecutionAuthorizationRepo
         // They live in one table discriminated by value_kind, and reading them separately would be two queries
         // whose results could, under a concurrent write, describe different snapshots.
         List<ConfigurationVariable> configuration = new java.util.ArrayList<>();
-        List<SecretBinding> secretBindings = new java.util.ArrayList<>();
+        List<PinnedSecretBinding> secretBindings = new java.util.ArrayList<>();
         jdbc.query(
                 """
-                select config_key, value_kind, string_value, integer_value, boolean_value, secret_reference_id
+                select config_key, value_kind, string_value, integer_value, boolean_value, secret_reference_id,
+                       secret_version_number
                   from run_snapshot_configuration_entries
                  where organization_id = ? and project_id = ? and run_id = ?
                  order by config_key
@@ -121,8 +122,10 @@ class JdbcExecutionAuthorizationRepository implements ExecutionAuthorizationRepo
                                 key, ConfigurationValueType.INTEGER, resultSet.getLong("integer_value")));
                         case "BOOLEAN" -> configuration.add(new ConfigurationVariable(
                                 key, ConfigurationValueType.BOOLEAN, resultSet.getBoolean("boolean_value")));
-                        case "SECRET_REFERENCE" -> secretBindings.add(new SecretBinding(
-                                key, resultSet.getObject("secret_reference_id", UUID.class)));
+                        case "SECRET_REFERENCE" -> secretBindings.add(new PinnedSecretBinding(
+                                key,
+                                resultSet.getObject("secret_reference_id", UUID.class),
+                                resultSet.getObject("secret_version_number", Integer.class)));
                         default -> throw new IllegalStateException("Unknown snapshot value kind.");
                     }
                 },
@@ -312,11 +315,12 @@ class JdbcExecutionAuthorizationRepository implements ExecutionAuthorizationRepo
             jdbc.update(
                     """
                     insert into execution_capability_secret_references
-                        (capability_id, organization_id, project_id, secret_reference_id, binding_key)
-                    values (?, ?, ?, ?, ?)
+                        (capability_id, organization_id, project_id, secret_reference_id, binding_key,
+                         secret_version_number)
+                    values (?, ?, ?, ?, ?, ?)
                     """,
                     capability.capabilityId(), organizationId, projectId, scope.secretReferenceId(),
-                    scope.bindingKey());
+                    scope.bindingKey(), scope.version());
         }
     }
 
@@ -430,15 +434,100 @@ class JdbcExecutionAuthorizationRepository implements ExecutionAuthorizationRepo
     @Override
     public boolean recordRedemption(UUID capabilityId, Instant at) {
         // The ceiling is in the predicate rather than checked beforehand, so two concurrent redemptions cannot
-        // both read "63" and both write "64".
+        // both read "63" and both write "64". It is the capability's OWN ceiling: a secret capability stops at
+        // two, and the CHECK added in V13 refuses a third even from a writer that skipped this predicate.
         return jdbc.update(
                         """
                         update execution_capabilities
                            set redemption_count = redemption_count + 1, last_redeemed_at = ?
-                         where capability_id = ? and revoked_at is null and redemption_count < ?
+                         where capability_id = ? and revoked_at is null
+                           and redemption_count < case when capability_type = 'SECRET' then ? else ? end
                         """,
-                        Timestamp.from(at), capabilityId, ExecutionCapability.MAX_REDEMPTIONS)
+                        Timestamp.from(at), capabilityId, ExecutionCapability.MAX_SECRET_REDEMPTIONS,
+                        ExecutionCapability.MAX_REDEMPTIONS)
                 == 1;
+    }
+
+    @Override
+    public List<PinnedVersionState> pinnedVersionStates(
+            UUID organizationId, UUID projectId, List<PinnedSecretBinding> bindings) {
+        List<PinnedVersionState> states = new java.util.ArrayList<>();
+        for (PinnedSecretBinding binding : bindings) {
+            if (binding.version() == null) {
+                states.add(PinnedVersionState.MISSING);
+                continue;
+            }
+            List<PinnedVersionState> found = jdbc.query(
+                    """
+                    select exists (select 1 from secret_version_revocations r
+                                    where r.secret_version_id = v.secret_version_id) as revoked,
+                           exists (select 1 from secret_version_ciphertexts c
+                                    where c.secret_version_id = v.secret_version_id) as encrypted
+                      from secret_versions v
+                     where v.organization_id = ? and v.project_id = ? and v.secret_reference_id = ?
+                       and v.version_number = ?
+                    """,
+                    (row, number) -> row.getBoolean("revoked")
+                            ? PinnedVersionState.REVOKED
+                            : row.getBoolean("encrypted") ? PinnedVersionState.ACTIVE : PinnedVersionState.MISSING,
+                    organizationId, projectId, binding.secretReferenceId(), binding.version());
+            states.add(found.isEmpty() ? PinnedVersionState.MISSING : found.getFirst());
+        }
+        return states;
+    }
+
+    @Override
+    public List<SecretMaterial> loadSecretMaterial(UUID capabilityId) {
+        // Every join is on the composite ownership key, so a scope row can only ever reach a version in its own
+        // organization and project, and a version only its own ciphertext and revocation.
+        return jdbc.query(
+                """
+                select s.organization_id, s.project_id, s.binding_key, s.secret_reference_id,
+                       s.secret_version_number,
+                       (r.secret_version_id is not null) as revoked,
+                       c.ciphertext
+                  from execution_capability_secret_references s
+                  join secret_versions v
+                    on v.organization_id = s.organization_id and v.project_id = s.project_id
+                   and v.secret_reference_id = s.secret_reference_id
+                   and v.version_number = s.secret_version_number
+                  left join secret_version_revocations r
+                    on r.secret_version_id = v.secret_version_id
+                   and r.organization_id = v.organization_id and r.project_id = v.project_id
+                  left join secret_version_ciphertexts c
+                    on c.secret_version_id = v.secret_version_id
+                   and c.organization_id = v.organization_id and c.project_id = v.project_id
+                 where s.capability_id = ?
+                 order by s.binding_key
+                """,
+                (row, number) -> new SecretMaterial(
+                        row.getObject("organization_id", UUID.class),
+                        row.getObject("project_id", UUID.class),
+                        row.getString("binding_key"),
+                        row.getObject("secret_reference_id", UUID.class),
+                        row.getInt("secret_version_number"),
+                        row.getBoolean("revoked"),
+                        row.getString("ciphertext")),
+                capabilityId);
+    }
+
+    @Override
+    public int secretRedemptionsUnder(UUID authorizationId) {
+        Integer total = jdbc.queryForObject(
+                """
+                select coalesce(sum(redemption_count), 0) from execution_capabilities
+                 where authorization_id = ? and capability_type = 'SECRET'
+                """,
+                Integer.class, authorizationId);
+        return total == null ? 0 : total;
+    }
+
+    @Override
+    public boolean capabilityUnrevoked(UUID capabilityId) {
+        Integer live = jdbc.queryForObject(
+                "select count(*) from execution_capabilities where capability_id = ? and revoked_at is null",
+                Integer.class, capabilityId);
+        return live != null && live == 1;
     }
 
     @Override

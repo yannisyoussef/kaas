@@ -57,7 +57,7 @@
       }
     ]
   },
-  "secretCapabilities": [],
+  "secretBindings": [],
   "configurationSnapshot": {
     "BASE_URL": "https://example.test",
     "RETRIES": 2,

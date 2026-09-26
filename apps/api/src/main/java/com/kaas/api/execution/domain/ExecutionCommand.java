@@ -38,7 +38,7 @@ public record ExecutionCommand(
         String runSnapshotSha256,
         EngineDescriptor engine,
         SourceBundleReference sourceBundle,
-        List<SecretCapabilityReference> secretCapabilities,
+        List<SecretBindingReference> secretBindings,
         NetworkPolicyReference networkPolicy,
         SandboxSecurityProfileReference sandboxSecurityProfile,
         List<ConfigurationVariable> configuration,
@@ -52,7 +52,7 @@ public record ExecutionCommand(
         String commandDigest) {
 
     public ExecutionCommand {
-        secretCapabilities = List.copyOf(secretCapabilities);
+        secretBindings = List.copyOf(secretBindings);
         configuration = List.copyOf(configuration);
         if (issuedAt != null && expiresAt != null && !expiresAt.isAfter(issuedAt)) {
             throw new IllegalArgumentException("A command must expire after it is issued.");
@@ -78,9 +78,16 @@ public record ExecutionCommand(
         }
     }
 
-    /** A secret capability the worker may redeem. Never a value, a path, or a provider credential. */
-    public record SecretCapabilityReference(
-            UUID capabilityId, String provider, String referenceId, String bindingKey, Instant expiresAt) {}
+    /**
+     * One secret the command authorizes, as the run pinned it: the binding key, the reference, and the exact
+     * version. Never a value, a ciphertext, a path, a provider credential, or a capability identifier.
+     *
+     * <p>No capability identifier, deliberately, for the same reason the source bundle carries none: the
+     * secret capability rotates on every delivery, and an identifier inside an immutable, digested document is
+     * stale from the second request onward. What the document binds is WHICH secrets, at WHICH versions; the
+     * bearer credential that redeems exactly that set travels beside it in the delivery envelope.
+     */
+    public record SecretBindingReference(String bindingKey, UUID secretReferenceId, int version, String provider) {}
 
     /** Which egress policy applies, by identity and digest. Not launcher configuration. */
     public record NetworkPolicyReference(UUID policyRevisionId, NetworkPolicyType type, int version, String digest) {}

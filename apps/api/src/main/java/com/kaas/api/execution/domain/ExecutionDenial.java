@@ -30,7 +30,10 @@ public enum ExecutionDenial {
      * because it stops anyone from adding it.
      */
     RUN_SNAPSHOT_INVALID,
-    /** The run binds secrets and no production secret provider exists to satisfy them. */
+    /**
+     * The run binds secrets and this deployment configured no secret provider, or the provider could not be
+     * reached, answered too slowly, or is sealed.
+     */
     SECRET_PROVIDER_UNAVAILABLE,
 
     /**
@@ -46,6 +49,24 @@ public enum ExecutionDenial {
      * that never considered secrets in a sandbox running arbitrary tenant code.
      */
     ENGINE_REQUIRES_SECRET_FREE_RUN,
+
+    // Secret execution (ADR-034). Each is a category and nothing else: no key, no reference, no version, and
+    // nothing a provider said. The run that meets one of these does not start its engine.
+
+    /** A version the run pinned has been revoked. There is no fallback to another version. */
+    SECRET_VERSION_REVOKED,
+    /** A version the run pinned does not exist, or has no ciphertext left. */
+    SECRET_VERSION_NOT_FOUND,
+    /** The provider refused to decrypt under this tenant's context. */
+    SECRET_ACCESS_DENIED,
+    /** The platform could not authenticate to the provider. */
+    SECRET_PROVIDER_AUTH_FAILED,
+    /** A decrypted value is empty or not UTF-8. */
+    SECRET_VALUE_INVALID,
+    /** A decrypted value, or the run's values together, exceed the platform's bounds. */
+    SECRET_VALUE_TOO_LARGE,
+    /** The values were resolved and could not be handed over. */
+    SECRET_DELIVERY_FAILED,
     /** The capability presented has passed its expiry. */
     CAPABILITY_EXPIRED,
     /** The capability was valid once, and the state it depended on has since moved. */

@@ -28,7 +28,8 @@ public final class RunSnapshotPolicy {
             List<SnapshotFeature> selectedFeatures,
             EnvironmentRevision environment,
             RunProfileRevision profile,
-            EngineDescriptor engine) {
+            EngineDescriptor engine,
+            Map<UUID, Integer> activeSecretVersions) {
         requireValidSources(projectId, selectedFeatures, environment, profile);
         List<SnapshotFeature> features = selectedFeatures.stream().sorted(FEATURE_ORDER).toList();
         requireUniqueFeatures(features);
@@ -39,8 +40,19 @@ public final class RunSnapshotPolicy {
         List<ConfigurationVariable> configuration = effective.values().stream()
                 .sorted(Comparator.comparing(ConfigurationVariable::key))
                 .toList();
-        List<SecretBinding> secrets = environment.secretBindings().stream()
+        // THE VERSION IS PINNED HERE, from metadata only. Nothing is decrypted to create a run: the mutable
+        // "current secret" becomes an immutable (reference, version) input, and a rotation afterwards changes
+        // nothing about this run. A binding whose secret has no usable version cannot be pinned, and a run that
+        // could never execute is refused now rather than created.
+        List<PinnedSecretBinding> secrets = environment.secretBindings().stream()
                 .sorted(Comparator.comparing(SecretBinding::key))
+                .map(binding -> {
+                    Integer version = activeSecretVersions.get(binding.secretReferenceId());
+                    if (version == null || version < 1) {
+                        throw new SecretVersionUnavailableException();
+                    }
+                    return new PinnedSecretBinding(binding.key(), binding.secretReferenceId(), version);
+                })
                 .toList();
         List<String> tags = profile.selection().tags().stream().sorted().toList();
         List<ArtifactType> artifactTypes = profile.artifactPolicy().types().stream()
@@ -107,12 +119,18 @@ public final class RunSnapshotPolicy {
             }
             update(digest, "SECRET_REFERENCE_COUNT");
             update(digest, Integer.toString(snapshot.secretBindings().size()));
-            for (SecretBinding binding : snapshot.secretBindings().stream()
-                    .sorted(Comparator.comparing(SecretBinding::key))
+            for (PinnedSecretBinding binding : snapshot.secretBindings().stream()
+                    .sorted(Comparator.comparing(PinnedSecretBinding::key))
                     .toList()) {
                 update(digest, "SECRET_REFERENCE");
                 update(digest, binding.key());
                 update(digest, binding.secretReferenceId().toString());
+                // The version is part of what the run IS, so two runs pinning different versions of the same
+                // reference must not share a digest. Safe identity only: a small integer, never the value, the
+                // ciphertext, or anything derived from either. A snapshot with no bindings digests exactly as it
+                // did before this field existed.
+                update(digest, "SECRET_VERSION");
+                update(digest, String.valueOf(binding.version()));
             }
             update(digest, "TAG_COUNT");
             update(digest, Integer.toString(snapshot.selection().tags().size()));

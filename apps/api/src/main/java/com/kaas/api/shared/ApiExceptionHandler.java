@@ -166,6 +166,23 @@ public class ApiExceptionHandler {
                     "The server could not complete the request.",
                     List.of());
         }
+        if (carriesSecretMaterial(request)) {
+            // THE SECRET PATH GETS NO CAUSE CHAIN. A request here carried plaintext (a version write) or is
+            // resolving it (a bundle redemption), and an exception thrown anywhere under it can have been built
+            // from either -- a buffer printed by a library, a provider body, a parser quoting its input. The
+            // service boundary already collapses every expected failure to a category; this is the backstop for
+            // the unexpected ones, and it records the type and nothing else.
+            LOGGER.atError()
+                    .addKeyValue("exceptionType", exception.getClass().getName())
+                    .addKeyValue("secretPath", true)
+                    .log("Unhandled request failure on a secret path");
+            return response(
+                    request,
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "The server could not complete the request.",
+                    List.of());
+        }
         LOGGER.atError()
                 .addKeyValue("exceptionType", exception.getClass().getName())
                 .setCause(exception)
@@ -176,6 +193,22 @@ public class ApiExceptionHandler {
                 "INTERNAL_ERROR",
                 "The server could not complete the request.",
                 List.of());
+    }
+
+    /**
+     * Whether this request writes or resolves secret plaintext.
+     *
+     * <p>Matched on the path rather than on the handler, because the handler may not have been resolved when a
+     * failure happens, and a path is the one thing every request has.
+     */
+    static boolean carriesSecretMaterial(HttpServletRequest request) {
+        String path = request.getRequestURI();
+        if (path == null) {
+            return true;
+        }
+        return path.startsWith("/internal/v1/secret-bundles")
+                || (path.startsWith("/api/v1/projects/") && path.contains("/secret-references/")
+                        && path.contains("/versions"));
     }
 
     private static String sqlState(Throwable exception) {

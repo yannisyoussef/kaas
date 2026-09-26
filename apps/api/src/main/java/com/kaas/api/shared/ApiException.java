@@ -28,6 +28,14 @@ public final class ApiException extends RuntimeException {
         return new ApiException(HttpStatus.TOO_MANY_REQUESTS, code, detail, List.of());
     }
 
+    /**
+     * A dependency this request needs is not available now. The code names which, the detail says nothing
+     * about why: a provider's own reason is an operator's business and is recorded where operators look.
+     */
+    public static ApiException unavailable(String code, String detail) {
+        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, code, detail, List.of());
+    }
+
     public static ApiException validation(String pointer, String detail) {
         return new ApiException(
                 HttpStatus.UNPROCESSABLE_CONTENT,

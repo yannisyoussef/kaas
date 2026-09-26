@@ -128,14 +128,16 @@ class JdbcRunIntentRepository implements RunIntentRepository {
         for (ConfigurationVariable value : snapshot.effectiveConfiguration()) {
             insertConfiguration(organizationId, snapshot, value);
         }
-        for (SecretBinding binding : snapshot.secretBindings()) {
+        for (com.kaas.api.controlplane.domain.PinnedSecretBinding binding : snapshot.secretBindings()) {
             jdbc.update(
                     """
                     insert into run_snapshot_configuration_entries
-                        (organization_id, project_id, run_id, config_key, value_kind, secret_reference_id)
-                    values (?, ?, ?, ?, 'SECRET_REFERENCE', ?)
+                        (organization_id, project_id, run_id, config_key, value_kind, secret_reference_id,
+                         secret_version_number)
+                    values (?, ?, ?, ?, 'SECRET_REFERENCE', ?, ?)
                     """,
-                    organizationId, snapshot.projectId(), snapshot.runId(), binding.key(), binding.secretReferenceId());
+                    organizationId, snapshot.projectId(), snapshot.runId(), binding.key(), binding.secretReferenceId(),
+                    binding.version());
         }
         for (String tag : snapshot.selection().tags()) {
             jdbc.update(
@@ -218,17 +220,21 @@ class JdbcRunIntentRepository implements RunIntentRepository {
                         row.getLong("revision_number"), row.getString("logical_path"), digest(row.getString("source_sha256"))),
                 organizationId, projectId, runId);
         List<ConfigurationVariable> configuration = new ArrayList<>();
-        List<SecretBinding> secrets = new ArrayList<>();
+        List<com.kaas.api.controlplane.domain.PinnedSecretBinding> secrets = new ArrayList<>();
         jdbc.query(
                 """
-                select config_key, value_kind, string_value, integer_value, boolean_value, secret_reference_id
+                select config_key, value_kind, string_value, integer_value, boolean_value, secret_reference_id,
+                       secret_version_number
                   from run_snapshot_configuration_entries
                  where organization_id = ? and project_id = ? and run_id = ? order by config_key collate "C"
                 """,
                 rows -> {
                     String kind = rows.getString("value_kind");
                     if (kind.equals("SECRET_REFERENCE")) {
-                        secrets.add(new SecretBinding(rows.getString("config_key"), rows.getObject("secret_reference_id", UUID.class)));
+                        secrets.add(new com.kaas.api.controlplane.domain.PinnedSecretBinding(
+                                rows.getString("config_key"),
+                                rows.getObject("secret_reference_id", UUID.class),
+                                rows.getObject("secret_version_number", Integer.class)));
                     } else {
                         ConfigurationValueType type = ConfigurationValueType.valueOf(kind);
                         Object value = switch (type) {

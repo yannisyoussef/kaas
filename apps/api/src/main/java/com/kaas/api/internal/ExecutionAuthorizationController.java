@@ -1,6 +1,7 @@
 package com.kaas.api.internal;
 
 import com.kaas.api.execution.application.ExecutionAuthorizationService;
+import com.kaas.api.execution.application.SecretCapabilityService;
 import com.kaas.api.execution.application.SourceCapabilityService;
 import com.kaas.api.execution.domain.ExecutionDenial;
 import jakarta.validation.Valid;
@@ -57,13 +58,20 @@ class ExecutionAuthorizationController {
      */
     private static final String SOURCE_CAPABILITY_HEADER = "X-KaaS-Source-Capability";
 
+    /** The secret capability's own header, for the same reasons: never a query string, never the body. */
+    private static final String SECRET_CAPABILITY_HEADER = "X-KaaS-Secret-Capability";
+
     private final ExecutionAuthorizationService authorizations;
     private final SourceCapabilityService sources;
+    private final SecretCapabilityService secrets;
 
     ExecutionAuthorizationController(
-            ExecutionAuthorizationService authorizations, SourceCapabilityService sources) {
+            ExecutionAuthorizationService authorizations,
+            SourceCapabilityService sources,
+            SecretCapabilityService secrets) {
         this.authorizations = authorizations;
         this.sources = sources;
+        this.secrets = secrets;
     }
 
     /**
@@ -97,7 +105,10 @@ class ExecutionAuthorizationController {
         // The bearer token exists in this response and nowhere else. It was never written to a database, a log,
         // a metric, or the persisted command, and the server cannot produce it again.
         body.put("sourceCapabilityToken", delivery.sourceCapabilityToken());
-        body.put("secretCapabilityTokens", delivery.secretCapabilityTokens());
+        // Present only for a run that binds secrets, and ABSENT rather than null or empty for one that does not,
+        // for the reason the egress token below gives: a field that exists invites a worker to pass something
+        // along. It redeems the command's exact pinned secret set, at most twice, while this assignment lives.
+        delivery.secretCapabilityToken().ifPresent(token -> body.put("secretCapabilityToken", token));
         // Present only for a policy that needs one, and absent rather than null for one that does not: a
         // DENY_ALL sandbox has nothing to present a credential to, and emitting an empty field would invite a
         // worker to pass something along anyway.
@@ -156,6 +167,48 @@ class ExecutionAuthorizationController {
                 // server having to promise byte-identical framing across runtimes.
                 .header("X-KaaS-Bundle-Digest", bundle.contentDigest())
                 .body(bundle.archive());
+    }
+
+    /**
+     * Exchanges a secret capability for the run's exact, pinned secret values.
+     *
+     * <p>Internal only: this path is on the service filter chain, requires the worker's own service credential
+     * AND the capability, and is absent from the public OpenAPI document. The deployment keeps /internal off the
+     * public edge, and that is not what authorizes it — the two credentials are.
+     *
+     * <p>The response is a binary frame ({@code application/octet-stream}, see SecretBundleFormat), written once
+     * and then cleared. A refusal is 409 with a category, because unlike a source refusal the worker has to
+     * report WHY its run cannot start — a revoked version and an unreachable provider are different failures —
+     * and a category is all it gets.
+     */
+    @PostMapping(value = "/secret-bundles")
+    void secretBundle(
+            Authentication authentication,
+            @RequestHeader(name = SECRET_CAPABILITY_HEADER, required = false) String capabilityToken,
+            jakarta.servlet.http.HttpServletResponse response) throws java.io.IOException {
+        var redemption = secrets.redeem(capabilityToken, authentication.getName());
+        response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
+        response.setHeader(HttpHeaders.PRAGMA, "no-cache");
+        if (redemption.denial().isPresent()) {
+            response.setStatus(409);
+            response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            response.getWriter().write("{\"code\":\"" + redemption.denial().orElseThrow().name() + "\"}");
+            return;
+        }
+        var bundle = redemption.bundle().orElseThrow();
+        try {
+            // Written here, synchronously, straight to the socket, and cleared the moment it has been handed
+            // over. Returning it as a body would give the frame to a message converter and an async dispatch
+            // this code cannot see the end of, and could not clear after.
+            response.setStatus(200);
+            response.setContentType(MediaType.APPLICATION_OCTET_STREAM_VALUE);
+            response.setContentLength(bundle.frame().length);
+            var output = response.getOutputStream();
+            output.write(bundle.frame());
+            output.flush();
+        } finally {
+            bundle.clear();
+        }
     }
 
     private ResponseEntity<Map<String, Object>> refusal(ExecutionDenial denial) {

@@ -57,6 +57,6 @@
       }
     ]
   },
-  "secretCapabilities": [],
+  "secretBindings": [],
   "configurationSnapshot": {}
 }

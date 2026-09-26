@@ -57,7 +57,7 @@
       }
     ]
   },
-  "secretCapabilities": [],
+  "secretBindings": [],
   "configurationSnapshot": {},
   "sourceCapabilityToken": "kaas_src_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 }

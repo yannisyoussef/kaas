@@ -1,6 +1,9 @@
 plugins {
     id("org.springframework.boot")
     id("io.spring.dependency-management")
+    // A real Vault Transit for tests, shared with the pipeline module rather than written twice. Test
+    // fixtures are never on the shipped runtime classpath, which is what verifyNoExecutionDependencies checks.
+    `java-test-fixtures`
 }
 
 val mockitoAgent = configurations.create("mockitoAgent")
@@ -25,6 +28,8 @@ dependencies {
     testImplementation("org.testcontainers:testcontainers-rabbitmq")
     testImplementation("com.tngtech.archunit:archunit-junit5:1.4.1")
     mockitoAgent("org.mockito:mockito-core") { isTransitive = false }
+
+    testFixturesImplementation("org.testcontainers:testcontainers")
 }
 
 tasks.withType<Test>().configureEach {

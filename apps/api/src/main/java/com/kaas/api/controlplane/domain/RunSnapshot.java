@@ -11,7 +11,7 @@ public record RunSnapshot(
         SnapshotRevision environment,
         SnapshotRevision runProfile,
         List<ConfigurationVariable> effectiveConfiguration,
-        List<SecretBinding> secretBindings,
+        List<PinnedSecretBinding> secretBindings,
         RunSelection selection,
         int parallelism,
         ScenarioRetry scenarioRetry,

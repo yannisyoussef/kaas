@@ -130,10 +130,21 @@ public class RunIntentService {
         UUID runId = UUID.randomUUID();
         RunSnapshot snapshot;
         try {
-            snapshot = RunSnapshotPolicy.materialize(runId, projectId, features, environment, profile, engine);
+            Set<UUID> boundSecrets = environment.secretBindings().stream()
+                    .map(com.kaas.api.controlplane.domain.SecretBinding::secretReferenceId)
+                    .collect(Collectors.toSet());
+            snapshot = RunSnapshotPolicy.materialize(
+                    runId, projectId, features, environment, profile, engine,
+                    configuration.findActiveSecretVersions(principal.organizationId(), projectId, boundSecrets));
         } catch (DuplicateFeatureSelectionException exception) {
             throw ApiException.validation(
                     "/featureRevisionIds", "Only one revision of each feature and logical path may be selected.");
+        } catch (com.kaas.api.controlplane.domain.SecretVersionUnavailableException exception) {
+            // Which binding is not said: the caller owns the environment and can list its own secrets' versions,
+            // and the error needs to be actionable rather than enumerating anything.
+            throw ApiException.conflict(
+                    "SECRET_VERSION_NOT_FOUND",
+                    "A secret this environment binds has no usable version. Write a version, then create the run.");
         }
         // Admission is checked only on this path, after the replay above has already returned. A successful
         // replay must keep working when the organization is at its ceiling: it creates no new work, and failing

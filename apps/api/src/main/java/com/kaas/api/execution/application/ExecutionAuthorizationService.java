@@ -18,7 +18,9 @@ import com.kaas.api.execution.domain.NetworkPolicyRevision;
 import com.kaas.api.execution.domain.NetworkPolicyType;
 import com.kaas.api.execution.domain.AttestationVerification;
 import com.kaas.api.execution.domain.VerifiedSandboxSecurityAttestation;
-import com.kaas.api.execution.domain.SecretValueProvider;
+import com.kaas.api.controlplane.domain.PinnedSecretBinding;
+import com.kaas.api.secrets.domain.SecretLimits;
+import com.kaas.api.secrets.domain.SecretTransit;
 import com.kaas.api.execution.domain.SourceBundlePolicy;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -57,14 +59,17 @@ import tools.jackson.databind.json.JsonMapper;
 public class ExecutionAuthorizationService {
 
     /**
-     * Engines authorized only for runs with no secret bindings at all.
+     * Engines that cannot consume a secret, and so are refused a run that binds one.
      *
-     * <p>Zero bindings, not zero useful ones: an empty value, a placeholder and a test secret are all
-     * bindings, and each would mean a sandbox running arbitrary tenant code beside secret material that no
-     * adjudication has covered.
+     * <p>KARATE left this set in KAAS-22 (ADR-034 re-adjudicates ADR-033 for secret-bearing execution). The
+     * platform's synthetic workload stays in it: it has no channel through which a secret could reach anything,
+     * so a secret-bearing synthetic run would resolve plaintext for a process that discards it.
      */
     private static final java.util.Set<String> SECRET_FREE_ENGINES =
-            java.util.Set.of(com.kaas.api.controlplane.domain.EngineDescriptor.KARATE);
+            java.util.Set.of(com.kaas.api.controlplane.domain.EngineDescriptor.SYNTHETIC);
+
+    /** The provider every issued secret binding names. One provider, fixed by the Operations decision. */
+    static final String SECRET_PROVIDER = "vault-transit";
 
 
     /** Only a principal in this namespace may hold an assignment. */
@@ -76,7 +81,7 @@ public class ExecutionAuthorizationService {
     private final ExecutionAuthorizationRepository repository;
     private final WorkerLeaseRepository leases;
     private final SandboxSecurityAttestationSource attestations;
-    private final SecretValueProvider secrets;
+    private final SecretTransit secrets;
     private final MeterRegistry meters;
     private final Duration authorizationTtl;
     private final Duration capabilityTtl;
@@ -87,7 +92,7 @@ public class ExecutionAuthorizationService {
             ExecutionAuthorizationRepository repository,
             WorkerLeaseRepository leases,
             SandboxSecurityAttestationSource attestations,
-            SecretValueProvider secrets,
+            SecretTransit secrets,
             MeterRegistry meters,
             @Value("${kaas.execution.authorization-ttl}") Duration authorizationTtl,
             @Value("${kaas.execution.capability-ttl}") Duration capabilityTtl,
@@ -298,36 +303,16 @@ public class ExecutionAuthorizationService {
             }
         }
 
-        if (!context.secretBindings().isEmpty() && SECRET_FREE_ENGINES.contains(context.engine().engine())) {
-            // BEFORE the provider check, and independent of it.
-            //
-            // ADR-033 authorized tenant code execution for secret-free runs only. Every acceptance behind that
-            // -- the missing nodev, the construction privilege, ambient file access under a fully hostile
-            // model -- was reasoned without a secret anywhere in the sandbox.
-            //
-            // Placing this first matters. The provider check below stops firing the moment a real provider is
-            // configured, and a Karate run carrying secrets would then sail through an adjudication that never
-            // considered them.
-            LOGGER.atInfo()
-                    .addKeyValue("event", "EXECUTION_DENIED")
-                    .addKeyValue("runId", runId)
-                    .addKeyValue("attemptId", attemptId)
-                    .addKeyValue("reason", ExecutionDenial.ENGINE_REQUIRES_SECRET_FREE_RUN.name())
-                    .log("Refused a secret-bearing run for an engine authorized only for secret-free execution");
-            return denied(ExecutionDenial.ENGINE_REQUIRES_SECRET_FREE_RUN);
+        if (!context.secretBindings().isEmpty()) {
+            Optional<ExecutionDenial> secretRefusal = secretRefusal(organizationId, run, attemptId, context);
+            if (secretRefusal.isPresent()) {
+                return denied(secretRefusal.orElseThrow());
+            }
         }
-
-        if (!context.secretBindings().isEmpty() && !secrets.available()) {
-            // The run needs secrets and nothing can supply them. Refusing here rather than at redemption means
-            // the failure happens before a sandbox exists, with a reason that names the actual problem.
-            LOGGER.atInfo()
-                    .addKeyValue("event", "EXECUTION_DENIED")
-                    .addKeyValue("runId", runId)
-                    .addKeyValue("attemptId", attemptId)
-                    .addKeyValue("reason", ExecutionDenial.SECRET_PROVIDER_UNAVAILABLE.name())
-                    .log("Refused execution for a secret-bearing run with no secret provider");
-            return denied(ExecutionDenial.SECRET_PROVIDER_UNAVAILABLE);
-        }
+        // A RUN WITH NO SECRETS NEVER REACHES THE PROVIDER. Not its configuration, not its health, not a call:
+        // nothing on this path asks the secret transit anything, so a sealed or absent Vault cannot stop a
+        // secret-free run. That independence is a requirement of the Operations contract and it is pinned by a
+        // test that runs a secret-free execution with the provider down.
 
         // The authorization may never outlive the lease that justifies it. Taking the earlier of the two is what
         // makes "authorization.expiresAt <= lease.expiresAt" true by construction rather than by a check that
@@ -345,10 +330,59 @@ public class ExecutionAuthorizationService {
 
         Optional<ExecutionAuthorization> existing = repository.findAuthorization(attemptId, assignmentEpoch);
         if (existing.isPresent()) {
-            return reissue(existing.orElseThrow(), attempt, workerId, policy.orElseThrow(), now, expiresAt);
+            return reissue(existing.orElseThrow(), attempt, workerId, policy.orElseThrow(), context, now, expiresAt);
         }
         return issue(
                 organizationId, run, attempt, context, attestation.orElseThrow(), policy.orElseThrow(), now, expiresAt);
+    }
+
+    /**
+     * Why a secret-bearing run may not be authorized, or empty if it may.
+     *
+     * <p>Every check here reads METADATA. Nothing is decrypted to authorize a run, and the provider is asked only
+     * whether it is configured -- never whether it is healthy, because a health probe from here would put the
+     * provider on the path of the decision and a secret's plaintext nowhere near it. The provider is contacted
+     * for the first time at redemption, by a worker holding this run's capability, and not before.
+     *
+     * <p>The order is cheapest and most specific first. A revoked version is reported as revoked even when
+     * another binding is also missing, because revocation is the answer an operator acted to produce.
+     */
+    private Optional<ExecutionDenial> secretRefusal(
+            UUID organizationId,
+            TestRun run,
+            UUID attemptId,
+            ExecutionAuthorizationRepository.SnapshotContext context) {
+        ExecutionDenial refusal = null;
+        List<PinnedSecretBinding> bindings = context.secretBindings();
+        if (SECRET_FREE_ENGINES.contains(context.engine().engine())) {
+            refusal = ExecutionDenial.ENGINE_REQUIRES_SECRET_FREE_RUN;
+        } else if (!secrets.configured()) {
+            // Refused before a sandbox exists, with a reason that names the actual problem.
+            refusal = ExecutionDenial.SECRET_PROVIDER_UNAVAILABLE;
+        } else if (bindings.size() > SecretLimits.MAX_SECRETS_PER_RUN) {
+            refusal = ExecutionDenial.SECRET_VALUE_TOO_LARGE;
+        } else if (bindings.stream().anyMatch(binding -> binding.version() == null)) {
+            // Written by a release that pinned references without versions. Executing it would mean choosing
+            // a version now, which is exactly the "latest at execution" behaviour ADR-034 forbids.
+            refusal = ExecutionDenial.RUN_SNAPSHOT_INVALID;
+        } else {
+            var states = repository.pinnedVersionStates(organizationId, run.projectId(), bindings);
+            if (states.contains(ExecutionAuthorizationRepository.PinnedVersionState.REVOKED)) {
+                refusal = ExecutionDenial.SECRET_VERSION_REVOKED;
+            } else if (states.contains(ExecutionAuthorizationRepository.PinnedVersionState.MISSING)) {
+                refusal = ExecutionDenial.SECRET_VERSION_NOT_FOUND;
+            }
+        }
+        if (refusal == null) {
+            return Optional.empty();
+        }
+        LOGGER.atInfo()
+                .addKeyValue("event", "EXECUTION_DENIED")
+                .addKeyValue("runId", run.runId())
+                .addKeyValue("attemptId", attemptId)
+                .addKeyValue("reason", refusal.name())
+                .log("Refused a secret-bearing run");
+        return Optional.of(refusal);
     }
 
     /**
@@ -369,6 +403,7 @@ public class ExecutionAuthorizationService {
             ExecutionAttempt attempt,
             String workerId,
             NetworkPolicyRevision policy,
+            ExecutionAuthorizationRepository.SnapshotContext context,
             Instant now,
             Instant expiresAt) {
         if (authorization.revokedAt() != null) {
@@ -423,12 +458,14 @@ public class ExecutionAuthorizationService {
         }
         Minted source = mintSource(authorization.authorizationId(), now, capabilityExpiry);
         Optional<Minted> egress = mintEgress(policy, authorization.authorizationId(), now, capabilityExpiry);
+        Optional<Minted> secret = mintSecret(context, authorization.authorizationId(), now, capabilityExpiry);
         // Rotated together, in one transaction, with whatever was there before revoked. Rotating one and
         // leaving the other would leave a live token from a previous delivery usable alongside a fresh one,
         // which is exactly the accumulation the at-most-one-live rule exists to prevent.
         List<ExecutionCapability> replacements = new java.util.ArrayList<>();
         replacements.add(source.capability());
         egress.ifPresent(minted -> replacements.add(minted.capability()));
+        secret.ifPresent(minted -> replacements.add(minted.capability()));
         repository.rotateCapabilities(authorization.authorizationId(), List.copyOf(replacements), now);
         count("kaas.execution.authorization", "REISSUED");
         var stored = command.orElseThrow();
@@ -441,7 +478,7 @@ public class ExecutionAuthorizationService {
                         stored.expiresAt(),
                         source.capability().capabilityId(),
                         source.token(),
-                        List.of(),
+                        secret.map(Minted::token),
                         egress.map(Minted::token),
                         // Named only when a capability was minted, so the two cannot disagree: a destination
                         // list beside an absent credential would describe an allowlist nothing can use.
@@ -477,6 +514,7 @@ public class ExecutionAuthorizationService {
         }
         Minted source = mintSource(authorizationId, now, capabilityExpiry);
         Optional<Minted> egress = mintEgress(policy, authorizationId, now, capabilityExpiry);
+        Optional<Minted> secret = mintSecret(context, authorizationId, now, capabilityExpiry);
 
         var authorization = new ExecutionAuthorization(
                 authorizationId,
@@ -502,19 +540,21 @@ public class ExecutionAuthorizationService {
                 null);
 
         var command = command(context, authorization, policy, attestation, bundleDigest, now);
-        if (!context.secretBindings().isEmpty() && command.secretCapabilities().isEmpty()) {
-            // A server bug, not a denial. Today the secret refusal above makes this unreachable; the moment a
-            // real provider reports available(), that refusal stops firing and nothing else would notice a
-            // command issued with every secret silently dropped — which is the outcome
-            // UnavailableSecretValueProvider's own documentation names as the worst of the alternatives. This
-            // is the invariant that has to fail loudly instead.
+        if (command.secretBindings().size() != context.secretBindings().size()
+                || secret.isPresent() != !context.secretBindings().isEmpty()) {
+            // A server bug, not a denial. A command issued with a secret silently dropped would run a feature
+            // that then fails for want of a value -- reported as the tenant's failure -- and a command whose
+            // secrets have no capability to redeem them would be the same failure one step later. Either way
+            // the invariant is "the command, the capability scope, and the snapshot name the same set", and it
+            // has to fail loudly here rather than quietly downstream.
             throw new IllegalStateException(
-                    "A secret-bearing run produced a command with no secret capabilities.");
+                    "A command's secret bindings disagree with the snapshot or the capability issued for them.");
         }
         String document = ExecutionCommandPolicy.document(command, MAPPER).toString();
         List<ExecutionCapability> issued = new java.util.ArrayList<>();
         issued.add(source.capability());
         egress.ifPresent(minted -> issued.add(minted.capability()));
+        secret.ifPresent(minted -> issued.add(minted.capability()));
         if (!repository.persistIssuance(new ExecutionAuthorizationRepository.Issuance(
                 authorization, List.copyOf(issued), command, document))) {
             // A concurrent request for the same assignment won the unique constraint. The loser does not retry
@@ -543,7 +583,7 @@ public class ExecutionAuthorizationService {
                         command.expiresAt(),
                         source.capability().capabilityId(),
                         source.token(),
-                        List.of(),
+                        secret.map(Minted::token),
                         egress.map(Minted::token),
                         // Named only when a capability was minted, so the two cannot disagree: a destination
                         // list beside an absent credential would describe an allowlist nothing can use.
@@ -572,9 +612,13 @@ public class ExecutionAuthorizationService {
                 context.engine(),
                 new ExecutionCommand.SourceBundleReference(
                         bundleDigest, ExecutionCommandPolicy.canonicalFeatures(context.features())),
-                // Empty by construction in this slice: a run that binds secrets never reaches here, because
-                // there is no provider to satisfy it and authorization refused above.
-                List.of(),
+                // Exactly the snapshot's pinned set: key, reference and version for each binding, in key order.
+                // Never a value, never a ciphertext, never the capability that redeems them.
+                context.secretBindings().stream()
+                        .sorted(java.util.Comparator.comparing(PinnedSecretBinding::key))
+                        .map(binding -> new ExecutionCommand.SecretBindingReference(
+                                binding.key(), binding.secretReferenceId(), binding.version(), SECRET_PROVIDER))
+                        .toList(),
                 new ExecutionCommand.NetworkPolicyReference(
                         policy.policyRevisionId(),
                         policy.policyType(),
@@ -623,6 +667,34 @@ public class ExecutionAuthorizationService {
         return Optional.of(mint(CapabilityType.EGRESS, authorizationId, now, expiresAt));
     }
 
+    /**
+     * Mints a secret capability whose scope is exactly the run's pinned set, or nothing for a run with none.
+     *
+     * <p>Nothing, not an empty capability: a secret-free run receives no secret token at all, so there is no
+     * credential to leak and no endpoint call to make. For a secret-bearing run the scope enumerates every
+     * (key, reference, version) triple the snapshot pinned -- never a wildcard, never "latest", and never a set
+     * the worker chose -- and the redemption endpoint returns that set and nothing else.
+     */
+    private Optional<Minted> mintSecret(
+            ExecutionAuthorizationRepository.SnapshotContext context,
+            UUID authorizationId,
+            Instant now,
+            Instant expiresAt) {
+        if (context.secretBindings().isEmpty()) {
+            return Optional.empty();
+        }
+        String token = CapabilityToken.issue(CapabilityType.SECRET);
+        List<ExecutionCapability.SecretScope> scope = context.secretBindings().stream()
+                .sorted(java.util.Comparator.comparing(PinnedSecretBinding::key))
+                .map(binding -> new ExecutionCapability.SecretScope(
+                        binding.secretReferenceId(), binding.key(), binding.version()))
+                .toList();
+        return Optional.of(new Minted(
+                token,
+                ExecutionCapability.secret(
+                        UUID.randomUUID(), authorizationId, CapabilityToken.hash(token), now, expiresAt, scope)));
+    }
+
     private Minted mint(CapabilityType type, UUID authorizationId, Instant now, Instant expiresAt) {
         String token = CapabilityToken.issue(type);
         return new Minted(
@@ -667,7 +739,7 @@ public class ExecutionAuthorizationService {
                 command.runSnapshotSha256(),
                 command.engine(),
                 command.sourceBundle(),
-                command.secretCapabilities(),
+                command.secretBindings(),
                 command.networkPolicy(),
                 command.sandboxSecurityProfile(),
                 command.configuration(),
@@ -701,7 +773,13 @@ public class ExecutionAuthorizationService {
             Instant commandExpiresAt,
             UUID sourceCapabilityId,
             String sourceCapabilityToken,
-            List<String> secretCapabilityTokens,
+            /**
+             * Present only for a run that binds secrets, and absent -- not empty -- for one that does not.
+             *
+             * <p>Like every other token here it exists in this object and nowhere else. It redeems the run's exact
+             * pinned set, at most twice, while the assignment it was issued under is still live.
+             */
+            Optional<String> secretCapabilityToken,
             /**
              * Present only for a policy that needs one.
              *

@@ -5,7 +5,7 @@ import com.kaas.api.controlplane.domain.ConfigurationVariable;
 import com.kaas.api.controlplane.domain.EngineDescriptor;
 import com.kaas.api.controlplane.domain.RunSelection;
 import com.kaas.api.controlplane.domain.ScenarioRetry;
-import com.kaas.api.controlplane.domain.SecretBinding;
+import com.kaas.api.controlplane.domain.PinnedSecretBinding;
 import com.kaas.api.controlplane.domain.SnapshotFeature;
 import com.kaas.api.controlplane.domain.ExecutionAttempt;
 import com.kaas.api.execution.domain.CapabilityType;
@@ -101,6 +101,30 @@ public interface ExecutionAuthorizationRepository {
     /** Records that a capability was redeemed, refusing past the row's own ceiling. */
     boolean recordRedemption(UUID capabilityId, Instant at);
 
+    /**
+     * The state of each pinned secret version, read from metadata only. Nothing is decrypted.
+     *
+     * <p>One entry per binding, in the same order, so a caller can refuse on the first version that is revoked
+     * or missing without learning anything else about the others.
+     */
+    List<PinnedVersionState> pinnedVersionStates(
+            UUID organizationId, UUID projectId, List<PinnedSecretBinding> bindings);
+
+    /**
+     * Everything a secret redemption needs for the capability's exact scope: each binding's key, reference,
+     * version, whether it is revoked, and its ciphertext if it still has one.
+     *
+     * <p>Read from the capability's own scope rows, joined to the version tables through the same composite
+     * ownership keys the schema enforces, so a scope row cannot be joined to another tenant's version.
+     */
+    List<SecretMaterial> loadSecretMaterial(UUID capabilityId);
+
+    /** How many times any secret capability issued under this authorization has been redeemed, in total. */
+    int secretRedemptionsUnder(UUID authorizationId);
+
+    /** Whether the capability is still unrevoked, read fresh. */
+    boolean capabilityUnrevoked(UUID capabilityId);
+
     /** The immutable feature sources one snapshot names, with the content each revision pinned. */
     List<FeatureSource> loadSnapshotSources(UUID organizationId, UUID projectId, UUID runId);
 
@@ -121,7 +145,7 @@ public interface ExecutionAuthorizationRepository {
             /** Total UTF-8 bytes of the pinned sources, so issuance can refuse what redemption could not build. */
             long totalSourceBytes,
             List<SnapshotFeature> features,
-            List<SecretBinding> secretBindings,
+            List<PinnedSecretBinding> secretBindings,
             List<ConfigurationVariable> configuration,
             RunSelection selection,
             int parallelism,
@@ -142,6 +166,29 @@ public interface ExecutionAuthorizationRepository {
 
     /** A capability found by token, with the authorization that justified it. */
     record Redeemable(ExecutionCapability capability, ExecutionAuthorization authorization) {}
+
+    /** Whether one pinned version can still be resolved, from metadata alone. */
+    enum PinnedVersionState { ACTIVE, REVOKED, MISSING }
+
+    /**
+     * One secret a capability resolves. The ciphertext is null when the version was revoked and shredded.
+     *
+     * <p>{@link #toString()} never prints the ciphertext.
+     */
+    record SecretMaterial(
+            UUID organizationId,
+            UUID projectId,
+            String bindingKey,
+            UUID secretReferenceId,
+            int version,
+            boolean revoked,
+            String ciphertext) {
+        @Override
+        public String toString() {
+            return "SecretMaterial[bindingKey=" + bindingKey + ", secretReferenceId=" + secretReferenceId
+                    + ", version=" + version + ", revoked=" + revoked + "]";
+        }
+    }
 
     /** One feature's immutable content, as the snapshot pinned it. */
     record FeatureSource(
