@@ -383,52 +383,153 @@ jobs:
       # The engine module's own suite: it reads the jar rather than a line the adapter printed, which is what
       # makes the version claim independent of the adapter's own honesty.
       - run: ./gradlew :services:karate-engine:cleanTest :services:karate-engine:test --no-daemon
-      - name: Confirm the gate actually executed an engine
+      # KAAS-22 HARDENING. What this step and the next ask used to be answerable by less than the suite:
+      # a floor of nine executed tests against a suite of eleven, no check that the suite that ran was the
+      # one this gate exists for, evidence that could silently not be written, no record of which runtime
+      # ran, and a leak check that looked at containers only.
+      - name: Confirm the gate executed the whole Karate suite
         run: |
           set -euo pipefail
-          results=services/runner/build/test-results/karateExecutionTest
-          if [ ! -d "$results" ]; then
-            echo "No test results were produced; the Karate execution gate did not run." >&2
-            exit 1
-          fi
-          executed=$(cat "$results"/*.xml | grep -o 'tests="[0-9]*"' | grep -o '[0-9]*' | awk '{n+=$1} END {print n+0}')
-          skipped=$(cat "$results"/*.xml | grep -o 'skipped="[0-9]*"' | grep -o '[0-9]*' | awk '{n+=$1} END {print n+0}')
-          echo "executed=$executed skipped=$skipped"
-          # A skipped test here is an unproven containment claim about a process running tenant code.
-          if [ "$executed" -lt 9 ] || [ "$skipped" -ne 0 ]; then
-            echo "Expected at least 9 executed tests and no skips." >&2
-            exit 1
-          fi
-      # ANTI-VACUITY, in the gate rather than only in the assertions. The suite requires the engine to name
-      # itself from karate-core's own metadata, so this string exists only if Karate loaded.
-      #
-      # Read out of an evidence file the suite writes, NOT out of the JUnit XML. The XML carries a failure's
-      # message and nothing else, so the earlier `grep -r "karate 2.1.2"` over it could only be satisfied by
-      # the assertion FAILING — a check that was red on every green run and green on nothing. It went
-      # unnoticed because the suite had never passed on a host where this step could run.
-      - name: Confirm an engine named itself
+          python3 .github/scripts/junit-gate.py services/runner/build/test-results/karateExecutionTest \
+            --require com.kaas.runner.sandbox.KarateExecutionTests=11
+          python3 .github/scripts/junit-gate.py services/karate-engine/build/test-results/test \
+            --require com.kaas.karate.KaasKarateAdapterTest=7 --require com.kaas.karate.EngineFrameTest=4
+      # ANTI-VACUITY, in the gate rather than only in the assertions. The engine names itself from karate-core's
+      # own metadata, the runtime is the one the DAEMON reports it assigned (read back before the engine
+      # started), and the secret channel is the adapter confirming it read its frame and closed stdin. Read out
+      # of an evidence file the suite writes into a build-owned directory -- a suite that could not write it
+      # fails -- and never out of the JUnit XML, which carries only a failure's message.
+      - name: Confirm a mediated Karate engine named itself
         run: |
           set -euo pipefail
-          evidence="$RUNNER_TEMP/karate-execution-evidence.txt"
-          if [ ! -f "$evidence" ]; then
-            echo "The suite recorded no engine identity; nothing proves Karate executed." >&2
-            exit 1
-          fi
-          cat "$evidence"
-          grep -q '^engine_identity=karate 2.1.2$' "$evidence"
-          grep -q '^engine_verdict=PASSED$' "$evidence"
-      - name: Confirm no sandbox outlived the run
+          python3 .github/scripts/evidence-gate.py \
+            services/runner/build/evidence/karateExecutionTest/karate-execution-evidence.txt \
+            engine_identity='karate 2.1.2' engine_verdict=PASSED runtime=runsc secret_channel=CONSUMED
+      - name: Confirm nothing outlived the run
         run: |
           set -euo pipefail
-          containers=$(docker ps -aq --filter label=kaas.managed=true | wc -l | tr -d ' ')
-          echo "containers=$containers"
-          if [ "$containers" -ne 0 ]; then
-            echo "KaaS-managed containers outlived the suite." >&2
-            exit 1
-          fi
+          .github/scripts/leak-gate.sh
       - name: Remove anything left behind by a failed run
         if: always()
-        run: docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f
+        run: |
+          docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f
+          docker network ls -q --filter label=kaas.managed=true | xargs -r docker network rm
+
+  # SECRET-BEARING KARATE (KAAS-22): the tenth mandatory job.
+  #
+  # Its own job because nothing else can host it: it needs a real Vault Transit, the mediating runtime, a real
+  # secret capability, a real secret-bearing engine, and a Docker daemon whose persistent logging can be
+  # inspected while the sandbox is alive. Two suites:
+  #
+  #   * secretExecutionTest (runner): secret-bearing Karate inside the sandbox, measured from both sides of the
+  #     boundary -- raw prints the trusted collector saw and redacted, the daemon's log driver and stored logs
+  #     while the container ran, container metadata, the engine's environment, command line, properties,
+  #     descriptors, stdin after the frame, and its crash/dump posture.
+  #   * secretExecutionPipelineTest (pipeline): the whole chain -- a runtime-generated value written through the
+  #     tenant API, encrypted by Vault, pinned, capability-issued, redeemed, delivered, used by Karate under
+  #     runsc through the real egress proxy to authenticate to a target that accepts ONLY that exact value --
+  #     plus the wrong-value control, a revoked version, and a sealed Vault beside a secret-free run.
+  #
+  # Every value is generated inside the test JVM and never reaches the shell, the workflow environment or a
+  # step output. What the shell holds is a random NONCE embedded in every generated value, which is not a
+  # secret: it lets the report scan below find a leaked value without ever being told one.
+  #
+  # The same rules as every gate: no job-level `if:`, no `continue-on-error`, no path filter; the runtime is
+  # installed from the one shared pinned action; and `secret-execution-gate` must stay globally unique.
+  secret-execution-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+      - name: Confirm a container runtime is present
+        run: docker version
+      - uses: ./.github/actions/install-mediating-runtime
+      - name: Choose this run's sentinel nonce
+        run: |
+          set -euo pipefail
+          nonce=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+          echo "KAAS_SENTINEL_NONCE=$nonce" >> "$GITHUB_ENV"
+      # Deleted before they run, so an UP-TO-DATE result cannot satisfy this gate.
+      - run: ./gradlew cleanSecretExecutionTest :services:runner:secretExecutionTest --no-daemon
+      - run: ./gradlew :tests:pipeline:cleanSecretExecutionPipelineTest :tests:pipeline:secretExecutionPipelineTest --no-daemon
+      - name: Report what the suites observed
+        if: failure()
+        run: |
+          for results in services/runner/build/test-results/secretExecutionTest tests/pipeline/build/test-results/secretExecutionPipelineTest; do
+            [ -d "$results" ] || { echo "No results in $results."; continue; }
+            python3 - "$results" <<'PYEOF'
+          import glob, sys, xml.etree.ElementTree as ET
+          for path in sorted(glob.glob(sys.argv[1] + "/*.xml")):
+              for case in ET.parse(path).getroot().iter("testcase"):
+                  for bad in list(case.iter("failure")) + list(case.iter("error")):
+                      print("=" * 78); print(case.get("name")); print("-" * 78)
+                      print((bad.get("message") or "").strip()[:4000])
+          PYEOF
+          done
+      - name: Confirm both suites ran whole
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/junit-gate.py services/runner/build/test-results/secretExecutionTest \
+            --require com.kaas.runner.sandbox.SecretBearingKarateExecutionTests=6
+          python3 .github/scripts/junit-gate.py tests/pipeline/build/test-results/secretExecutionPipelineTest \
+            --require com.kaas.pipeline.SecretExecutionPipelineTests=5
+      # Every line the suites wrote, exactly: a key must carry the expected value and no other. The evidence is
+      # written from trusted observations -- the collector's match counts, the daemon's own answers, the target's
+      # own log, Vault's own decryption -- so each line can only be true if the thing it names happened.
+      - name: Confirm the in-sandbox evidence
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/evidence-gate.py \
+            services/runner/build/evidence/secretExecutionTest/secret-execution-evidence.txt \
+            raw_stdout_secret_observed=true raw_stderr_secret_observed=true persisted_raw_secret=false \
+            engine_identity='karate 2.1.2' engine_verdict=PASSED runtime=runsc \
+            docker_log_driver=none docker_persistent_secret=false secret_in_container_metadata=false \
+            secret_in_environment=false secret_in_cmdline=false secret_in_system_properties=false \
+            engine_stdin_after_frame=-1 sentinel_nonce_applied=true
+      - name: Confirm the end-to-end evidence
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/evidence-gate.py \
+            tests/pipeline/build/evidence/secretExecutionPipelineTest/secret-pipeline-evidence.txt \
+            secret_provider=vault-transit secret_provider_auth=VALID secret_encryption=VALID \
+            secret_version_pinned=true secret_capability=VALID secret_redemption=VALID \
+            secret_authenticated_request=true raw_stdout_secret_observed=true raw_stderr_secret_observed=true \
+            persisted_raw_secret=false redaction=VALID secret_in_database=false secret_in_queue=false \
+            secret_in_host_files=false secret_in_proxy_logs=false engine_identity='karate 2.1.2' \
+            engine_verdict=PASSED runtime=runsc revoked_version_refused=true \
+            provider_outage_refused_secret_run=true secret_free_run_with_provider_down=PASSED \
+            sentinel_nonce_applied=true
+      # THE TEST-REPORT LEAK, checked from outside the JVM. Every generated value carries this run's nonce, so
+      # a value that reached a JUnit XML, an HTML report or anything else the build wrote is found by the nonce
+      # alone. The control proves the scan can see: the same search over a file known to contain the nonce must
+      # match, or an empty result means nothing.
+      - name: Confirm no generated secret reached a report or build output
+        run: |
+          set -euo pipefail
+          control="$RUNNER_TEMP/nonce-control.txt"
+          printf 'control-%s\n' "$KAAS_SENTINEL_NONCE" > "$control"
+          grep -rqF -- "$KAAS_SENTINEL_NONCE" "$control" || { echo "The scan cannot see the nonce." >&2; exit 1; }
+          if grep -rlF -- "$KAAS_SENTINEL_NONCE" services/runner/build tests/pipeline/build apps/api/build 2>/dev/null; then
+            echo "A generated secret value reached build output (files listed above)." >&2
+            exit 1
+          fi
+          echo "sentinel_in_reports=false"
+      - name: Confirm nothing outlived the run
+        run: |
+          set -euo pipefail
+          .github/scripts/leak-gate.sh
+      - name: Remove anything left behind by a failed run
+        if: always()
+        run: |
+          docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f
+          docker network ls -q --filter label=kaas.managed=true | xargs -r docker network rm
 
   # The security gate, run under the MEDIATING RUNTIME rather than the baseline one.
   #

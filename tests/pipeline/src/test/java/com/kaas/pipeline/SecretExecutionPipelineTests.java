@@ -169,6 +169,16 @@ class SecretExecutionPipelineTests {
         registry.add("kaas.secrets.vault.transit-key", () -> VaultTransitFixture.TRANSIT_KEY);
     }
 
+    @org.junit.jupiter.api.BeforeAll
+    static void freshEvidence() throws IOException {
+        String directory = System.getProperty("kaas.evidence.dir");
+        if (directory != null) {
+            Files.deleteIfExists(Path.of(directory, "secret-pipeline-evidence.txt"));
+        }
+        PipelineEvidence.append("secret-pipeline-evidence.txt",
+                "sentinel_nonce_applied=" + (System.getProperty("kaas.test.sentinel-nonce") != null) + "\n");
+    }
+
     @AfterAll
     static void tearDown() {
         if (topology != null) {

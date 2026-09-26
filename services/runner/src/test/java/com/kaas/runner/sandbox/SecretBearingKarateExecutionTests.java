@@ -52,6 +52,17 @@ class SecretBearingKarateExecutionTests {
 
     private final String generation = "karate-secret-" + UUID.randomUUID();
 
+    /**
+     * A fresh evidence file per run of the suite. Tests append to it, and the gate requires every line for a key
+     * to agree, so a stale line from an earlier run would be a contradiction rather than a silent pass.
+     */
+    @org.junit.jupiter.api.BeforeAll
+    static void freshEvidence() throws java.io.IOException {
+        java.nio.file.Files.deleteIfExists(SandboxEvidence.directory().resolve("secret-execution-evidence.txt"));
+        SandboxEvidence.append("secret-execution-evidence.txt",
+                "sentinel_nonce_applied=" + (System.getProperty("kaas.test.sentinel-nonce") != null) + "\n");
+    }
+
     @Test
     @Timeout(600)
     @DisplayName("a secret reaches Karate through kaas.secrets, is printed raw on both streams, and is redacted from both")
