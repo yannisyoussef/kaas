@@ -950,6 +950,202 @@ jobs:
           docker ps -aq --filter label=kaas.managed=true | xargs -r docker rm -f
           docker network ls -q --filter label=kaas.managed=true | xargs -r docker network rm
 
+  # THE DEPLOYMENT-READINESS GATE (KAAS-DEPLOY-001). One job, because it owns one question -- can the application
+  # be handed to Operations -- and every step below is evidence for part of that answer:
+  #
+  #   the runner's work intake is the authenticated internal claim API, never RabbitMQ;
+  #   the production runner composition claims, executes Karate under runsc, and shuts down clean;
+  #   the migrator migrates and the application, in production, does not;
+  #   attestation and service identity refresh without a restart;
+  #   five images carry one revision and are handed off by registry digest;
+  #   and what happens when RabbitMQ loses a published dispatch -- MEASURED, and reported as the open gap it is.
+  #
+  # GREEN HERE IS NOT "READY TO DEPLOY". The broker-loss step asserts rabbitmq_loss_recovery=false: the gate
+  # passes because the blocker is precisely measured, and the verdict it prints says the deployment is blocked.
+  deployment-readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/api-contracts/package-lock.json
+      - run: npm ci
+        working-directory: packages/api-contracts
+      - uses: ./.github/actions/install-mediating-runtime
+
+      # ---- control plane: claim intake, broker loss, migrator and roles, submitted attestations
+      - run: ./gradlew :apps:api:cleanDeploymentReadinessTest :apps:api:deploymentReadinessTest --no-daemon
+      - name: Confirm the control-plane suites ran whole
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/junit-gate.py apps/api/build/test-results/deploymentReadinessTest \
+            --require com.kaas.api.WorkerClaimEndpointTests=12 \
+            --require com.kaas.api.BrokerLossMeasurementTests=2 \
+            --require com.kaas.api.AttestationSubmissionTests=8 \
+            --require com.kaas.api.deployment.MigrationModeTests=8 \
+            --require com.kaas.api.deployment.DeploymentStatusTests=5
+      # The finding, exactly. rabbitmq_loss_recovery=false is REQUIRED: this step fails if anything ever claims
+      # the lost dispatch was rebuilt, because nothing in this release rebuilds it (KAAS-MSG-001).
+      - name: Confirm the broker-loss measurement
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/evidence-gate.py \
+            apps/api/build/evidence/deploymentReadinessTest/broker-loss.properties \
+            published_before_loss=true broker_depth_before_loss=1 broker_depth_after_loss=0 \
+            republished_after_loss=0 claims_after_loss=0 terminal_outcome=TIMED_OUT/QUEUE_DEADLINE \
+            queue_deadline_fail_closed=true rabbitmq_loss_recovery=false follow_up=KAAS-MSG-001
+
+      # ---- runner: lifecycle, configuration, identity, and no broker on its classpath
+      - run: >-
+          ./gradlew :services:runner:cleanTest :services:runner:test --no-daemon
+          --tests 'com.kaas.runner.daemon.*' --tests com.kaas.runner.RunnerApplicationTest
+          :services:runner:verifyLauncherHasNoUserContentDependencies
+      - name: Confirm the runner suites ran whole
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/junit-gate.py services/runner/build/test-results/test \
+            --require com.kaas.runner.daemon.RunnerDaemonLifecycleTests=17 \
+            --require com.kaas.runner.daemon.ProductionRunnerCompositionTests=3 \
+            --require com.kaas.runner.daemon.RuntimePreflightTests=4 \
+            --require com.kaas.runner.daemon.RunnerConfigurationTests=5 \
+            --require com.kaas.runner.daemon.ServiceIdentityClientCredentialsTests=4 \
+            --require com.kaas.runner.RunnerApplicationTest=2
+
+      # ---- the deployed shape, end to end, under runsc
+      - run: ./gradlew :tests:pipeline:cleanDeploymentPipelineTest :tests:pipeline:deploymentPipelineTest --no-daemon
+      - name: Confirm the production composition ran whole
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/junit-gate.py tests/pipeline/build/test-results/deploymentPipelineTest \
+            --require com.kaas.pipeline.DeploymentPipelineTests=5
+          python3 .github/scripts/evidence-gate.py \
+            tests/pipeline/build/evidence/deploymentPipelineTest/deployment-pipeline-evidence.txt \
+            suite=DeploymentPipelineTests deploy_check_without_runner=NOT_READY \
+            runner_composition=RunnerComposition.compose runner_ready=true attestation_submitted_by_runner=true \
+            deploy_check_with_runner=READY claim_path=RABBITMQ_TO_API_CONSUMER_TO_RUNNER_CLAIM \
+            inbox_disposition=DELIVERED assigned_worker=kaas.worker.deployment-pipeline \
+            run_outcome=COMPLETED/PASSED sandbox_runtime=runsc runner_containers_after_shutdown=0
+      - name: Confirm nothing outlived the suites
+        if: always()
+        run: .github/scripts/leak-gate.sh
+
+      # ---- images and the release manifest, rehearsed against a real registry
+      #
+      # The same script the release workflow runs, pushing to a registry that lives only for this job. Digests
+      # come from the registry, and the verifier pulls every image back BY DIGEST and reads its revision label.
+      - name: Build, push and verify a release manifest
+        run: |
+          set -euo pipefail
+          docker run -d --name kaas-release-registry -p 127.0.0.1:5000:5000 registry:2.8.3 >/dev/null
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:5000/v2/ >/dev/null && break; sleep 1; done
+          infrastructure/release/build-release.sh localhost:5000/kaas "$(git rev-parse HEAD)" \
+            "$RUNNER_TEMP/release-manifest.json" | tee "$RUNNER_TEMP/release.log"
+          grep -qx 'release_manifest=VALID' "$RUNNER_TEMP/release.log"
+          cat "$RUNNER_TEMP/release-manifest.json"
+      # The verifier's refusals, checked against the real registry rather than assumed from its fixtures: an
+      # image stamped with another revision, a tag instead of a digest, and a missing component.
+      - name: Confirm the verifier refuses what it must
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/release-manifest.json"
+          verify() { node packages/api-contracts/scripts/verify-release-manifest.mjs "$@"; }
+          printf 'FROM %s\n' "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["images"]["api"])' "$manifest")" \
+            | docker build -q --label org.opencontainers.image.revision=0000000000000000000000000000000000000000 \
+                -t localhost:5000/kaas/kaas-api:wrong-revision - >/dev/null
+          docker push --quiet localhost:5000/kaas/kaas-api:wrong-revision >/dev/null
+          wrong=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+            localhost:5000/kaas/kaas-api:wrong-revision | grep -F 'localhost:5000/kaas/kaas-api@' | head -1)
+          python3 - "$manifest" "$wrong" "$RUNNER_TEMP" <<'PY'
+          import json, sys
+          manifest, wrong, out = sys.argv[1], sys.argv[2], sys.argv[3]
+          base = json.load(open(manifest))
+          relabelled = json.loads(json.dumps(base)); relabelled["images"]["api"] = wrong
+          tagged = json.loads(json.dumps(base)); tagged["images"]["runner"] = "localhost:5000/kaas/kaas-runner:latest"
+          missing = json.loads(json.dumps(base)); del missing["images"]["security-probe"]
+          for name, value in (("relabelled", relabelled), ("tagged", tagged), ("missing", missing)):
+              json.dump(value, open(f"{out}/manifest-{name}.json", "w"))
+          PY
+          for mutant in relabelled tagged missing; do
+            if verify "$RUNNER_TEMP/manifest-$mutant.json" --expect-revision "$(git rev-parse HEAD)" --check-labels; then
+              echo "The verifier accepted a $mutant manifest." >&2
+              exit 1
+            fi
+            echo "refused: $mutant"
+          done
+      # The migrator AS SHIPPED: the API image's `migrate` mode, the migrator role from roles.sql, a real
+      # PostgreSQL. It migrates, is idempotent, starts no application, and the application role cannot do it.
+      - name: Run the shipped migrator against the Operations role split
+        run: |
+          set -euo pipefail
+          api=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["images"]["api"])' "$RUNNER_TEMP/release-manifest.json")
+          docker network create kaas-migration >/dev/null
+          docker run -d --name kaas-migration-db --network kaas-migration -e POSTGRES_PASSWORD=owner \
+            -e POSTGRES_DB=kaas postgres:16.10-alpine >/dev/null
+          for _ in $(seq 1 60); do docker exec kaas-migration-db pg_isready -U postgres -d kaas >/dev/null 2>&1 && break; sleep 1; done
+          docker exec -i kaas-migration-db psql -U postgres -d kaas -v ON_ERROR_STOP=1 \
+            -v migrator_password=migrator-ci -v app_password=app-ci -f - < infrastructure/database/roles.sql
+          migrate() {
+            docker run --rm --network kaas-migration \
+              -e KAAS_MIGRATOR_DATABASE_URL=jdbc:postgresql://kaas-migration-db:5432/kaas \
+              -e KAAS_MIGRATOR_DATABASE_USERNAME="$1" -e KAAS_MIGRATOR_DATABASE_PASSWORD="$2" "$api" migrate
+          }
+          first=$(migrate kaas_migrator migrator-ci); echo "$first"
+          echo "$first" | grep -q '^migration=CURRENT applied=[1-9]'
+          second=$(migrate kaas_migrator migrator-ci); echo "$second"
+          echo "$second" | grep -q '^migration=CURRENT applied=0'
+          # Only migration lines: no banner, no web server, no scheduler.
+          if echo "$first$second" | grep -qiE 'tomcat|started kaasapiapplication|spring'; then
+            echo "The migrator started more than Flyway." >&2
+            exit 1
+          fi
+          docker exec kaas-migration-db psql -U postgres -d kaas -v ON_ERROR_STOP=1 -c "create database kaas_app_attempt owner kaas_migrator"
+          if docker run --rm --network kaas-migration \
+               -e KAAS_MIGRATOR_DATABASE_URL=jdbc:postgresql://kaas-migration-db:5432/kaas_app_attempt \
+               -e KAAS_MIGRATOR_DATABASE_USERNAME=kaas_app -e KAAS_MIGRATOR_DATABASE_PASSWORD=app-ci "$api" migrate; then
+            echo "The application role was able to migrate." >&2
+            exit 1
+          fi
+          echo "application role refused DDL: yes"
+          docker rm -f kaas-migration-db >/dev/null
+          docker network rm kaas-migration >/dev/null
+
+      # ---- the verdict
+      - name: Report the deployment-readiness verdict
+        run: |
+          set -euo pipefail
+          {
+            echo "## Deployment readiness (KAAS-DEPLOY-001)"
+            echo
+            echo '```'
+            echo "revision=$(git rev-parse HEAD)"
+            echo "runner_work_intake=INTERNAL_CLAIM_API"
+            echo "runner_rabbitmq_dependency=NONE"
+            cat apps/api/build/evidence/deploymentReadinessTest/broker-loss.properties
+            cat tests/pipeline/build/evidence/deploymentPipelineTest/deployment-pipeline-evidence.txt
+            echo "release_manifest=VALID"
+            echo "verdict=DEPLOYMENT READINESS BLOCKED BY MESSAGING RECOVERY GAP"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: deployment-readiness-evidence
+          path: |
+            ${{ runner.temp }}/release-manifest.json
+            apps/api/build/evidence/deploymentReadinessTest/
+            tests/pipeline/build/evidence/deploymentPipelineTest/
+          if-no-files-found: warn
+
   web:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -985,6 +1181,7 @@ jobs:
           cache-dependency-path: packages/api-contracts/package-lock.json
       - run: npm ci
       - run: npm run validate:schemas
+      - run: npm run verify:release-manifest
       - run: npm run lint:openapi
 
   infrastructure:
@@ -993,3 +1190,4 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: docker compose -f infrastructure/local/docker-compose.yml config
+      - run: bash -n infrastructure/release/build-release.sh
