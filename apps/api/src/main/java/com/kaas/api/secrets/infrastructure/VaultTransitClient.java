@@ -133,6 +133,48 @@ public final class VaultTransitClient implements SecretTransit {
         return true;
     }
 
+    /** How long one availability answer is reused. A scraped health endpoint must not become Vault load. */
+    private static final long STATE_CACHE_NANOS = Duration.ofSeconds(15).toNanos();
+
+    private ProviderState cachedState;
+    private long stateCheckedAtNanos;
+
+    /**
+     * Vault's own unauthenticated health route, through the same pinned-CA client, cached briefly.
+     *
+     * <p>Unauthenticated on purpose: a health report must not spend an AppRole login, and must not be the reason
+     * a token is issued. {@code standbyok} so a healthy standby reads as available -- it forwards.
+     */
+    @Override
+    public synchronized ProviderState state() {
+        long now = nanoTime.getAsLong();
+        if (cachedState != null && now - stateCheckedAtNanos < STATE_CACHE_NANOS) {
+            return cachedState;
+        }
+        ProviderState state;
+        try {
+            HttpResponse<Void> response = http.send(
+                    HttpRequest.newBuilder(settings.address().resolve("/v1/sys/health?standbyok=true"))
+                            .timeout(settings.requestTimeout())
+                            .GET()
+                            .build(),
+                    HttpResponse.BodyHandlers.discarding());
+            state = switch (response.statusCode()) {
+                case 200, 429 -> ProviderState.AVAILABLE;
+                case 503 -> ProviderState.SEALED;
+                default -> ProviderState.UNAVAILABLE;
+            };
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            state = ProviderState.UNAVAILABLE;
+        } catch (IOException | RuntimeException unreachable) {
+            state = ProviderState.UNAVAILABLE;
+        }
+        cachedState = state;
+        stateCheckedAtNanos = now;
+        return state;
+    }
+
     @Override
     public EncryptedValue encrypt(TransitContext context, byte[] plaintext) throws SecretProviderException {
         SecretValuePolicy.requireValid(plaintext);

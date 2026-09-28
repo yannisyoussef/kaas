@@ -21,6 +21,26 @@ public interface SecretTransit {
     boolean configured();
 
     /**
+     * Whether the provider can serve a request right now, for health reporting only.
+     *
+     * <p>Never consulted by authorization: a secret-free run must not depend on the provider, and a
+     * secret-bearing run learns about an outage from the operation itself. Cheap and bounded by design --
+     * implementations cache it -- because a health endpoint is scraped.
+     */
+    default ProviderState state() {
+        return configured() ? ProviderState.UNKNOWN : ProviderState.UNCONFIGURED;
+    }
+
+    /** The provider's availability as a health report sees it. A closed vocabulary; nothing host-describing. */
+    enum ProviderState {
+        AVAILABLE,
+        SEALED,
+        UNAVAILABLE,
+        UNCONFIGURED,
+        UNKNOWN
+    }
+
+    /**
      * Encrypts one value under the tenant's derived key.
      *
      * <p>The caller owns {@code plaintext} and clears it; this method does not retain it.

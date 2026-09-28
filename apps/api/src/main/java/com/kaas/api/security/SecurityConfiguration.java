@@ -26,6 +26,41 @@ import org.springframework.security.web.SecurityFilterChain;
 public class SecurityConfiguration {
 
     /**
+     * The management port, and only the management port (KAAS-DEPLOY-001).
+     *
+     * <p>In production the actuator runs on its own port, which Operations binds to a private network and never
+     * routes through public ingress. What it serves there is for machines that hold no platform credential --
+     * the metrics scraper, the post-deploy check, an orchestrator's probes -- so those three are open on that
+     * port and everything else is refused. None of them carries a tenant identity, a credential, a host address
+     * or a worker id; they are status words and counters.
+     *
+     * <p>Matched on the port the request actually ARRIVED on, read per request, never on path: the same paths on
+     * the public port still fall through to the tenant chain, which denies them.
+     */
+    @Bean
+    @Order(0)
+    SecurityFilterChain managementFilterChain(HttpSecurity http, org.springframework.core.env.Environment environment)
+            throws Exception {
+        return http.securityMatcher(request -> isManagementPort(request.getLocalPort(), environment))
+                .csrf(csrf -> csrf.disable())
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .authorizeHttpRequests(authorize -> authorize
+                        .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/deployment",
+                                "/actuator/prometheus")
+                        .permitAll()
+                        .anyRequest()
+                        .denyAll())
+                .build();
+    }
+
+    /** Whether a request arrived on a management port distinct from the application's own. */
+    static boolean isManagementPort(int localPort, org.springframework.core.env.Environment environment) {
+        String management = environment.getProperty("local.management.port");
+        String server = environment.getProperty("local.server.port");
+        return management != null && !management.equals(server) && management.equals(Integer.toString(localPort));
+    }
+
+    /**
      * The internal service surface, on its own chain ahead of the tenant API.
      *
      * <p>It is separate because the two have different authentication shapes, not merely different paths. A
