@@ -167,6 +167,22 @@ class ControlPlaneArchitectureTest {
     }
 
     @Test
+    void dispatchRecoveryDecidesFromPostgresAloneAndNeverFromBrokerState() {
+        // A broker count is a transient observation: it cannot tell a lost message from a late one, and a
+        // recovery that trusted it would either miss real losses or republish on a hiccup. Recovery reads
+        // PostgreSQL; the broker is only where it publishes (KAAS-MSG-001).
+        noClasses()
+                .that()
+                .haveSimpleNameStartingWith("DispatchRecovery")
+                .or()
+                .haveSimpleName("JdbcDispatchRecoveryRepository")
+                .should()
+                .dependOnClassesThat()
+                .resideInAnyPackage("org.springframework.amqp..", "com.rabbitmq..")
+                .check(classes);
+    }
+
+    @Test
     void claimingGrantsNoExecutionAuthority() {
         // The whole point of stopping at CLAIMED is that ownership and permission to execute are different
         // things. If any of these ever appear on the claim path, that distinction has quietly collapsed.

@@ -152,6 +152,7 @@ val deploymentReadinessTest = tasks.register<Test>("deploymentReadinessTest") {
     filter {
         includeTestsMatching("com.kaas.api.WorkerClaimEndpointTests")
         includeTestsMatching("com.kaas.api.BrokerLossMeasurementTests")
+        includeTestsMatching("com.kaas.api.DispatchRecoveryTests")
         includeTestsMatching("com.kaas.api.AttestationSubmissionTests")
         includeTestsMatching("com.kaas.api.deployment.MigrationModeTests")
         includeTestsMatching("com.kaas.api.deployment.DeploymentStatusTests")
@@ -168,6 +169,7 @@ tasks.named<Test>("test") {
     filter {
         excludeTestsMatching("com.kaas.api.WorkerClaimEndpointTests")
         excludeTestsMatching("com.kaas.api.BrokerLossMeasurementTests")
+        excludeTestsMatching("com.kaas.api.DispatchRecoveryTests")
         excludeTestsMatching("com.kaas.api.AttestationSubmissionTests")
         excludeTestsMatching("com.kaas.api.deployment.MigrationModeTests")
         excludeTestsMatching("com.kaas.api.deployment.DeploymentStatusTests")

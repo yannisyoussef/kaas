@@ -63,29 +63,16 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * MEASURES what happens to a dispatch the broker loses after accepting it (KAAS-DEPLOY-001, Decision B).
+ * The queue deadline stays the safety net under dispatch recovery (KAAS-DEPLOY-001 measured the loss; KAAS-MSG-001
+ * closed it -- see {@code DispatchRecoveryTests}).
  *
- * <p>This is a measurement of a known gap, not a proof of recovery, and it must not be read as one. The
- * property it establishes is narrow:
+ * <p>Recovery republishes a lost dispatch while its run can still be claimed. What it must never do is outlive
+ * that: a run whose recovery cannot succeed still ends TIMED_OUT / QUEUE_DEADLINE, a republished copy that
+ * arrives after the deadline is refused, and a deadline that passes between a recovery claim and its publication
+ * wins. The deadline here is a few seconds; the behaviour does not depend on its length.
  *
- * <pre>
- *   LOSS IS DETECTED THROUGH THE QUEUE DEADLINE AND FAILS CLOSED.
- *   THE LOST WORK IS NOT RECONSTRUCTED.
- * </pre>
- *
- * <p>Once the relay records a dispatch as published, that publication is final: nothing republishes it. If the
- * broker then loses the message, the run stays QUEUED -- durably, visibly -- until its queue deadline, and the
- * reaper ends it TIMED_OUT / QUEUE_DEADLINE. That is honest and observable. It is also the loss of a run a tenant
- * asked for. Reconstructing unclaimed lost dispatches from PostgreSQL is KAAS-MSG-001, deliberately not done here.
- *
- * <h2>Why the loss is real</h2>
- *
- * <p>Skipping publication and watching the deadline fire would prove only that deadlines fire. So the order is
- * the point: the relay publishes with a broker confirm and records it; the broker is observed HOLDING the message;
- * the broker's copy is then destroyed; and only then is the absence of any claim, and the deadline, observed.
- *
- * <p>The production consumer is off so the message cannot be consumed before it is lost -- the window a broker
- * failure opens in production, held open deterministically.
+ * <p>The loss is real in every test: the relay publishes with a broker confirm and records it, the broker is
+ * observed holding the message, and only then is it destroyed.
  */
 @Testcontainers
 @Import(BrokerLossMeasurementTests.JwtTestConfiguration.class)
@@ -98,9 +85,15 @@ import tools.jackson.databind.ObjectMapper;
             "kaas.consumer.enabled=false",
             "kaas.claim.reconcile.enabled=false",
             "kaas.execution.reconcile.enabled=false",
-            "kaas.outbox.rabbit.confirm-timeout=PT10S",
-            // A shortened queue deadline. The production value is minutes; the behaviour does not depend on it.
-            "kaas.scheduling.queue-timeout=PT4S"
+            "kaas.dispatch.recovery.enabled=false",
+            "kaas.outbox.rabbit.confirm-timeout=PT3S",
+            "kaas.scheduling.queue-timeout=PT6S",
+            "kaas.dispatch.recovery.grace=PT1S",
+            "kaas.dispatch.recovery.max-interval=PT2S",
+            "kaas.dispatch.recovery.batch-size=2",
+            "kaas.dispatch.recovery.claim-ttl=PT7S",
+            "kaas.dispatch.recovery.base-backoff=PT1S",
+            "kaas.dispatch.recovery.max-backoff=PT1S"
         })
 class BrokerLossMeasurementTests {
     private static final String ISSUER = "https://issuer.kaas.test";
@@ -152,6 +145,18 @@ class BrokerLossMeasurementTests {
     @Autowired
     private RabbitAdmin rabbitAdmin;
 
+    @Autowired
+    private com.kaas.api.outbox.application.DispatchRecovery recovery;
+
+    @Autowired
+    private com.kaas.api.outbox.application.DispatchRecoveryRepository recoveries;
+
+    @Autowired
+    private com.kaas.api.outbox.application.OutboxMessageVerifier verifier;
+
+    @Autowired
+    private io.micrometer.core.instrument.MeterRegistry meters;
+
     @AfterEach
     void clearRuns() {
         for (String table : EVIDENCE_TABLES) {
@@ -171,104 +176,154 @@ class BrokerLossMeasurementTests {
     }
 
     private static final List<String> EVIDENCE_TABLES = List.of(
-            "dispatch_inbox", "outbox_messages", "run_lifecycle_events", "execution_dispatches",
+            "dispatch_recoveries", "dispatch_inbox", "outbox_messages", "run_lifecycle_events", "execution_dispatches",
             "execution_attempts", "run_snapshot_tags", "run_snapshot_artifact_types",
             "run_snapshot_configuration_entries", "run_snapshot_features", "run_snapshots", "test_runs");
 
     @Test
     @Timeout(120)
-    void aPublishedDispatchTheBrokerLosesIsNeverRebuiltAndTheRunEndsAtItsQueueDeadline() throws Exception {
+    void aLostDispatchWhoseRecoveryCannotSucceedStillEndsAtItsQueueDeadline() throws Exception {
+        UUID runId = lostDispatch();
+        // Recovery runs, and the broker refuses every republication.
+        var unreachable = recoveryWith(message -> com.kaas.api.outbox.domain.PublishOutcome.transientFailure(
+                com.kaas.api.outbox.domain.FailureCode.BROKER_UNAVAILABLE));
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(30))
+                .pollInterval(Duration.ofMillis(300))
+                .until(() -> {
+                    unreachable.recoverOnce();
+                    return Boolean.TRUE.equals(jdbc.queryForObject(
+                            "select queue_deadline_at < clock_timestamp() from test_runs where run_id = ?",
+                            Boolean.class, runId));
+                });
+        int attempts = jdbc.queryForObject(
+                "select recovery_attempts from dispatch_recoveries where run_id = ?", Integer.class, runId);
+        assertThat(attempts).as("recovery was attempted").isGreaterThanOrEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                        "select recovery_publications from dispatch_recoveries where run_id = ?", Integer.class, runId))
+                .isZero();
+        // After the deadline recovery has nothing left to do, and the reaper ends the run.
+        assertThat(recovery.recoverOnce()).isZero();
+        assertThat(reaper.reapExpired()).isEqualTo(1);
+        Map<String, Object> run = jdbc.queryForMap("select * from test_runs where run_id = ?", runId);
+        assertThat(run.get("lifecycle_state")).isEqualTo("COMPLETED");
+        assertThat(run.get("infrastructure_outcome")).isEqualTo("TIMED_OUT");
+        assertThat(run.get("termination_reason")).isEqualTo("QUEUE_DEADLINE");
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from test_runs where lifecycle_state = 'QUEUED'", Integer.class))
+                .isZero();
+
+        writeEvidence(Map.of(
+                "recovery_attempted", Boolean.toString(attempts >= 1),
+                "recovery_publish_confirmed", "false",
+                "terminal_outcome", run.get("infrastructure_outcome") + "/" + run.get("termination_reason"),
+                "queue_deadline_fail_closed", "true"));
+    }
+
+    @Test
+    @Timeout(120)
+    void aRepublishedCopyThatArrivesAfterTheDeadlineIsRefusedAndTheRunIsNotResurrected() throws Exception {
+        UUID runId = lostDispatch();
+        assertThat(recovery.recoverOnce()).isEqualTo(1);
+        // The copy sits on the broker while the deadline passes and the reaper ends the run.
+        awaitDeadline(runId);
+        assertThat(reaper.reapExpired()).isEqualTo(1);
+
+        Message late = rabbit.receive(queue, 10_000);
+        assertThat(late).isNotNull();
+        assertThat(consumption.consume(delivery(late))).isEqualTo(InboxDisposition.STALE);
+        assertThat(assignments.claimNext(RUNNER)).isEmpty();
+        Map<String, Object> run = jdbc.queryForMap("select * from test_runs where run_id = ?", runId);
+        assertThat(run.get("termination_reason")).isEqualTo("QUEUE_DEADLINE");
+        assertThat(count("run_lifecycle_events", runId)).as("scheduled, expired -- one outcome").isEqualTo(2);
+        assertThat(recovery.recoverOnce()).isZero();
+        writeEvidence(Map.of("late_recovered_copy_consumer", "STALE", "late_recovered_copy_claims", "0",
+                "late_recovered_copy_resurrected", "false"), "deadline-late-copy.properties");
+    }
+
+    @Test
+    @Timeout(120)
+    void aDeadlineThatPassesBetweenTheRecoveryClaimAndItsPublicationWins() throws Exception {
+        UUID runId = lostDispatch();
+        var waitsOutTheDeadline = new DispatchRecoveryTests.DelegatingRecoveries(recoveries) {
+            @Override
+            public java.util.Optional<String> ineligibility(String consumer, UUID messageId) {
+                try {
+                    awaitDeadline(runId);
+                } catch (Exception interrupted) {
+                    throw new IllegalStateException(interrupted);
+                }
+                return super.ineligibility(consumer, messageId);
+            }
+        };
+        // A lease far longer than the wait, so that only the deadline re-check can stop this publication. With a
+        // short lease the pre-publish lease check stopped it instead, and the test proved nothing about the deadline
+        // (mutant M18 survived). The deployment cross-checks are off for this instance (enabled=false): what is under
+        // test is precedence, not configuration validation.
+        var claimedThenLate = new com.kaas.api.outbox.application.DispatchRecovery(waitsOutTheDeadline, publisher,
+                verifier, meters, false, "kaas.dispatch-consumer", Duration.ofSeconds(1), Duration.ofSeconds(2), 3, 2,
+                Duration.ofSeconds(30), Duration.ofSeconds(1), Duration.ofSeconds(1), Duration.ofSeconds(1),
+                Duration.ofSeconds(6));
+
+        assertThat(claimedThenLate.recoverOnce()).isZero();
+        assertThat(depthOf(queue)).as("nothing published after the deadline").isZero();
+        assertThat(reaper.reapExpired()).isEqualTo(1);
+        assertThat(lifecycleOf(runId)).isEqualTo("COMPLETED");
+        writeEvidence(Map.of(
+                "deadline_race_published_after_deadline", "false",
+                "deadline_race_resurrected", "false"), "deadline-race.properties");
+    }
+
+    @Test
+    @Timeout(60)
+    void anExpiredRunIsNeverEligible() throws Exception {
+        UUID runId = lostDispatch();
+        awaitDeadline(runId);
+        assertThat(recovery.eligibleNow()).isZero();
+        assertThat(recovery.recoverOnce()).isZero();
+        assertThat(depthOf(queue)).isZero();
+    }
+
+    // ------------------------------------------------------------------ helpers
+
+    @Autowired
+    private com.kaas.api.outbox.application.DispatchPublisher publisher;
+
+    private UUID lostDispatch() throws Exception {
         Tenant tenant = tenant();
         UUID runId = createRun(tenant);
         scheduler.scheduleDue();
-
-        // 1. PUBLISHED, and recorded as published only after the broker confirmed it.
         assertThat(relay.drainOnce()).isEqualTo(1);
-        Map<String, Object> outbox = outboxRowFor(runId);
-        assertThat(outbox.get("published_at")).as("the relay recorded the publication").isNotNull();
-
-        // 2. THE BROKER HELD IT. Observed, not assumed: the message is in the queue.
+        assertThat(outboxRowFor(runId).get("published_at")).isNotNull();
         Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> depthOf(queue) == 1);
-        int depthBeforeLoss = depthOf(queue);
-
-        // 3. LOST. The broker's only copy is destroyed, as a broker failure without durable state would.
         rabbitAdmin.purgeQueue(queue, false);
-        int depthAfterLoss = depthOf(queue);
-        assertThat(depthAfterLoss).isZero();
+        assertThat(depthOf(queue)).isZero();
+        Thread.sleep(1_300);
+        return runId;
+    }
 
-        // 4. NOTHING REBUILDS IT. The relay does not republish -- its record says the work is done -- and no
-        //    delivery was ever recorded, so no worker can claim the run. It sits QUEUED, durably and visibly.
-        int republished = relay.drainOnce() + relay.drainOnce();
-        assertThat(republished).isZero();
-        assertThat(outboxRowFor(runId).get("published_at")).isEqualTo(outbox.get("published_at"));
-        assertThat(jdbc.queryForObject(
-                        "select count(*) from dispatch_inbox where run_id = ?", Integer.class, runId))
-                .isZero();
-        assertThat(assignments.workAvailable(RUNNER)).isFalse();
-        assertThat(assignments.claimNext(RUNNER)).isEmpty();
-        assertThat(lifecycleOf(runId)).isEqualTo("QUEUED");
-        assertThat(jdbc.queryForObject(
-                        "select attempt_state from execution_attempts where run_id = ?", String.class, runId))
-                .isEqualTo("WAITING_FOR_CLAIM");
+    private com.kaas.api.outbox.application.DispatchRecovery recoveryWith(
+            com.kaas.api.outbox.application.DispatchPublisher withPublisher) {
+        return new com.kaas.api.outbox.application.DispatchRecovery(recoveries, withPublisher, verifier, meters, true,
+                "kaas.dispatch-consumer", Duration.ofSeconds(1), Duration.ofSeconds(2), 3, 2, Duration.ofSeconds(4),
+                Duration.ofSeconds(1), Duration.ofSeconds(1), Duration.ofSeconds(1), Duration.ofSeconds(6));
+    }
 
-        // 5. THE DEADLINE ENDS IT. Before it passes the reaper leaves the run alone; after, it terminates it.
-        assertThat(reaper.reapExpired()).isZero();
+    private void awaitDeadline(UUID runId) {
         Awaitility.await()
                 .atMost(Duration.ofSeconds(30))
                 .pollInterval(Duration.ofMillis(200))
                 .until(() -> Boolean.TRUE.equals(jdbc.queryForObject(
                         "select queue_deadline_at < clock_timestamp() from test_runs where run_id = ?",
                         Boolean.class, runId)));
-        assertThat(reaper.reapExpired()).isEqualTo(1);
-
-        Map<String, Object> run = jdbc.queryForMap("select * from test_runs where run_id = ?", runId);
-        assertThat(run.get("lifecycle_state")).isEqualTo("COMPLETED");
-        assertThat(run.get("infrastructure_outcome")).isEqualTo("TIMED_OUT");
-        assertThat(run.get("termination_reason")).isEqualTo("QUEUE_DEADLINE");
-        // Terminal is terminal: a late copy of the message, if the broker somehow produced one, is stale.
-        assertThat(assignments.claimNext(RUNNER)).isEmpty();
-        // And nothing anywhere is left silently waiting.
-        assertThat(jdbc.queryForObject(
-                        "select count(*) from test_runs where lifecycle_state = 'QUEUED'", Integer.class))
-                .isZero();
-
-        writeEvidence(Map.of(
-                "published_before_loss", "true",
-                "broker_depth_before_loss", Integer.toString(depthBeforeLoss),
-                "broker_depth_after_loss", Integer.toString(depthAfterLoss),
-                "republished_after_loss", Integer.toString(republished),
-                "claims_after_loss", "0",
-                "terminal_outcome", run.get("infrastructure_outcome") + "/" + run.get("termination_reason"),
-                "queue_deadline_fail_closed", "true",
-                // THE FINDING. Not "VALID", not "recovered": the work was lost.
-                "rabbitmq_loss_recovery", "false",
-                "follow_up", "KAAS-MSG-001"));
     }
 
-    @Test
-    @Timeout(120)
-    void theSamePathWithTheMessageIntactIsDeliveredAndClaimable() throws Exception {
-        // The control. Identical up to the loss, and the message survives: the broker delivers it, the consumer
-        // records it, and a worker claims it. Without this, the measurement above could pass on a path that
-        // never delivered anything to begin with.
-        Tenant tenant = tenant();
-        UUID runId = createRun(tenant);
-        scheduler.scheduleDue();
-        assertThat(relay.drainOnce()).isEqualTo(1);
-
-        Message delivered = rabbit.receive(queue, 10_000);
-        assertThat(delivered).isNotNull();
-        assertThat(consumption.consume(new DispatchMessage(
-                        UUID.fromString(delivered.getMessageProperties().getMessageId()),
-                        String.valueOf(delivered.getMessageProperties().getHeaders().get("messageType")),
-                        String.valueOf(delivered.getMessageProperties().getHeaders().get("schemaVersion")),
-                        delivered.getBody())))
-                .isEqualTo(InboxDisposition.DELIVERED);
-
-        assertThat(assignments.workAvailable(RUNNER)).isTrue();
-        assertThat(assignments.claimNext(RUNNER)).hasValueSatisfying(
-                assignment -> assertThat(assignment.runId()).isEqualTo(runId));
-        assertThat(lifecycleOf(runId)).isEqualTo("CLAIMED");
+    private static DispatchMessage delivery(Message message) {
+        return new DispatchMessage(
+                UUID.fromString(message.getMessageProperties().getMessageId()),
+                String.valueOf(message.getMessageProperties().getHeaders().get("messageType")),
+                String.valueOf(message.getMessageProperties().getHeaders().get("schemaVersion")),
+                message.getBody());
     }
 
     private Map<String, Object> outboxRowFor(UUID runId) {
@@ -282,6 +337,10 @@ class BrokerLossMeasurementTests {
 
     /** Structured evidence the deployment-readiness gate prints and archives. Keys are sorted; values are words. */
     private static void writeEvidence(Map<String, String> values) throws Exception {
+        writeEvidence(values, "broker-loss.properties");
+    }
+
+    private static void writeEvidence(Map<String, String> values, String file) throws Exception {
         // The directory the BUILD names, as for every gate's evidence. A run without one fails rather than
         // writing somewhere the gate would never look.
         String configured = System.getProperty("kaas.evidence.dir");
@@ -294,7 +353,7 @@ class BrokerLossMeasurementTests {
         values.entrySet().stream()
                 .sorted(Map.Entry.comparingByKey())
                 .forEach(entry -> text.append(entry.getKey()).append('=').append(entry.getValue()).append('\n'));
-        Files.writeString(directory.resolve("broker-loss.properties"), text.toString());
+        Files.writeString(directory.resolve(file), text.toString());
     }
 
     private ExecutionDispatch dispatchFor(UUID runId) throws Exception {

@@ -183,6 +183,9 @@ class MigrationModeTests {
             assertThat(deployment.statusCode()).as(deployment.body()).isEqualTo(200);
             assertThat(deployment.body()).contains("\"status\":\"NOT_READY\"").contains("\"schema\":\"CURRENT\"")
                     .contains("\"runnersWithCurrentEvidence\":0");
+            // Recovery is enabled in the production application and its loop is scheduled (STARTING within its
+            // initial delay, UP once a pass completed) -- not DISABLED.
+            assertThat(deployment.body()).containsPattern("\"dispatchRecovery\":\"(STARTING|UP)\"");
             var metrics = get.apply(base + "/actuator/prometheus");
             assertThat(metrics.statusCode()).isEqualTo(200);
             assertThat(metrics.body()).contains("jvm_");
@@ -227,6 +230,9 @@ class MigrationModeTests {
         // A literal, not a placeholder: no environment variable may turn startup migration back on in production.
         assertThat(profile).containsPattern("(?m)^spring\\.flyway\\.enabled=false$");
         assertThat(profile).containsPattern("(?m)^kaas\\.consumer\\.enabled=\\$\\{KAAS_CONSUMER_ENABLED:true}$");
+        // And dispatch recovery runs there: without it, a dispatch the broker loses is lost again (KAAS-MSG-001).
+        assertThat(profile).containsPattern(
+                "(?m)^kaas\\.dispatch\\.recovery\\.enabled=\\$\\{KAAS_DISPATCH_RECOVERY_ENABLED:true}$");
     }
 
     private static int historyRows() throws SQLException {
