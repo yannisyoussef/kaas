@@ -250,6 +250,25 @@ class RunnerDaemonLifecycleTests {
         assertThat(someoneElse.lastFailure()).isEqualTo("SUBJECT_MISMATCH");
     }
 
+    @Test
+    void aShortLivedCredentialIsReplacedBeforeItStopsBeingPresentableLeavingNoGap() throws Exception {
+        // Sixty seconds, as the deployment gate issues. Every second of its life must yield a presentable token.
+        MutableClock clock = new MutableClock(Instant.parse("2026-09-28T12:00:00Z"));
+        AtomicInteger issued = new AtomicInteger();
+        ServiceIdentity identity = new ServiceIdentity(WORKER, () -> {
+            issued.incrementAndGet();
+            Instant expiry = clock.instant().plusSeconds(60);
+            return new ServiceIdentity.Token(FakeControlPlane.token(WORKER, expiry), WORKER, expiry);
+        }, clock, new RunnerMetrics(), "runner");
+
+        for (int second = 0; second <= 180; second++) {
+            assertThat(identity.available()).as("presentable at t=%ds", second).isTrue();
+            clock.advance(Duration.ofSeconds(1));
+        }
+        // Replaced repeatedly, and never more than once a second.
+        assertThat(issued.get()).isBetween(4, 181);
+    }
+
     // ---------------------------------------------------------------- evidence
 
     @Test

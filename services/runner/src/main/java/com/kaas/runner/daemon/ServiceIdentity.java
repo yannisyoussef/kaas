@@ -142,9 +142,26 @@ public final class ServiceIdentity implements ControlPlaneClient.Authorization {
         }
         current = next;
         lastFailure = "NONE";
-        long lifetime = Math.max(1, Duration.between(now, next.expiresAt()).toMillis());
-        refreshAt = now.plusMillis((long) (lifetime * REFRESH_AT));
+        refreshAt = refreshPoint(now, next.expiresAt());
         metrics.serviceAuthRefreshed(metricIdentity);
+    }
+
+    /**
+     * When to replace a token obtained at {@code now}: at 70 % of its life, and in any case well before the point
+     * at which it stops being presented ({@link #EXPIRY_SKEW} before expiry).
+     *
+     * <p>The second bound is the one that matters for short-lived tokens. With only the fraction, a sixty-second
+     * token stopped being usable at thirty seconds and was not replaced until forty-two, and for those twelve
+     * seconds the runner had no credential and was NOT READY -- found by the deployment gate, idling between runs.
+     * Never sooner than a second from now, so a degenerate issuer cannot turn every request into a token request.
+     */
+    static Instant refreshPoint(Instant now, Instant expiresAt) {
+        long lifetime = Math.max(1, Duration.between(now, expiresAt).toMillis());
+        Instant byFraction = now.plusMillis((long) (lifetime * REFRESH_AT));
+        Instant beforeCutoff = expiresAt.minus(EXPIRY_SKEW).minus(EXPIRY_SKEW.dividedBy(2));
+        Instant earliest = byFraction.isBefore(beforeCutoff) ? byFraction : beforeCutoff;
+        Instant floor = now.plusSeconds(1);
+        return earliest.isBefore(floor) ? floor : earliest;
     }
 
     @Override

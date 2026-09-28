@@ -1014,7 +1014,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/scripts/junit-gate.py services/runner/build/test-results/test \
-            --require com.kaas.runner.daemon.RunnerDaemonLifecycleTests=17 \
+            --require com.kaas.runner.daemon.RunnerDaemonLifecycleTests=18 \
             --require com.kaas.runner.daemon.ProductionRunnerCompositionTests=3 \
             --require com.kaas.runner.daemon.RuntimePreflightTests=4 \
             --require com.kaas.runner.daemon.RunnerConfigurationTests=5 \
