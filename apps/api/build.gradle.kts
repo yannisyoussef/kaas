@@ -18,6 +18,9 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-flyway")
     implementation("org.springframework.boot:spring-boot-starter-amqp")
     implementation("org.flywaydb:flyway-database-postgresql")
+    // Prometheus exposition for the management port. Exposed only by the production profile, on a port
+    // Operations binds privately; the default build exposes health alone.
+    implementation("io.micrometer:micrometer-registry-prometheus")
     runtimeOnly("org.postgresql:postgresql")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
@@ -117,4 +120,60 @@ val verifyNoExecutionDependencies = tasks.register("verifyNoExecutionDependencie
 
 tasks.named("check") {
     dependsOn(verifyNoExecutionDependencies)
+}
+
+/**
+ * The API image's build context (KAAS-DEPLOY-001): the Dockerfile, the entrypoint, the jar this build compiled and
+ * exactly its runtime classpath. The migrator and the deploy check ship inside it, so they are always the same
+ * build as the application they belong to.
+ */
+val apiImageContext = tasks.register<Sync>("apiImageContext") {
+    group = "build"
+    description = "Assembles the API image build context."
+    into(layout.buildDirectory.dir("api-image-context"))
+    from(layout.projectDirectory.dir("src/main/docker"))
+    from(tasks.named("jar")) { into("lib") }
+    from(configurations.runtimeClasspath) { into("lib") }
+}
+
+/**
+ * The control plane's deployment-readiness evidence (KAAS-DEPLOY-001), run by the deployment-readiness gate.
+ *
+ * <p>Its own task so the gate can name exactly which suites produced its evidence -- the claim endpoint, the
+ * broker-loss measurement, the migrator and role split, and runner-submitted attestations -- and read what they
+ * wrote. Still part of {@code check}, so the backend job and a local full build run them as well; excluded from
+ * {@code test} only so they do not run twice there.
+ */
+val deploymentReadinessTest = tasks.register<Test>("deploymentReadinessTest") {
+    group = "verification"
+    description = "Claim intake, broker-loss measurement, migrator and roles, attestation submission."
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    filter {
+        includeTestsMatching("com.kaas.api.WorkerClaimEndpointTests")
+        includeTestsMatching("com.kaas.api.BrokerLossMeasurementTests")
+        includeTestsMatching("com.kaas.api.AttestationSubmissionTests")
+        includeTestsMatching("com.kaas.api.deployment.MigrationModeTests")
+        includeTestsMatching("com.kaas.api.deployment.DeploymentStatusTests")
+    }
+    val evidence = layout.buildDirectory.dir("evidence/deploymentReadinessTest").map { it.asFile.absolutePath }
+    doFirst {
+        systemProperty("kaas.evidence.dir", evidence.get())
+        // Emptied first: the gate must never read what an earlier run left behind.
+        File(evidence.get()).deleteRecursively()
+    }
+}
+
+tasks.named<Test>("test") {
+    filter {
+        excludeTestsMatching("com.kaas.api.WorkerClaimEndpointTests")
+        excludeTestsMatching("com.kaas.api.BrokerLossMeasurementTests")
+        excludeTestsMatching("com.kaas.api.AttestationSubmissionTests")
+        excludeTestsMatching("com.kaas.api.deployment.MigrationModeTests")
+        excludeTestsMatching("com.kaas.api.deployment.DeploymentStatusTests")
+    }
+}
+
+tasks.named("check") {
+    dependsOn(deploymentReadinessTest)
 }
