@@ -2,9 +2,9 @@
 
 Status date: 2026-09-28
 
-This document describes repository reality after secret-bearing Karate execution (KAAS-22). Karate 2.1.2 executes tenant features inside the mediated (gVisor) sandbox — secret-free since KAAS-21 (ADR-033), and with tenant secrets since KAAS-22 (ADR-034): values are stored as Vault Transit ciphertext, pinned by version, delivered only to one live assignment after the source filesystem is frozen, and removed as exact byte sequences from everything the platform keeps of the sandbox's output. **Deployment readiness (KAAS-DEPLOY-001, ADR-035) is BLOCKED BY MESSAGING RECOVERY GAP**: the production runner daemon, API claim intake, migrate-only entrypoint, attestation and service-identity refresh and the five-image release contract now exist and are gated in CI, and a dispatch RabbitMQ loses after publication is measured to fail closed at the queue deadline and is not rebuilt (KAAS-MSG-001). The Operations infrastructure itself is Operations'. Sections below that describe earlier slices are kept as history; where a sentence stated a present fact that is no longer true, it is marked.
+This document describes repository reality after secret-bearing Karate execution (KAAS-22). Karate 2.1.2 executes tenant features inside the mediated (gVisor) sandbox — secret-free since KAAS-21 (ADR-033), and with tenant secrets since KAAS-22 (ADR-034): values are stored as Vault Transit ciphertext, pinned by version, delivered only to one live assignment after the source filesystem is frozen, and removed as exact byte sequences from everything the platform keeps of the sandbox's output. **The application deployment contract is ready (KAAS-DEPLOY-001, ADR-035; KAAS-MSG-001, ADR-036)**: the production runner daemon, API claim intake, migrate-only entrypoint, attestation and service-identity refresh and the five-image release contract are gated in CI, and a dispatch RabbitMQ loses after publication is reconstructed from PostgreSQL. The Operations infrastructure itself is Operations'. Sections below that describe earlier slices are kept as history; where a sentence stated a present fact that is no longer true, it is marked.
 
-## Deployment readiness (KAAS-DEPLOY-001) — BLOCKED BY MESSAGING RECOVERY GAP
+## Deployment readiness (KAAS-DEPLOY-001 + KAAS-MSG-001) — APPLICATION DEPLOYMENT CONTRACT READY
 
 - **Runner work intake: IMPLEMENTED + VALIDATED.** The API consumer records corroborated deliveries as
   `DELIVERED` and claims nothing; a runner claims for itself through `POST /internal/v1/assignments` (the unchanged
@@ -21,8 +21,10 @@ This document describes repository reality after secret-bearing Karate execution
   migrates and refuses a schema that is behind; `kaas_app` cannot run DDL or write Flyway history.
 - **Release contract: IMPLEMENTED + VALIDATED against a real registry in CI.** Five images (the fifth is the
   security probe the attestation refresh runs), one OCI revision label, a strict digest-only manifest.
-- **RabbitMQ loss after publication: MEASURED, NOT RECOVERED.** The run ends `TIMED_OUT / QUEUE_DEADLINE`;
-  `rabbitmq_loss_recovery=false`. Follow-up KAAS-MSG-001. RabbitMQ state is not disposable yet.
+- **RabbitMQ loss after publication: RECOVERED (KAAS-MSG-001, ADR-036).** KAAS-DEPLOY-001 measured it as the
+  blocker; PostgreSQL now reconstructs a published dispatch the consumer never recorded — the same message id and
+  bytes — after a grace period, at least once, under a DB lease, bounded by the queue deadline and a republication
+  cap; the inbox absorbs duplicates. Proved against a real broker wipe through Karate under runsc.
 - **Infrastructure prerequisite surfaced:** the internal API must be served over TLS on the WireGuard path; the
   runner refuses plain http to a non-loopback address (secrets cross that connection).
 

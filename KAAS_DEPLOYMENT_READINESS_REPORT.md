@@ -5,7 +5,20 @@ runtime attestation refresh, refreshable service identity, the migrate-only entr
 the immutable image/release handoff. Decided by
 [ADR-035](docs/adr/035-deployment-readiness-runner-claim-intake.md).
 
-## FINAL VERDICT
+## Update — KAAS-MSG-001 closed the blocker
+
+KAAS-DEPLOY-001 proved the gap below; KAAS-MSG-001 ([ADR-036](docs/adr/036-postgres-authoritative-dispatch-reconstruction.md),
+[DURABLE_DISPATCH_RECOVERY_SLICE_REPORT.md](DURABLE_DISPATCH_RECOVERY_SLICE_REPORT.md)) closed it. A dispatch
+RabbitMQ loses after publication and before the consumer records it is now reconstructed from PostgreSQL — the
+same message id and bytes — admitted by the API consumer, claimed by the production runner and executed by Karate
+under runsc. The deployment-readiness gate now requires `rabbitmq_loss_recovery=true` for that path, and still
+requires `queue_deadline_fail_closed=true` when recovery cannot succeed.
+
+**Current verdict: MESSAGING RECOVERY COMPLETE — APPLICATION DEPLOYMENT CONTRACT READY** — CI run
+[36491575187](https://github.com/yannisyoussef/kaas/actions/runs/36491575187), 11/11, on `b04a9a4`; evidence in the
+KAAS-MSG-001 report. The KAAS-DEPLOY-001 record below is kept as it was.
+
+## FINAL VERDICT (KAAS-DEPLOY-001, historical)
 
 **DEPLOYMENT READINESS BLOCKED BY MESSAGING RECOVERY GAP**
 
