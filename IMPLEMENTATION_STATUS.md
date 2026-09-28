@@ -1,19 +1,45 @@
 # Implementation Status
 
-Status date: 2026-09-26
+Status date: 2026-09-28
 
-This document describes repository reality after secret-bearing Karate execution (KAAS-22). Karate 2.1.2 executes tenant features inside the mediated (gVisor) sandbox — secret-free since KAAS-21 (ADR-033), and with tenant secrets since KAAS-22 (ADR-034): values are stored as Vault Transit ciphertext, pinned by version, delivered only to one live assignment after the source filesystem is frozen, and removed as exact byte sequences from everything the platform keeps of the sandbox's output. **Application capability is not deployment readiness**: the Operations infrastructure (Vault operations, WireGuard, the execution host) and a production runner daemon do not exist yet. Sections below that describe earlier slices are kept as history; where a sentence stated a present fact that is no longer true, it is marked.
+This document describes repository reality after secret-bearing Karate execution (KAAS-22). Karate 2.1.2 executes tenant features inside the mediated (gVisor) sandbox — secret-free since KAAS-21 (ADR-033), and with tenant secrets since KAAS-22 (ADR-034): values are stored as Vault Transit ciphertext, pinned by version, delivered only to one live assignment after the source filesystem is frozen, and removed as exact byte sequences from everything the platform keeps of the sandbox's output. **Deployment readiness (KAAS-DEPLOY-001, ADR-035) is BLOCKED BY MESSAGING RECOVERY GAP**: the production runner daemon, API claim intake, migrate-only entrypoint, attestation and service-identity refresh and the five-image release contract now exist and are gated in CI, and a dispatch RabbitMQ loses after publication is measured to fail closed at the queue deadline and is not rebuilt (KAAS-MSG-001). The Operations infrastructure itself is Operations'. Sections below that describe earlier slices are kept as history; where a sentence stated a present fact that is no longer true, it is marked.
+
+## Deployment readiness (KAAS-DEPLOY-001) — BLOCKED BY MESSAGING RECOVERY GAP
+
+- **Runner work intake: IMPLEMENTED + VALIDATED.** The API consumer records corroborated deliveries as
+  `DELIVERED` and claims nothing; a runner claims for itself through `POST /internal/v1/assignments` (the unchanged
+  `RunClaimService`), waits through `POST /internal/v1/assignments/waits` (owns nothing), in the name its service
+  token carries. One run, one owner under twelve concurrent claimants. The execution host needs no RabbitMQ route
+  or credential; the runner build fails if a broker client appears.
+- **Production runner: IMPLEMENTED + VALIDATED.** `RunnerComposition` / `RunnerApplication.main`; READY only after
+  runtime preflight (the configured runtime only), accepted evidence and startup reconciliation; liveness vs
+  readiness; periodic reconciliation; drain-safe shutdown; API-outage back-off; health and metrics endpoints.
+- **Attestation refresh and refreshable service identity: IMPLEMENTED + VALIDATED.** Re-measured and re-signed on
+  an interval without restart; submitted evidence is verified against pinned keys and used only for its own
+  worker. Short-lived JWTs from the existing issuer, refreshed before expiry.
+- **Migrate-only entrypoint and role split: IMPLEMENTED + VALIDATED.** `kaas-api migrate`; production never
+  migrates and refuses a schema that is behind; `kaas_app` cannot run DDL or write Flyway history.
+- **Release contract: IMPLEMENTED + VALIDATED against a real registry in CI.** Five images (the fifth is the
+  security probe the attestation refresh runs), one OCI revision label, a strict digest-only manifest.
+- **RabbitMQ loss after publication: MEASURED, NOT RECOVERED.** The run ends `TIMED_OUT / QUEUE_DEADLINE`;
+  `rabbitmq_loss_recovery=false`. Follow-up KAAS-MSG-001. RabbitMQ state is not disposable yet.
+- **Infrastructure prerequisite surfaced:** the internal API must be served over TLS on the WireGuard path; the
+  runner refuses plain http to a non-loopback address (secrets cross that connection).
+
+See [KAAS_DEPLOYMENT_READINESS_REPORT.md](KAAS_DEPLOYMENT_READINESS_REPORT.md),
+[docs/deployment/application-contract.md](docs/deployment/application-contract.md) and
+[docs/architecture/production-runner.md](docs/architecture/production-runner.md).
 
 ## Implemented and validated
 
 - Java 25 multi-module build using the pinned Gradle 9.7.1 wrapper and distribution checksum.
 - Spring Boot 4.1.1 API bootstrap.
 - Real Actuator health, liveness, and readiness endpoints, verified over HTTP in an application test.
-- A runner that drives the full execution lifecycle: independent command validation and digest recomputation, assignment acquisition, lease renewal for the duration of a run, phase reporting, and result submission. It executes the platform's synthetic workload or, when deployed as an engine runner, Karate 2.1.2 on a delivered and frozen source filesystem (ADR-033), with secrets under ADR-034. **The loop is composed only by tests and CI**: `RunnerApplication` does not yet construct it; a production runner daemon is deployment-readiness work.
+- A runner that drives the full execution lifecycle: independent command validation and digest recomputation, assignment acquisition, lease renewal for the duration of a run, phase reporting, and result submission. It executes the platform's synthetic workload or, when deployed as an engine runner, Karate 2.1.2 on a delivered and frozen source filesystem (ADR-033), with secrets under ADR-034. *(Historical until KAAS-DEPLOY-001: the loop was composed only by tests.)* `RunnerApplication.main` now runs the production runner built by `RunnerComposition`, which takes work from the internal claim API (never RabbitMQ).
 - Next.js 16.3.3 / React 19.2.8 scaffold with deterministic ESLint, TypeScript checking, a server-rendered page test, production build, lockfile, and production audit.
 - Strict Draft 2020-12 compilation for execution command/result, artifact manifest, and live-event schemas, with canonical/minimal/negative fixtures and named semantic contract checks.
 - Zero-warning linting of the mixed implemented/proposed OpenAPI contract using pinned Redocly tooling.
-- Ten mandatory CI jobs with explicit read-only permissions and timeouts: backend, hostile-execution-gate, synthetic-execution-pipeline, execution-egress-gate, karate-execution-gate, secret-execution-gate, strong-runtime-gate, web, contracts, infrastructure. (CI-present and non-skippable; whether GitHub requires them for merge is a repository setting this document does not claim.)
+- Eleven mandatory CI jobs with explicit read-only permissions and timeouts: backend, hostile-execution-gate, synthetic-execution-pipeline, execution-egress-gate, karate-execution-gate, secret-execution-gate, strong-runtime-gate, deployment-readiness (KAAS-DEPLOY-001), web, contracts, infrastructure. (CI-present and non-skippable; whether GitHub requires them for merge is a repository setting this document does not claim.)
 - Spring Security OAuth2 resource-server authentication with RS256, issuer, audience, time, `sub`, and UUID `org_id` validation.
 - Trusted-claim tenant context, implicit member authorization, tenant-scoped repository predicates, and concealed cross-tenant 404 behavior.
 - Project create/get/list with exact per-organization name uniqueness, audit fields, JPA version, and transactional idempotency.
@@ -38,7 +64,7 @@ This document describes repository reality after secret-bearing Karate execution
 - Generalized, explicitly typed PostgreSQL outbox owning its own immutable payload, with a controlled message-type enum, an optional dispatch reference, and a V5 delivery-scheduling model the database rather than the relay process owns.
 - Outbox relay publishing to RabbitMQ with correlated publisher confirms, persistent messages, mandatory routing, bounded deterministic backoff, terminal dispositions retained as evidence, and fail-closed digest verification before publication.
 - Relay claim protocol using FOR UPDATE SKIP LOCKED with lease expiry, so multiple relays take disjoint work, a crashed relay strands nothing, and a revived relay cannot overwrite a newer disposition. No database transaction is held across broker I/O.
-- At-least-once publication with an explicit, tested crash-after-confirm duplicate window; stable message identity and semantic digest make duplicates safe for the consumer, which is implemented and shipped disabled by default.
+- At-least-once publication with an explicit, tested crash-after-confirm duplicate window; stable message identity and semantic digest make duplicates safe for the consumer, which is off by default and on in the production profile, where it records deliveries for runners to claim (KAAS-DEPLOY-001).
 - Production run scheduler moving CREATED to QUEUED in bounded, deterministically ordered batches through the established use case, safe across replicas.
 - Idempotent run-create replay now returns the run's current canonical representation and ETag rather than a reconstructed CREATED view, so one resource never advertises two strong validators.
 - Per-organization admission control: ceilings on active (CREATED or QUEUED) and queued runs, enforced under an organization-scoped PostgreSQL advisory lock so concurrent creates cannot overshoot, answered by a partial index rather than a full scan.

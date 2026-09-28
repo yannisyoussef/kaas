@@ -37,6 +37,29 @@ Outbox solves the database/broker dual-write gap. It does not make delivery or c
 - Duplicate publication: same path as redelivery.
 - Duplicate with changed digest: permanent integrity conflict; never treated as an ordinary duplicate.
 
+**Since KAAS-DEPLOY-001 ([ADR-035](../adr/035-deployment-readiness-runner-claim-intake.md)) the consumer's domain
+effect is a recorded delivery, not a claim.** A corroborated dispatch is recorded `DELIVERED` and its run stays
+`QUEUED`; a runner claims it for itself through the internal API (`POST /internal/v1/assignments`), through the
+same `RunClaimService`. Redelivery of a delivered message is absorbed exactly as before and never makes a run
+claimable twice.
+
+## Broker loss after publication (KAAS-DEPLOY-001) — measured, NOT recovered
+
+Once the relay records a dispatch as published (after a broker confirm), that publication is final: no component
+republishes it. If RabbitMQ then loses the message:
+
+```
+published (confirmed) ─▶ lost ─▶ not rebuilt ─▶ run stays QUEUED ─▶ queue deadline ─▶ TIMED_OUT / QUEUE_DEADLINE
+```
+
+`BrokerLossMeasurementTests` proves exactly this, in this order, against a real broker, with a control run that
+survives and is claimed. What is guaranteed is that **loss is detected through the queue deadline and fails
+closed** — nothing stays silently stuck. What is **not** guaranteed is recovery: the run is lost. The
+deployment-readiness gate requires `rabbitmq_loss_recovery=false`.
+
+Durable reconstruction of unclaimed lost dispatches from PostgreSQL is the follow-up **KAAS-MSG-001**. Until it
+closes, RabbitMQ state is not disposable.
+
 An inbox record may retain only the digest and disposition when payload retention would create sensitive-data risk. DLQ tooling must enforce access control, retention, and redaction.
 
 ## Retries are different mechanisms
