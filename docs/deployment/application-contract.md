@@ -3,9 +3,9 @@
 What the application needs from Operations, and what it provides back (KAAS-DEPLOY-001,
 [ADR-035](../adr/035-deployment-readiness-runner-claim-intake.md)). The application provisions none of it.
 
-> **Deployment readiness is BLOCKED by one application gap:** a dispatch RabbitMQ loses after publication is not
-> rebuilt; the run ends `TIMED_OUT / QUEUE_DEADLINE`. **RabbitMQ state is not disposable** until KAAS-MSG-001
-> closes. See [§ RabbitMQ loss](#rabbitmq-loss).
+> **RabbitMQ state is not authoritative (KAAS-MSG-001).** A dispatch the broker loses after publication, before
+> the API consumer records it, is reconstructed from PostgreSQL and republished — the same dispatch — within the
+> bounds in [§ RabbitMQ loss](#rabbitmq-loss). (KAAS-DEPLOY-001 measured this as a blocker; ADR-036 closed it.)
 
 ## Hosts
 
@@ -169,19 +169,37 @@ an infrastructure prerequisite; the application does not relax the rule.
 
 ## RabbitMQ loss
 
+KAAS-DEPLOY-001 measured that a published dispatch the broker lost was never rebuilt. KAAS-MSG-001
+([ADR-036](../adr/036-postgres-authoritative-dispatch-reconstruction.md),
+[dispatch-recovery.md](../architecture/dispatch-recovery.md)) reconstructs it.
+
 | | |
 |---|---|
-| Current behaviour | a published dispatch the broker loses → not rebuilt → run stays `QUEUED` → queue deadline → `COMPLETED` with `TIMED_OUT / QUEUE_DEADLINE` |
-| Current recovery guarantee | **none** |
-| What is guaranteed | loss is detected through the queue deadline and fails closed; nothing stays silently stuck |
-| Follow-up | KAAS-MSG-001 — durable dispatch reconstruction/redrive design |
-| Operations impact | **do not assume RabbitMQ state is disposable yet** — "the broker can be discarded because PostgreSQL rebuilds everything" is currently false |
+| Guarantee | a dispatch that was **published** (broker-confirmed) and **never durably admitted** by the API consumer is republished from PostgreSQL — same message id, same bytes — while its run is `QUEUED`, unclaimed, not cancelled, and before its queue deadline |
+| Recovery grace | `KAAS_DISPATCH_RECOVERY_GRACE`, default **30 s** after the last publication |
+| Recovery cadence | a pass every `KAAS_DISPATCH_RECOVERY_INTERVAL` (**10 s**); republications spaced 30 s, 60 s, 120 s…, capped at `KAAS_DISPATCH_RECOVERY_MAX_INTERVAL` (**2 min**) |
+| Recovery cap | at most `KAAS_DISPATCH_RECOVERY_MAX_PUBLICATIONS` (**3**) republications per dispatch |
+| Terminal bound | the **queue deadline** (`KAAS_QUEUE_TIMEOUT`, default 5 min): a dispatch that cannot be delivered before it still ends `TIMED_OUT / QUEUE_DEADLINE`, fail-closed |
+| Delivery semantics | at least once; a duplicate is decided once by the consumer inbox |
+| Where it runs | in every API instance, production profile on by default (`KAAS_DISPATCH_RECOVERY_ENABLED`); `/actuator/deployment` shows `dispatchRecovery` and is NOT_READY if the loop stalls |
+| Other tunables | `KAAS_DISPATCH_RECOVERY_INITIAL_DELAY` (15 s), `_BATCH_SIZE` (20), `_BASE_BACKOFF` (10 s) and `_MAX_BACKOFF` (2 min) after a failed republication |
+| Start-up validation (when enabled) | grace < half the queue timeout; lease ≥ batch size × publisher confirm timeout (20 × 5 s); lease + grace < queue timeout. A violation stops the API at startup |
+| Stall detection | `dispatchRecovery=STALLED` once no pass has completed for 3 × interval + lease + initial delay (**165 s** by default); a stalled instance is NOT_READY |
+| Crash of an instance mid-recovery | its lease (`KAAS_DISPATCH_RECOVERY_CLAIM_TTL`, **2 min**; must satisfy lease + grace < queue timeout) expires and another instance continues |
+| Requirement | `KAAS_CONSUMER_NAME` must be **one fixed value** for the life of the deployment — the delivered marker is keyed by it |
 
-The application does not choose a backup strategy; that decision is Operations'.
+What is **not** claimed: recovery of a message the relay never published (the relay's own retries and
+dead-letter policy own it), of work whose consumer never returns before the deadline, or of anything other than
+execution dispatches.
+
+**Operations impact:** application correctness no longer depends on RabbitMQ backup or restore for lost queued
+execution dispatches; RabbitMQ is transport. Whether to back RabbitMQ up anyway — for faster recovery, or other reasons — is
+an Operations decision the application does not make.
 
 ## Synthetic deployment check
 
 `kaas-api deploy-check` exits 0 only when `/actuator/deployment` says `READY` — database up, schema current,
 broker connection open, **at least one runner that asked for work in the last 90 s and holds evidence fresh
-enough to be authorized** — and every `--runner` named answers `/health/readiness` with 200. It runs no tenant
+enough to be authorized**, and dispatch recovery not `STALLED` — and every `--runner` named answers
+`/health/readiness` with 200. It runs no tenant
 workload and writes nothing. It fails with no runner deployed.

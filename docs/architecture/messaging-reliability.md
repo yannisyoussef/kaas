@@ -43,22 +43,16 @@ effect is a recorded delivery, not a claim.** A corroborated dispatch is recorde
 same `RunClaimService`. Redelivery of a delivered message is absorbed exactly as before and never makes a run
 claimable twice.
 
-## Broker loss after publication (KAAS-DEPLOY-001) — measured, NOT recovered
+## Broker loss after publication — measured by KAAS-DEPLOY-001, closed by KAAS-MSG-001
 
-Once the relay records a dispatch as published (after a broker confirm), that publication is final: no component
-republishes it. If RabbitMQ then loses the message:
-
-```
-published (confirmed) ─▶ lost ─▶ not rebuilt ─▶ run stays QUEUED ─▶ queue deadline ─▶ TIMED_OUT / QUEUE_DEADLINE
-```
-
-`BrokerLossMeasurementTests` proves exactly this, in this order, against a real broker, with a control run that
-survives and is claimed. What is guaranteed is that **loss is detected through the queue deadline and fails
-closed** — nothing stays silently stuck. What is **not** guaranteed is recovery: the run is lost. The
-deployment-readiness gate requires `rabbitmq_loss_recovery=false`.
-
-Durable reconstruction of unclaimed lost dispatches from PostgreSQL is the follow-up **KAAS-MSG-001**. Until it
-closes, RabbitMQ state is not disposable.
+KAAS-DEPLOY-001 measured that once the relay recorded a dispatch as published, a broker loss before consumption
+left it unrebuilt until the queue deadline (`rabbitmq_loss_recovery=false`). KAAS-MSG-001
+([ADR-036](../adr/036-postgres-authoritative-dispatch-reconstruction.md), [dispatch-recovery.md](dispatch-recovery.md))
+closes it: PostgreSQL reconstructs transport delivery of the **same** dispatch — same message id and bytes — for a
+published dispatch the consumer never recorded, after a grace period, at least once, bounded by the queue deadline
+and a republication cap. The inbox makes every duplicate a no-op. `published_at` still means the first
+publication; recovery history lives in `dispatch_recoveries`. The queue deadline remains the fail-closed bound
+when recovery cannot succeed.
 
 An inbox record may retain only the digest and disposition when payload retention would create sensitive-data risk. DLQ tooling must enforce access control, retention, and redaction.
 
