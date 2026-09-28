@@ -103,7 +103,8 @@ maintenance tick: NOT READY at once, and an immediate re-measurement.
 
 ## Service identity
 
-A JWT from the existing issuer, replaced at 70 % of its life; `sub` must equal `KAAS_RUNNER_WORKER_ID`. No
+A JWT from the existing issuer, replaced at 70 % of its life or 45 s before expiry, whichever is sooner, so a
+short-lived token never leaves a gap; `sub` must equal `KAAS_RUNNER_WORKER_ID`. No
 token is sent past 30 s before expiry, none is sent unauthenticated, none enters a sandbox, and no `toString`
 prints one. The egress proxy's identity is separate and is injected into each proxy container when that proxy
 starts.

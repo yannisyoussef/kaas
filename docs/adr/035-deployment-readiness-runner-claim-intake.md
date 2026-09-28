@@ -98,7 +98,8 @@ it.
 ### 5. Refreshable service identity from the existing issuer
 
 The runner obtains short-lived JWTs from the platform's existing issuer — OAuth 2.0 client credentials with the
-secret in a file, or a token file a host agent maintains — and replaces each at 70 % of its life. A token for
+secret in a file, or a token file a host agent maintains — and replaces each at 70 % of its life or 45 s before expiry, whichever
+comes first, so it is never without a presentable one (a gap for short-lived tokens was found by the gate). A token for
 another subject, an expired one, or none at all makes the runner NOT READY; nothing is ever sent
 unauthenticated. The proxy has its own identity (`kaas.egress-proxy`) and the runner's credential never enters a
 proxy container. No new identity provider. No token in a sandbox, database, queue or log.
