@@ -81,6 +81,7 @@ public class ExecutionAuthorizationService {
     private final ExecutionAuthorizationRepository repository;
     private final WorkerLeaseRepository leases;
     private final SandboxSecurityAttestationSource attestations;
+    private final WorkerAttestations workerAttestations;
     private final SecretTransit secrets;
     private final MeterRegistry meters;
     private final Duration authorizationTtl;
@@ -92,6 +93,7 @@ public class ExecutionAuthorizationService {
             ExecutionAuthorizationRepository repository,
             WorkerLeaseRepository leases,
             SandboxSecurityAttestationSource attestations,
+            WorkerAttestations workerAttestations,
             SecretTransit secrets,
             MeterRegistry meters,
             @Value("${kaas.execution.authorization-ttl}") Duration authorizationTtl,
@@ -101,6 +103,7 @@ public class ExecutionAuthorizationService {
         this.repository = repository;
         this.leases = leases;
         this.attestations = attestations;
+        this.workerAttestations = workerAttestations;
         this.secrets = secrets;
         this.meters = meters;
         this.authorizationTtl = authorizationTtl;
@@ -236,7 +239,10 @@ public class ExecutionAuthorizationService {
         // unsigned document, one signed by a key nobody pinned, or one whose payload was edited after signing
         // cannot be represented here at all — the refusal happened at startup and nothing downstream can read
         // a verdict from a document that did not verify.
-        Optional<VerifiedSandboxSecurityAttestation> attestation = attestations.attestation();
+        //
+        // THIS WORKER'S evidence (KAAS-DEPLOY-001): its own latest submission if it has made one, re-verified
+        // against the keys pinned now, and otherwise the configured document. Never another worker's.
+        Optional<VerifiedSandboxSecurityAttestation> attestation = workerAttestations.forWorker(workerId);
         if (attestation.isEmpty()) {
             return denied(ExecutionDenial.SECURITY_GATE_UNAVAILABLE);
         }

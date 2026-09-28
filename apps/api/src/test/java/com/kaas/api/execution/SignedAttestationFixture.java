@@ -154,6 +154,12 @@ public final class SignedAttestationFixture {
             return this;
         }
 
+        /** A distinct id, for a sequence of refreshed documents from one host. */
+        public Builder withAttestationId(String id) {
+            this.attestationId = id;
+            return this;
+        }
+
         public Builder withRuntimeSubject(String subject) {
             this.runtimeSubject = subject;
             return this;
