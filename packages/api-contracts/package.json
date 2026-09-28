@@ -6,8 +6,9 @@
   },
   "scripts": {
     "lint:openapi": "redocly lint ../../docs/api/openapi-v1.yaml",
-    "test": "npm run validate:schemas && npm run lint:openapi",
-    "validate:schemas": "node scripts/validate-schemas.mjs"
+    "test": "npm run validate:schemas && npm run verify:release-manifest && npm run lint:openapi",
+    "validate:schemas": "node scripts/validate-schemas.mjs",
+    "verify:release-manifest": "node scripts/verify-release-manifest.mjs --self-test"
   },
   "devDependencies": {
     "@redocly/cli": "2.49.0",

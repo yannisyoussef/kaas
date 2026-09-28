@@ -1,0 +1,24 @@
+#!/bin/sh
+# The API image's entrypoint. A closed set of modes; nothing a caller supplies becomes a class name.
+set -eu
+java=/opt/java/openjdk/bin/java
+classpath='/app/lib/*'
+mode="${1:-serve}"
+[ "$#" -gt 0 ] && shift
+case "$mode" in
+  serve)
+    exec "$java" -XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError -cp "$classpath" \
+      com.kaas.api.KaasApiApplication "$@"
+    ;;
+  migrate)
+    # Flyway and nothing else, with the MIGRATOR's credential (KAAS_MIGRATOR_DATABASE_*). No arguments.
+    exec "$java" -XX:MaxRAMPercentage=50.0 -cp "$classpath" com.kaas.api.deployment.DatabaseMigrator
+    ;;
+  deploy-check)
+    exec "$java" -XX:MaxRAMPercentage=25.0 -cp "$classpath" com.kaas.api.deployment.DeploymentCheck "$@"
+    ;;
+  *)
+    echo "usage: kaas-api [serve|migrate|deploy-check --api URL [--runner URL ...] [--timeout PT120S]]" >&2
+    exit 2
+    ;;
+esac

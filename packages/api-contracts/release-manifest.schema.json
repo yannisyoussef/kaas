@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kaas.local/contracts/release-manifest.schema.json",
+  "title": "KaaS release manifest (KAAS-DEPLOY-001)",
+  "description": "The immutable handoff from GitHub (which tests, builds and publishes) to Operations (which deploys). One source revision; every deployable image by digest. A tag is never a valid reference here: a tag is a mutable pointer, and a deployment that resolved one could run an image this revision never produced.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "revision", "images"],
+  "properties": {
+    "schemaVersion": { "const": "kaas.release-manifest.v1" },
+    "revision": {
+      "description": "The full 40-character git commit every image below was built from, and which each carries as its org.opencontainers.image.revision label.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api", "runner", "karate-engine", "egress-proxy", "security-probe"],
+      "properties": {
+        "api": { "$ref": "#/$defs/image", "description": "Control plane; also the migrator (kaas-api migrate) and the deploy check (kaas-api deploy-check)." },
+        "runner": { "$ref": "#/$defs/image", "description": "The execution-host runner." },
+        "karate-engine": { "$ref": "#/$defs/image", "description": "The sandboxed engine the runner launches (KAAS_RUNNER_ENGINE_IMAGE)." },
+        "egress-proxy": { "$ref": "#/$defs/image", "description": "The allowlist egress proxy the runner launches (KAAS_RUNNER_EGRESS_PROXY_IMAGE)." },
+        "security-probe": { "$ref": "#/$defs/image", "description": "The trusted probe the runner's attestation refresh runs on the execution host (KAAS_RUNNER_PROBE_IMAGE)." }
+      }
+    }
+  },
+  "$defs": {
+    "image": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]{1,5})?(/[a-z0-9]+([._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$"
+    }
+  }
+}

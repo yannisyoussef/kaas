@@ -11,6 +11,7 @@ const contracts = [
   { name: "live-event", schema: "../live-event.schema.json", fixtureDirectory: "../fixtures/live-event", maxBytes: 64 * 1024 },
   { name: "execution-command", schema: "../execution-command.schema.json", fixtureDirectory: "../fixtures/execution-command", maxBytes: 4 * 1024 * 1024 },
   { name: "sandbox-security-attestation", schema: "../sandbox-security-attestation.schema.json", fixtureDirectory: "../fixtures/sandbox-security-attestation", maxBytes: 64 * 1024 },
+  { name: "release-manifest", schema: "../release-manifest.schema.json", fixtureDirectory: "../fixtures/release-manifest", maxBytes: 8 * 1024 },
 ];
 
 const expectedKeywordByName = new Map([
@@ -52,6 +53,17 @@ const expectedKeywordByName = new Map([
   // A runtime generation that names the host instead of hashing its runtime's identity. The pattern is what
   // stops a hostname reaching an artifact that travels.
   ["invalid-non-opaque-runtime-generation.json", "pattern"],
+  // Release manifest (KAAS-DEPLOY-001). A tag is refused whether alone or alongside a digest: "name:tag@digest"
+  // resolves by digest in some tools and by tag in others, and the handoff must not depend on which.
+  ["invalid-tag-only-image.json", "pattern"],
+  ["invalid-tag-and-digest.json", "pattern"],
+  // Neither tag nor digest: resolves to whatever "latest" is when it is pulled. Found by mutant D24, which made
+  // the digest optional and survived every fixture above.
+  ["invalid-digestless-image.json", "pattern"],
+  ["invalid-missing-component.json", "required"],
+  ["invalid-unknown-component.json", "additionalProperties"],
+  ["invalid-short-revision.json", "pattern"],
+  ["invalid-manifest-version.json", "const"],
 ]);
 
 // Authority that only exists after a worker claim. A queue-time DispatchIntent must never carry it.
