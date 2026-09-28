@@ -28,12 +28,21 @@ public final class ControlPlaneClient {
 
     private final HttpClient http;
     private final URI baseUri;
-    private final String authorization;
+    private final Authorization authorization;
     private final Duration requestTimeout;
     private final Sleeper sleeper;
 
     public ControlPlaneClient(
             HttpClient http, URI baseUri, String authorization, Duration requestTimeout, Sleeper sleeper) {
+        this(http, baseUri, Authorization.fixed(authorization), requestTimeout, sleeper);
+    }
+
+    /**
+     * With a credential obtained per request rather than fixed at construction (KAAS-DEPLOY-001): a production
+     * runner outlives any token it should be issued, so each request asks for the current one.
+     */
+    public ControlPlaneClient(
+            HttpClient http, URI baseUri, Authorization authorization, Duration requestTimeout, Sleeper sleeper) {
         this.http = http;
         this.baseUri = baseUri;
         this.authorization = authorization;
@@ -89,7 +98,7 @@ public final class ControlPlaneClient {
         HttpRequest request = HttpRequest.newBuilder(baseUri.resolve(path))
                 .timeout(timeout)
                 .header("Content-Type", "application/json")
-                .header("Authorization", authorization)
+                .header("Authorization", authorization.header())
                 .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
                 .build();
         try {
@@ -126,7 +135,7 @@ public final class ControlPlaneClient {
     public byte[] redeemSourceBundle(String capabilityToken, long maximumBytes) throws ControlPlaneUnavailable {
         HttpRequest request = HttpRequest.newBuilder(baseUri.resolve("/internal/v1/source-bundles"))
                 .timeout(requestTimeout)
-                .header("Authorization", authorization)
+                .header("Authorization", authorization.header())
                 .header("X-KaaS-Source-Capability", capabilityToken)
                 .POST(HttpRequest.BodyPublishers.noBody())
                 .build();
@@ -187,7 +196,7 @@ public final class ControlPlaneClient {
         for (int attempt = 1; attempt <= 2; attempt++) {
             HttpRequest request = HttpRequest.newBuilder(baseUri.resolve("/internal/v1/secret-bundles"))
                     .timeout(requestTimeout)
-                    .header("Authorization", authorization)
+                    .header("Authorization", authorization.header())
                     .header("X-KaaS-Secret-Capability", capabilityToken)
                     .POST(HttpRequest.BodyPublishers.noBody())
                     .build();
@@ -250,7 +259,7 @@ public final class ControlPlaneClient {
             HttpRequest request = HttpRequest.newBuilder(baseUri.resolve(path))
                     .timeout(requestTimeout)
                     .header("Content-Type", "application/json")
-                    .header("Authorization", authorization)
+                    .header("Authorization", authorization.header())
                     .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
                     .build();
             try {
@@ -282,6 +291,143 @@ public final class ControlPlaneClient {
         }
         throw new ControlPlaneUnavailable(
                 "The control plane did not answer after " + MAX_ATTEMPTS + " attempts.", lastTransportFailure);
+    }
+
+    // ---------------------------------------------------------------- work intake (KAAS-DEPLOY-001)
+
+    /**
+     * Claims one delivered run for this runner, now. Never waits.
+     *
+     * <p>One attempt and no retry: a claim is not idempotent from this side -- a response lost in transit may
+     * mean the control plane assigned the run to this runner and this runner never heard, and a blind retry
+     * would then claim a SECOND run while the first sits leased to nobody who knows. Losing one response costs
+     * one run a lease expiry; retrying could cost more. The intake loop backs off and asks again.
+     *
+     * @return the assignment, or empty when there is no work
+     */
+    public java.util.Optional<Claimed> claimAssignment() throws ControlPlaneUnavailable {
+        HttpRequest request = HttpRequest.newBuilder(baseUri.resolve("/internal/v1/assignments"))
+                .timeout(requestTimeout)
+                .header("Content-Type", "application/json")
+                .header("Authorization", authorization.header())
+                .POST(HttpRequest.BodyPublishers.ofString("{}", StandardCharsets.UTF_8))
+                .build();
+        HttpResponse<String> response = sendOnce(request, "claim");
+        if (response.statusCode() == 204) {
+            return java.util.Optional.empty();
+        }
+        if (response.statusCode() != 200) {
+            throw new ControlPlaneUnavailable("A claim was refused with " + response.statusCode() + ".", null);
+        }
+        return java.util.Optional.of(Claimed.parse(response.body()));
+    }
+
+    /**
+     * Waits up to {@code wait} for delivered work to exist. Claims nothing, so abandoning it is always safe.
+     *
+     * <p>Sent asynchronously and awaited interruptibly, and cancelled when the waiting thread is interrupted:
+     * that is what lets a runner that is shutting down stop waiting at once rather than when the server's wait
+     * ends. The server's answer would not matter anyway -- this request can create no ownership.
+     *
+     * @return whether work was reported available
+     */
+    public boolean awaitWork(Duration wait) throws ControlPlaneUnavailable, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder(baseUri.resolve("/internal/v1/assignments/waits"))
+                // The server holds the wait; the client allows it that long plus the ordinary request budget.
+                .timeout(wait.plus(requestTimeout))
+                .header("Content-Type", "application/json")
+                .header("Authorization", authorization.header())
+                .POST(HttpRequest.BodyPublishers.ofString(
+                        "{\"waitMillis\":" + wait.toMillis() + "}", StandardCharsets.UTF_8))
+                .build();
+        var pending = http.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        HttpResponse<String> response;
+        try {
+            response = pending.get();
+        } catch (InterruptedException interrupted) {
+            pending.cancel(true);
+            throw interrupted;
+        } catch (java.util.concurrent.ExecutionException failed) {
+            throw new ControlPlaneUnavailable("The control plane could not be reached to wait for work.",
+                    failed.getCause());
+        }
+        if (response.statusCode() == 200) {
+            return true;
+        }
+        if (response.statusCode() == 204) {
+            return false;
+        }
+        throw new ControlPlaneUnavailable("A wait was answered with " + response.statusCode() + ".", null);
+    }
+
+    /**
+     * Delivers a freshly signed sandbox security attestation. One attempt; the refresher owns retrying.
+     *
+     * @return the control plane's answer, whose {@code code} says whether it was accepted and why not
+     */
+    public Response submitAttestation(String document) throws ControlPlaneUnavailable {
+        HttpRequest request = HttpRequest.newBuilder(baseUri.resolve("/internal/v1/sandbox-attestations"))
+                .timeout(requestTimeout)
+                .header("Content-Type", "application/json")
+                .header("Authorization", authorization.header())
+                .POST(HttpRequest.BodyPublishers.ofString(document, StandardCharsets.UTF_8))
+                .build();
+        HttpResponse<String> response = sendOnce(request, "attestation");
+        return new Response(response.statusCode(), response.body());
+    }
+
+    private HttpResponse<String> sendOnce(HttpRequest request, String what) throws ControlPlaneUnavailable {
+        try {
+            HttpResponse<String> response =
+                    http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() >= 500) {
+                throw new ControlPlaneUnavailable(
+                        "The control plane returned " + response.statusCode() + " for a " + what + ".", null);
+            }
+            return response;
+        } catch (IOException transport) {
+            throw new ControlPlaneUnavailable("The control plane could not be reached for a " + what + ".",
+                    transport);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new ControlPlaneUnavailable("Interrupted during a " + what + ".", interrupted);
+        }
+    }
+
+    /** What a successful claim hands back: the run, the attempt, the fencing token. Nothing else is read. */
+    public record Claimed(UUID runId, UUID attemptId, int assignmentEpoch) {
+        private static final tools.jackson.databind.ObjectMapper MAPPER =
+                tools.jackson.databind.json.JsonMapper.builder().build();
+
+        static Claimed parse(String body) throws ControlPlaneUnavailable {
+            try {
+                var node = MAPPER.readTree(body);
+                return new Claimed(
+                        UUID.fromString(node.get("runId").stringValue()),
+                        UUID.fromString(node.get("attemptId").stringValue()),
+                        node.get("assignmentEpoch").intValue());
+            } catch (RuntimeException malformed) {
+                // Not retried and not guessed at: a claim whose answer cannot be read is an assignment this
+                // runner cannot honour, and its lease will expire and fence it.
+                throw new ControlPlaneUnavailable("A claim response could not be read.", null);
+            }
+        }
+    }
+
+    /**
+     * The credential a request carries, obtained per request.
+     *
+     * <p>Failing to obtain one is reported as the control plane being unavailable to THIS runner: nothing is
+     * sent unauthenticated, and the caller's ordinary handling -- NOT READY, back off, try again -- applies.
+     */
+    @FunctionalInterface
+    public interface Authorization {
+        String header() throws ControlPlaneUnavailable;
+
+        /** A constant credential, for tests and callers that are handed one. */
+        static Authorization fixed(String header) {
+            return () -> header;
+        }
     }
 
     /** A status and a body. Deliberately not parsed here: this type knows about HTTP, not about commands. */

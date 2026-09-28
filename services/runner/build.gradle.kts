@@ -345,7 +345,7 @@ tasks.named("check") { dependsOn(egressSecurityTest) }
  */
 val verifyLauncherHasNoUserContentDependencies = tasks.register("verifyLauncherHasNoUserContentDependencies") {
     group = "verification"
-    description = "Fails if the trusted launcher acquires Karate, object-store, or secret-provider dependencies."
+    description = "Fails if the trusted launcher acquires Karate, object-store, secret-provider or broker dependencies."
     doLast {
         // Both classpaths. The test classpath is where someone would first try running Karate feature files
         // against the sandbox, and it is the JVM the security gate itself runs in — checking only the runtime
@@ -369,7 +369,14 @@ val verifyLauncherHasNoUserContentDependencies = tasks.register("verifyLauncherH
                     it.startsWith("com.google.cloud:google-cloud-secretmanager") ||
                     // The daemon-privileged module must not acquire the control plane, which would hand it the
                     // datasource and JWT configuration in a single line.
-                    it.contains("kaas:api")
+                    it.contains("kaas:api") ||
+                    // No broker client (KAAS-DEPLOY-001, ADR-035). The runner takes work from the internal claim
+                    // API; the execution host has no RabbitMQ route or credential, and a broker library arriving
+                    // through some shared module would be the first step towards needing both.
+                    it.startsWith("com.rabbitmq:") ||
+                    it.startsWith("org.springframework.amqp:") ||
+                    it.startsWith("org.apache.qpid:") ||
+                    it.startsWith("io.vertx:vertx-amqp")
             }
             .distinct()
         check(forbidden.isEmpty()) { "Forbidden launcher dependencies found in services/runner: $forbidden" }
@@ -378,4 +385,18 @@ val verifyLauncherHasNoUserContentDependencies = tasks.register("verifyLauncherH
 
 tasks.named("check") {
     dependsOn(verifyLauncherHasNoUserContentDependencies)
+}
+
+/**
+ * The runner image's build context (KAAS-DEPLOY-001): the jar this build compiled and exactly its runtime
+ * classpath -- the classpath the broker, Karate and secret-provider guard above has already checked.
+ */
+val runnerImageContext = tasks.register<Sync>("runnerImageContext") {
+    group = "build"
+    description = "Assembles the runner image build context."
+    dependsOn(verifyLauncherHasNoUserContentDependencies)
+    into(layout.buildDirectory.dir("runner-image-context"))
+    from(layout.projectDirectory.dir("src/main/docker/runner"))
+    from(tasks.named("jar")) { into("lib") }
+    from(configurations.runtimeClasspath) { into("lib") }
 }

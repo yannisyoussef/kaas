@@ -151,7 +151,7 @@ public record RuntimeImplementation(String name, String version, String digest, 
      * {@code which runsc} measures whatever this process's environment happens to find. This measures the
      * registration the daemon will resolve when it starts a mediated container.
      */
-    private static Path registeredPath(DockerClient docker, String runtimeName) {
+    public static Path registeredPath(DockerClient docker, String runtimeName) {
         Object runtimes;
         try {
             runtimes = docker.infoCmd().exec().getRuntimes();

@@ -51,7 +51,8 @@ public final class EgressEnforcementGate {
 
     private final DockerClient docker;
 
-    private final Path proxyImageContext;
+    /** How the proxy image is obtained: built from the repository context, or the one a deployment pinned. */
+    private final java.util.function.Supplier<String> proxyImage;
 
     private final String probeImage;
 
@@ -64,10 +65,28 @@ public final class EgressEnforcementGate {
      */
     public EgressEnforcementGate(
             DockerClient docker, Path proxyImageContext, String probeImage, String generation) {
+        this(docker, () -> EgressProxyImage.build(docker, proxyImageContext), probeImage, generation);
+    }
+
+    private EgressEnforcementGate(
+            DockerClient docker, java.util.function.Supplier<String> proxyImage, String probeImage,
+            String generation) {
         this.docker = docker;
-        this.proxyImageContext = proxyImageContext;
+        this.proxyImage = proxyImage;
         this.probeImage = probeImage;
         this.generation = generation;
+    }
+
+    /**
+     * Against the proxy image a DEPLOYMENT runs, rather than one built here (KAAS-DEPLOY-001).
+     *
+     * <p>A production runner has no repository to build from; what it has is the digest-pinned image the release
+     * shipped, and that is exactly what the evidence must describe -- the proxy executions will actually use. A
+     * tag is refused by the pinning check below just as a built image would be if it came back unpinned.
+     */
+    public static EgressEnforcementGate forDeployedImage(
+            DockerClient docker, String proxyImageReference, String probeImage, String generation) {
+        return new EgressEnforcementGate(docker, () -> proxyImageReference, probeImage, generation);
     }
 
     /**
@@ -84,7 +103,7 @@ public final class EgressEnforcementGate {
 
         String imageReference;
         try {
-            imageReference = EgressProxyImage.build(docker, proxyImageContext);
+            imageReference = proxyImage.get();
         } catch (RuntimeException cannotBuild) {
             // Without an image nothing below can be attempted, so every remaining control is reported failed
             // rather than omitted. An omitted control reads as "not covered", and the control plane's exact

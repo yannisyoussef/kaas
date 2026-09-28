@@ -1,29 +1,34 @@
 package com.kaas.runner;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class RunnerApplicationTest {
     @Test
-    void bootstrapReportsThatExecutionIsDisabled() {
+    void anInvalidConfigurationStopsTheRunnerBeforeAnythingStartsAndNamesEveryProblemButNoValue() {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
+        String secretLooking = "kaas-canary-value-that-must-not-be-echoed";
 
-        RunnerApplication.run(new PrintStream(output, true, StandardCharsets.UTF_8));
+        int exit = RunnerApplication.run(
+                Map.of("KAAS_RUNNER_API_URL", "http://10.0.0.5:8080?token=" + secretLooking,
+                        "KAAS_RUNNER_ENGINE_IMAGE", "registry.example/kaas-engine:latest"),
+                new PrintStream(output, true, StandardCharsets.UTF_8));
 
-        // The original contract is unchanged: this module executes nothing arbitrary. It now also says what the
-        // sandbox is for, because a module that has acquired a container launcher should say out loud that the
-        // launcher runs one probe rather than anything a caller names.
-        assertEquals(
-                RunnerApplication.BOOTSTRAP_MESSAGE
-                        + System.lineSeparator()
-                        + RunnerApplication.SECURITY_PROBE_MESSAGE
-                        + System.lineSeparator(),
-                output.toString(StandardCharsets.UTF_8));
+        String printed = output.toString(StandardCharsets.UTF_8);
+        assertThat(exit).isEqualTo(2);
+        assertThat(printed).startsWith("runner=CONFIGURATION_INVALID")
+                .contains("KAAS_RUNNER_WORKER_ID is required")
+                .contains("KAAS_RUNNER_API_URL")
+                .contains("KAAS_RUNNER_ENGINE_IMAGE must be pinned by digest")
+                .contains("KAAS_RUNNER_TOKEN_ENDPOINT")
+                .doesNotContain(secretLooking)
+                .doesNotContain("registry.example");
     }
 
     @Test
