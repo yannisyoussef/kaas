@@ -313,9 +313,23 @@ class DeploymentPipelineTests {
 
     @Test
     @Order(40)
-    void theServiceCredentialWasRefreshedAndNeverOutlivedItsExpiry() {
-        // The suite has run for minutes against sixty-second tokens.
-        assertThat(TOKENS_ISSUED.get()).isGreaterThanOrEqualTo(2);
+    @Timeout(300)
+    void theServiceCredentialIsReplacedBeforeItExpiresWithoutARestart() throws Exception {
+        // Waited for rather than assumed: the first CI run completed everything above in under 70 % of one
+        // token's life, so no refresh had yet been due. The runner keeps polling while idle, and each request asks
+        // for the current credential; within one lifetime it must obtain a new one -- and never stop being ready.
+        int before = TOKENS_ISSUED.get();
+        long deadline = System.nanoTime() + TOKEN_LIFETIME.plusSeconds(60).toNanos();
+        while (TOKENS_ISSUED.get() < before + 1) {
+            assertThat(runner.daemon().readiness().ready()).as("ready throughout the refresh").isTrue();
+            assertThat(System.nanoTime()).as("a new token within one lifetime").isLessThan(deadline);
+            Thread.sleep(500);
+        }
+        assertThat(runner.daemon().readiness().ready()).isTrue();
+        assertThat(runner.daemon().metrics().count("kaas_runner_service_auth_refresh_total{identity=\"runner\"}"))
+                .isGreaterThanOrEqualTo(2);
+        assertThat(runner.daemon().metrics().count("kaas_runner_service_auth_refresh_failure_total{identity=\"runner\"}"))
+                .isZero();
         PipelineEvidence.append("deployment-pipeline-evidence.txt",
                 "service_tokens_issued=" + TOKENS_ISSUED.get() + "\nservice_token_lifetime_seconds="
                         + TOKEN_LIFETIME.toSeconds() + "\n");
