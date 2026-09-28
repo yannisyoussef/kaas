@@ -57,6 +57,9 @@ dependencies {
     testImplementation("org.testcontainers:testcontainers-postgresql")
     // The deployment pipeline suite runs the broker for real: the production consumer, not a test, delivers.
     testImplementation("org.testcontainers:testcontainers-rabbitmq")
+    // To pause the API consumer and purge the queue while a dispatch is lost (KAAS-MSG-001). Test classpath of a
+    // test-only module: the runner's own classpath, which its build guard checks, is unaffected.
+    testImplementation("org.springframework.boot:spring-boot-starter-amqp")
     testImplementation("org.postgresql:postgresql")
 
     // The container-runtime client, declared explicitly rather than leaned on transitively. :services:runner

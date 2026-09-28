@@ -123,7 +123,13 @@ import tools.jackson.databind.ObjectMapper;
             "management.server.port=0",
             "management.server.address=127.0.0.1",
             "management.endpoints.web.exposure.include=health,prometheus,deployment",
-            "management.endpoint.health.show-details=never"
+            "management.endpoint.health.show-details=never",
+            // Dispatch recovery on its own timer, as in production, with a short grace for the suite.
+            "kaas.dispatch.recovery.enabled=true",
+            "kaas.dispatch.recovery.grace=PT5S",
+            "kaas.dispatch.recovery.interval=PT1S",
+            "kaas.dispatch.recovery.initial-delay=PT1S",
+            "kaas.dispatch.recovery.claim-ttl=PT2M"
         })
 class DeploymentPipelineTests {
     private static final String ISSUER = "https://issuer.kaas.test";
@@ -210,6 +216,9 @@ class DeploymentPipelineTests {
     @Autowired private Environment environment;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ObjectMapper mapper;
+    @Autowired private org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistry listeners;
+    @Autowired private org.springframework.amqp.rabbit.core.RabbitAdmin rabbitAdmin;
+    @Value("${kaas.outbox.rabbit.queue}") private String queue;
 
     private final HttpClient http = HttpClient.newHttpClient();
 
@@ -304,11 +313,131 @@ class DeploymentPipelineTests {
         assertThat(runner.daemon().metrics().count("kaas_runner_claim_success_total")).isGreaterThanOrEqualTo(1);
         assertThat(runner.daemon().metrics().count("kaas_runner_execution_completed_total{status=\"COMPLETED\"}"))
                 .isGreaterThanOrEqualTo(1);
+        // The ordinary path needed no recovery.
+        assertThat(jdbc.queryForObject("select count(*) from dispatch_recoveries where run_id = ?", Integer.class,
+                runId)).isZero();
+        PipelineEvidence.append("deployment-pipeline-evidence.txt", "ordinary_run_recovered=false\n");
         PipelineEvidence.append("deployment-pipeline-evidence.txt", "claim_path=RABBITMQ_TO_API_CONSUMER_TO_RUNNER_CLAIM\n"
                 + "inbox_disposition=DELIVERED\n"
                 + "assigned_worker=" + attempt.get("assigned_worker_id") + "\n"
                 + "run_outcome=" + run.get("lifecycle_state") + "/" + run.get("test_outcome") + "\n"
                 + "sandbox_runtime=" + runtime().daemonRuntimeName() + "\n");
+    }
+
+    @Test
+    @Order(35)
+    @Timeout(1200)
+    void aDispatchRabbitMqLosesIsReconstructedFromPostgresAndRunsToCompletionUnderRunsc() throws Exception {
+        // The consumer is stopped so the message can be lost before any consumer decision -- the window a broker
+        // failure opens in production, held open deterministically. Nothing else is paused.
+        listeners.stop();
+        UUID runId;
+        Map<String, Object> outbox;
+        int depthBeforeLoss;
+        java.time.Instant purgedAt;
+        try {
+            runId = createTenantRun("Recovered deployment");
+            awaitTrue(Duration.ofMinutes(2), () -> jdbc.queryForObject(
+                    "select count(*) from outbox_messages where run_id = ? and published_at is not null",
+                    Integer.class, runId) == 1);
+            outbox = jdbc.queryForMap("select message_id, payload_sha256, published_at, dispatch_id"
+                    + " from outbox_messages where run_id = ?", runId);
+            // The broker holds the original...
+            awaitTrue(Duration.ofSeconds(30), () -> depthOf(queue) == 1);
+            depthBeforeLoss = depthOf(queue);
+            // ...and loses it, before the consumer has seen it and before recovery has any reason to act.
+            rabbitAdmin.purgeQueue(queue, false);
+            // The consumer stamps receipt with THIS JVM's clock; so is this instant. One clock, no skew.
+            purgedAt = java.time.Instant.now();
+            assertThat(depthOf(queue)).isZero();
+            assertThat(jdbc.queryForObject("select count(*) from dispatch_inbox where run_id = ?", Integer.class,
+                    runId)).isZero();
+            assertThat(jdbc.queryForObject("select coalesce(max(recovery_publications), 0) from dispatch_recoveries"
+                    + " where run_id = ?", Integer.class, runId)).as("lost before any recovery").isZero();
+        } finally {
+            listeners.start();
+        }
+
+        // Nobody drives anything from here: the recovery timer republishes, the consumer admits, the runner claims.
+        awaitTrue(Duration.ofMinutes(15), () -> "COMPLETED".equals(jdbc.queryForObject(
+                "select lifecycle_state from test_runs where run_id = ?", String.class, runId)));
+
+        Map<String, Object> run = jdbc.queryForMap("select * from test_runs where run_id = ?", runId);
+        assertThat(run.get("test_outcome")).as("%s", run).isEqualTo("PASSED");
+        Map<String, Object> recovered = jdbc.queryForMap("select * from dispatch_recoveries where run_id = ?", runId);
+        Map<String, Object> inbox = jdbc.queryForMap("select * from dispatch_inbox where run_id = ?", runId);
+        Map<String, Object> attempt = jdbc.queryForMap("select * from execution_attempts where run_id = ?", runId);
+        // The recovered copy -- the only one left -- is what the consumer decided, once, under the SAME identity.
+        assertThat((int) recovered.get("recovery_publications")).isGreaterThanOrEqualTo(1);
+        assertThat(inbox.get("message_id")).isEqualTo(outbox.get("message_id"));
+        assertThat(inbox.get("payload_digest")).isEqualTo("semantic:" + outbox.get("payload_sha256"));
+        assertThat(inbox.get("disposition")).isEqualTo("DELIVERED");
+        // What the consumer decided arrived after the only broker copy was destroyed, and it arrived once: the
+        // listener was stopped until after the purge, so it can only be the recovered republication.
+        assertThat(((java.sql.Timestamp) inbox.get("first_received_at")).toInstant())
+                .as("received after the original was destroyed")
+                .isAfter(purgedAt);
+        assertThat(inbox.get("delivery_count")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select published_at from outbox_messages where run_id = ?",
+                java.sql.Timestamp.class, runId)).as("the first publication is still the first").isEqualTo(
+                outbox.get("published_at"));
+        assertThat(jdbc.queryForObject("select count(*) from execution_attempts where run_id = ?", Integer.class,
+                runId)).isEqualTo(1);
+        assertThat(attempt.get("assignment_epoch")).isEqualTo(1);
+        assertThat(attempt.get("assigned_worker_id")).isEqualTo(WORKER);
+
+        PipelineEvidence.append("recovery-pipeline-evidence.txt", "initial_publish_confirmed=true\n"
+                + "broker_depth_before_loss=" + depthBeforeLoss + "\n"
+                + "broker_depth_after_loss=0\n"
+                + "broker_message_destroyed=true\n"
+                + "recovery_publish_confirmed=true\n"
+                + "recovery_publications=" + recovered.get("recovery_publications") + "\n"
+                + "stable_message_identity=" + inbox.get("message_id").equals(outbox.get("message_id")) + "\n"
+                + "stable_payload_digest=" + inbox.get("payload_digest").equals("semantic:" + outbox.get("payload_sha256")) + "\n"
+                + "delivered_after_recovery=true\n"
+                + "consumer_deliveries=" + inbox.get("delivery_count") + "\n"
+                + "runner_claimed_after_recovery=" + WORKER.equals(attempt.get("assigned_worker_id")) + "\n"
+                + "execution_attempts=1\n"
+                + "run_outcome=" + run.get("lifecycle_state") + "/" + run.get("test_outcome") + "\n"
+                + "sandbox_runtime=" + runtime().daemonRuntimeName() + "\n"
+                + "rabbitmq_loss_recovery=true\n");
+    }
+
+    private UUID createTenantRun(String name) throws Exception {
+        UUID organizationId = UUID.randomUUID();
+        String bearer = token("deployment-tenant", organizationId, Duration.ofHours(1));
+        String projectId = json(post("/api/v1/projects", bearer, Map.of("name", name + " " + UUID.randomUUID())))
+                .get("projectId").stringValue();
+        String featureRevision = json(post("/api/v1/projects/" + projectId + "/features", bearer, Map.of(
+                        "name", "Recovered feature",
+                        "logicalPath", "features/recovered-" + UUID.randomUUID() + ".feature",
+                        "source", "Feature: recovered\n  Scenario: runs\n    * match 2 + 2 == 4\n")))
+                .at("/initialRevision/revisionId").stringValue();
+        String environmentRevision = json(post("/api/v1/projects/" + projectId + "/environments", bearer, Map.of(
+                        "name", "Recovered environment", "variables", List.of(), "secretBindings", List.of())))
+                .at("/initialRevision/revisionId").stringValue();
+        Map<String, Object> profile = new LinkedHashMap<>();
+        profile.put("name", "Recovered profile");
+        profile.put("environmentRevisionId", environmentRevision);
+        profile.put("selection", Map.of("tags", List.of()));
+        profile.put("parallelism", 1);
+        profile.put("scenarioRetry", Map.of("maxAttempts", 1, "delayMilliseconds", 0));
+        profile.put("executionTimeoutSeconds", 120);
+        profile.put("artifactPolicy",
+                Map.of("types", List.of("RAW_RESULT"), "maxArtifactBytes", 1_000, "maxTotalBytes", 2_000));
+        profile.put("configurationOverrides", List.of());
+        String profileRevision = json(post("/api/v1/projects/" + projectId + "/run-profiles", bearer, profile))
+                .at("/initialRevision/revisionId").stringValue();
+        return UUID.fromString(json(post("/api/v1/projects/" + projectId + "/runs", bearer, Map.of(
+                        "featureRevisionIds", List.of(featureRevision), "runProfileRevisionId", profileRevision)))
+                .get("runId").stringValue());
+    }
+
+    private int depthOf(String name) {
+        var properties = rabbitAdmin.getQueueProperties(name);
+        return properties == null ? 0
+                : ((Number) properties.get(org.springframework.amqp.rabbit.core.RabbitAdmin.QUEUE_MESSAGE_COUNT))
+                        .intValue();
     }
 
     @Test
