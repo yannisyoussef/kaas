@@ -38,7 +38,19 @@ public final class DatabaseMigrator {
     private DatabaseMigrator() {}
 
     public static void main(String[] arguments) {
+        silenceLibraryLogging();
         System.exit(run(System.getenv(), System.out));
+    }
+
+    /**
+     * Flyway logs at INFO to standard output, and its first line names the database by JDBC URL -- which can carry
+     * credentials in its query string, and which this command's contract says it never prints. The contract lines
+     * below are the output; the library's own narration is switched off. Found by running the shipped image.
+     */
+    static void silenceLibraryLogging() {
+        if (org.slf4j.LoggerFactory.getILoggerFactory() instanceof ch.qos.logback.classic.LoggerContext context) {
+            context.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME).setLevel(ch.qos.logback.classic.Level.OFF);
+        }
     }
 
     static int run(Map<String, String> environment, PrintStream out) {
@@ -70,11 +82,22 @@ public final class DatabaseMigrator {
             out.println("migration=CURRENT applied=" + result.migrationsExecuted + " version=" + version);
             return 0;
         } catch (RuntimeException failed) {
-            // The type only. A Flyway exception message can quote the JDBC URL or a failing statement, and this
-            // output ends up in a deployment log.
-            out.println("migration=FAILED error=" + failed.getClass().getSimpleName());
+            // The type and, when the database gave one, its SQLSTATE -- 42501 is "the role may not do this". Never the
+            // message: a Flyway exception can quote the JDBC URL or a failing statement, and this output ends up in a
+            // deployment log.
+            out.println("migration=FAILED error=" + failed.getClass().getSimpleName() + sqlState(failed));
             return 1;
         }
+    }
+
+    private static String sqlState(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof java.sql.SQLException sql && sql.getSQLState() != null
+                    && sql.getSQLState().matches("[0-9A-Z]{5}")) {
+                return " sqlState=" + sql.getSQLState();
+            }
+        }
+        return "";
     }
 
     /** {@code NAME}, or the contents of the file named by {@code NAME_FILE}, trailing newline removed. */

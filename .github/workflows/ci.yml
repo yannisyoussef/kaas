@@ -1103,18 +1103,24 @@ jobs:
           echo "$first" | grep -q '^migration=CURRENT applied=[1-9]'
           second=$(migrate kaas_migrator migrator-ci); echo "$second"
           echo "$second" | grep -q '^migration=CURRENT applied=0'
-          # Only migration lines: no banner, no web server, no scheduler.
+          # Only migration lines: no banner, no web server, no scheduler -- and never the URL or a credential.
           if echo "$first$second" | grep -qiE 'tomcat|started kaasapiapplication|spring'; then
             echo "The migrator started more than Flyway." >&2
             exit 1
           fi
-          docker exec kaas-migration-db psql -U postgres -d kaas -v ON_ERROR_STOP=1 -c "create database kaas_app_attempt owner kaas_migrator"
-          if docker run --rm --network kaas-migration \
-               -e KAAS_MIGRATOR_DATABASE_URL=jdbc:postgresql://kaas-migration-db:5432/kaas_app_attempt \
-               -e KAAS_MIGRATOR_DATABASE_USERNAME=kaas_app -e KAAS_MIGRATOR_DATABASE_PASSWORD=app-ci "$api" migrate; then
-            echo "The application role was able to migrate." >&2
+          if echo "$first$second" | grep -qE 'jdbc:|migrator-ci'; then
+            echo "The migrator printed its connection URL or password." >&2
             exit 1
           fi
+          [ "$(echo "$first" | wc -l)" -eq 1 ] || { echo "The migrator printed more than its contract line." >&2; exit 1; }
+          docker exec kaas-migration-db psql -U postgres -d kaas -v ON_ERROR_STOP=1 -c "create database kaas_app_attempt owner kaas_migrator"
+          refused=$(docker run --rm --network kaas-migration \
+               -e KAAS_MIGRATOR_DATABASE_URL=jdbc:postgresql://kaas-migration-db:5432/kaas_app_attempt \
+               -e KAAS_MIGRATOR_DATABASE_USERNAME=kaas_app -e KAAS_MIGRATOR_DATABASE_PASSWORD=app-ci "$api" migrate) \
+            && { echo "The application role was able to migrate." >&2; exit 1; }
+          echo "$refused"
+          # Refused BY PRIVILEGE (42501), not by some unrelated failure that would look the same from the exit code.
+          echo "$refused" | grep -q '^migration=FAILED .*sqlState=42501'
           echo "application role refused DDL: yes"
           docker rm -f kaas-migration-db >/dev/null
           docker network rm kaas-migration >/dev/null
