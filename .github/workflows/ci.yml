@@ -958,10 +958,11 @@ jobs:
   #   the migrator migrates and the application, in production, does not;
   #   attestation and service identity refresh without a restart;
   #   five images carry one revision and are handed off by registry digest;
-  #   and what happens when RabbitMQ loses a published dispatch -- MEASURED, and reported as the open gap it is.
+  #   and a dispatch RabbitMQ loses after publication is reconstructed from PostgreSQL as the SAME dispatch and
+  #   runs to completion under runsc (KAAS-MSG-001) -- while the queue deadline still ends one that cannot be.
   #
-  # GREEN HERE IS NOT "READY TO DEPLOY". The broker-loss step asserts rabbitmq_loss_recovery=false: the gate
-  # passes because the blocker is precisely measured, and the verdict it prints says the deployment is blocked.
+  # KAAS-DEPLOY-001 required rabbitmq_loss_recovery=false: it measured the blocker. KAAS-MSG-001 closed it, and the
+  # gate now requires the recovery evidence instead, and keeps requiring the deadline safety net.
   deployment-readiness:
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -990,20 +991,42 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/junit-gate.py apps/api/build/test-results/deploymentReadinessTest \
             --require com.kaas.api.WorkerClaimEndpointTests=12 \
-            --require com.kaas.api.BrokerLossMeasurementTests=2 \
+            --require com.kaas.api.BrokerLossMeasurementTests=4 \
+            --require com.kaas.api.DispatchRecoveryTests=16 \
             --require com.kaas.api.AttestationSubmissionTests=8 \
             --require com.kaas.api.deployment.MigrationModeTests=8 \
             --require com.kaas.api.deployment.DeploymentStatusTests=5
-      # The finding, exactly. rabbitmq_loss_recovery=false is REQUIRED: this step fails if anything ever claims
-      # the lost dispatch was rebuilt, because nothing in this release rebuilds it (KAAS-MSG-001).
-      - name: Confirm the broker-loss measurement
+      # KAAS-MSG-001: the lost dispatch is reconstructed from PostgreSQL as the same dispatch, and every race settles
+      # to one decision, one claim, one outcome. Each line is written from what the suite observed.
+      - name: Confirm dispatch recovery and its races
+        run: |
+          set -euo pipefail
+          evidence=apps/api/build/evidence/deploymentReadinessTest
+          python3 .github/scripts/evidence-gate.py "$evidence/dispatch-recovery.properties" \
+            initial_publish_confirmed=true broker_depth_before_loss=1 broker_depth_after_loss=0 \
+            broker_message_destroyed=true dispatch_recovery_eligible=true recovery_publish_confirmed=true \
+            recovery_publications=1 stable_message_identity=true stable_dispatch_identity=true \
+            stable_payload_digest=true stable_payload_bytes=true delivered_after_recovery=true \
+            runner_claimed_after_recovery=true execution_attempts=1 rabbitmq_loss_recovery=true
+          python3 .github/scripts/evidence-gate.py "$evidence/duplicate-race.properties" \
+            duplicate_race_decisions=1 duplicate_race_deliveries=2 duplicate_race_claims=1
+          python3 .github/scripts/evidence-gate.py "$evidence/crash-recovery.properties" \
+            crash_after_confirm_republished=true crash_after_confirm_decisions=1 crash_after_confirm_claims=1
+          python3 .github/scripts/evidence-gate.py "$evidence/cancellation-race.properties" \
+            cancellation_before_republish_published=false cancellation_after_republish_consumer=STALE \
+            cancelled_run_resurrected=false
+          python3 .github/scripts/evidence-gate.py "$evidence/deadline-race.properties" \
+            deadline_race_published_after_deadline=false deadline_race_resurrected=false
+          python3 .github/scripts/evidence-gate.py "$evidence/deadline-late-copy.properties" \
+            late_recovered_copy_consumer=STALE late_recovered_copy_claims=0 late_recovered_copy_resurrected=false
+      # Recovery does not remove the safety net: a loss recovery cannot repair still ends at the queue deadline.
+      - name: Confirm the queue deadline still fails closed
         run: |
           set -euo pipefail
           python3 .github/scripts/evidence-gate.py \
             apps/api/build/evidence/deploymentReadinessTest/broker-loss.properties \
-            published_before_loss=true broker_depth_before_loss=1 broker_depth_after_loss=0 \
-            republished_after_loss=0 claims_after_loss=0 terminal_outcome=TIMED_OUT/QUEUE_DEADLINE \
-            queue_deadline_fail_closed=true rabbitmq_loss_recovery=false follow_up=KAAS-MSG-001
+            recovery_attempted=true recovery_publish_confirmed=false \
+            terminal_outcome=TIMED_OUT/QUEUE_DEADLINE queue_deadline_fail_closed=true
 
       # ---- runner: lifecycle, configuration, identity, and no broker on its classpath
       - run: >-
@@ -1027,14 +1050,24 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/scripts/junit-gate.py tests/pipeline/build/test-results/deploymentPipelineTest \
-            --require com.kaas.pipeline.DeploymentPipelineTests=5
+            --require com.kaas.pipeline.DeploymentPipelineTests=6
           python3 .github/scripts/evidence-gate.py \
             tests/pipeline/build/evidence/deploymentPipelineTest/deployment-pipeline-evidence.txt \
             suite=DeploymentPipelineTests deploy_check_without_runner=NOT_READY \
             runner_composition=RunnerComposition.compose runner_ready=true attestation_submitted_by_runner=true \
             deploy_check_with_runner=READY claim_path=RABBITMQ_TO_API_CONSUMER_TO_RUNNER_CLAIM \
             inbox_disposition=DELIVERED assigned_worker=kaas.worker.deployment-pipeline \
-            run_outcome=COMPLETED/PASSED sandbox_runtime=runsc runner_containers_after_shutdown=0
+            run_outcome=COMPLETED/PASSED sandbox_runtime=runsc runner_containers_after_shutdown=0 \
+            ordinary_run_recovered=false
+          # The main acceptance path: a real broker loss, reconstructed from PostgreSQL, admitted by the API
+          # consumer, claimed by the production runner and executed by Karate under runsc.
+          python3 .github/scripts/evidence-gate.py \
+            tests/pipeline/build/evidence/deploymentPipelineTest/recovery-pipeline-evidence.txt \
+            initial_publish_confirmed=true broker_depth_before_loss=1 broker_depth_after_loss=0 \
+            broker_message_destroyed=true recovery_publish_confirmed=true stable_message_identity=true \
+            stable_payload_digest=true delivered_after_recovery=true consumer_deliveries=1 \
+            runner_claimed_after_recovery=true execution_attempts=1 run_outcome=COMPLETED/PASSED \
+            sandbox_runtime=runsc rabbitmq_loss_recovery=true
       - name: Confirm nothing outlived the suites
         if: always()
         run: .github/scripts/leak-gate.sh
@@ -1142,10 +1175,11 @@ jobs:
             echo "revision=$(git rev-parse HEAD)"
             echo "runner_work_intake=INTERNAL_CLAIM_API"
             echo "runner_rabbitmq_dependency=NONE"
-            cat apps/api/build/evidence/deploymentReadinessTest/broker-loss.properties
+            cat apps/api/build/evidence/deploymentReadinessTest/*.properties
             cat tests/pipeline/build/evidence/deploymentPipelineTest/deployment-pipeline-evidence.txt
+            cat tests/pipeline/build/evidence/deploymentPipelineTest/recovery-pipeline-evidence.txt
             echo "release_manifest=VALID"
-            echo "verdict=DEPLOYMENT READINESS BLOCKED BY MESSAGING RECOVERY GAP"
+            echo "verdict=MESSAGING RECOVERY COMPLETE — APPLICATION DEPLOYMENT CONTRACT READY"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
