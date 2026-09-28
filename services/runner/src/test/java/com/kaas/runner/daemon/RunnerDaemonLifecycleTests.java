@@ -347,7 +347,14 @@ class RunnerDaemonLifecycleTests {
         assertThat(harness.assessments.get()).isGreaterThanOrEqualTo(assessments + 3);
         assertThat(harness.metrics.count("kaas_runner_attestation_refresh_total{result=\"ACCEPTED\"}"))
                 .isGreaterThanOrEqualTo(4);
-        assertThat(harness.daemon.readiness().ready()).isTrue();
+        // Ready again within a moment rather than at this exact instant: with refreshes and polls hammering one
+        // in-process HTTP server, a transient transport error correctly marks the control plane unreachable until
+        // the next exchange (CI observed exactly that). Refreshing must never leave the runner not ready.
+        long until = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (!harness.daemon.readiness().ready() && System.nanoTime() < until) {
+            Thread.sleep(50);
+        }
+        assertThat(harness.daemon.readiness().ready()).as("%s", harness.daemon.readiness().report()).isTrue();
     }
 
     // ---------------------------------------------------------------- shutdown
