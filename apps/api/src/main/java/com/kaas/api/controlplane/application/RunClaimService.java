@@ -65,80 +65,19 @@ public class RunClaimService {
      */
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public ClaimOutcome claim(ExecutionDispatch message, String workerId) {
-        if (message == null) {
-            throw new IllegalArgumentException("A claim is made about a specific dispatch.");
-        }
         if (workerId == null || workerId.isBlank()) {
             throw new IllegalArgumentException("A claim records the worker instance it is made for.");
         }
+        Evaluation evaluation = evaluate(message);
+        if (evaluation.refusal() != null) {
+            return evaluation.refusal();
+        }
         UUID organizationId = message.organizationId();
         UUID runId = message.runId();
-
-        // The message has to be one this control plane actually produced. A well-formed dispatch whose identity
-        // is unknown here was minted by somebody else, and every field in it — tenancy included — is therefore
-        // just an assertion. Looking the identity up first is what turns the rest of the checks into
-        // corroboration rather than trust.
-        var published = claims.findDispatch(organizationId, message.messageId());
-        if (published.isEmpty()) {
-            return new ClaimOutcome(ClaimDisposition.NOT_CLAIMABLE, "UNKNOWN_DISPATCH", null);
-        }
-        var trusted = published.orElseThrow();
-        // Every identity is compared against the durable row rather than taken from the body. Cross-tenant and
-        // cross-project substitution both die here: a payload that names another organization's run cannot match
-        // the dispatch that its own message identity resolves to.
-        if (!trusted.payloadDigest().equals(message.payloadDigest())
-                || !trusted.organizationId().equals(organizationId)
-                || !trusted.projectId().equals(message.projectId())
-                || !trusted.runId().equals(runId)
-                || !trusted.attemptId().equals(message.attemptId())
-                || trusted.runVersion() != message.runVersion()
-                || !trusted.runSnapshotId().equals(message.runSnapshotId())
-                || !trusted.runSnapshotDigest().equals(message.runSnapshotDigest())) {
-            return new ClaimOutcome(ClaimDisposition.NOT_CLAIMABLE, "DISPATCH_IDENTITY_MISMATCH", null);
-        }
-
-        UUID expectedAttemptId = message.attemptId();
-        long expectedRunVersion = message.runVersion();
-        // The next three refusals are not reachable while the database's own constraints hold: the dispatch row
-        // carries a foreign key to its run, and the scheduling bundle binds that run's attempt and snapshot
-        // digest to the dispatch at the moment it was produced. They are kept because this code must not proceed
-        // on an inconsistent read, and a refusal is a better answer than dereferencing an empty result — but no
-        // test claims to exercise them, because none honestly can.
-        var locked = claims.lockClaimable(organizationId, runId);
-        if (locked.isEmpty()) {
-            return new ClaimOutcome(ClaimDisposition.NOT_CLAIMABLE, "RUN_NOT_FOUND", null);
-        }
-        TestRun previous = locked.orElseThrow().run();
-        ExecutionAttempt attempt = locked.orElseThrow().attempt();
-
-        if (!expectedAttemptId.equals(attempt.attemptId())) {
-            return new ClaimOutcome(ClaimDisposition.NOT_CLAIMABLE, "ATTEMPT_MISMATCH", previous);
-        }
-        // Somebody already owns it. That is a duplicate delivery of a message that was already acted on, and it
-        // is checked before the lifecycle so the answer says *why* rather than only that the run moved.
-        if (attempt.state() != ExecutionAttemptState.WAITING_FOR_CLAIM) {
-            return new ClaimOutcome(ClaimDisposition.ALREADY_CLAIMED, "ATTEMPT_ALREADY_ASSIGNED", previous);
-        }
-        if (previous.lifecycleState() != RunLifecycle.QUEUED) {
-            // Cancelled, expired, or never queued. The broker had no way to know.
-            return new ClaimOutcome(ClaimDisposition.STALE, "RUN_NOT_QUEUED", previous);
-        }
-        if (previous.runVersion() != expectedRunVersion) {
-            return new ClaimOutcome(ClaimDisposition.STALE, "RUN_VERSION_MOVED", previous);
-        }
-        if (!previous.snapshotDigest().equals(message.runSnapshotDigest())) {
-            return new ClaimOutcome(ClaimDisposition.NOT_CLAIMABLE, "SNAPSHOT_MISMATCH", previous);
-        }
-
-        Instant at = claimInstant(previous);
-        if (at.isAfter(previous.queueDeadlineAt())) {
-            // The reaper is entitled to end this run. Claiming now would leave the two of us each believing we
-            // hold it, and the database would reject the write anyway.
-            return new ClaimOutcome(ClaimDisposition.STALE, "QUEUE_DEADLINE_PASSED", previous);
-        }
-
-        TestRun claimedRun = previous.claimed(at);
-        ExecutionAttempt claimedAttempt = attempt.claimedBy(workerId, at, leaseDuration);
+        TestRun previous = evaluation.previous();
+        ExecutionAttempt attempt = evaluation.attempt();
+        TestRun claimedRun = previous.claimed(evaluation.at());
+        ExecutionAttempt claimedAttempt = attempt.claimedBy(workerId, evaluation.at(), leaseDuration);
         claims.persistClaim(organizationId, previous, claimedRun, claimedAttempt, UUID.randomUUID());
         LOGGER.atInfo()
                 .addKeyValue("event", "RUN_CLAIMED")
@@ -153,6 +92,103 @@ public class RunClaimService {
     }
 
     /**
+     * Corroborates a delivered dispatch exactly as a claim would, and claims nothing.
+     *
+     * <p>The broker's consumer no longer assigns work: it names no worker that will run it. What it can still
+     * establish is everything a claim would check about the MESSAGE — that this control plane produced it, that
+     * it describes the run as held, that the run is still waiting — and it records that as a delivery. The claim
+     * itself happens later, for the worker that asks, through the same checks again under a fresh lock.
+     *
+     * @return {@link ClaimDisposition#DELIVERABLE} when a worker may now claim the run, or the same refusal a
+     *     claim would have produced
+     */
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public ClaimOutcome admit(ExecutionDispatch message) {
+        Evaluation evaluation = evaluate(message);
+        if (evaluation.refusal() != null) {
+            return evaluation.refusal();
+        }
+        return new ClaimOutcome(ClaimDisposition.DELIVERABLE, "DELIVERED", evaluation.previous());
+    }
+
+    /** Every check a claim makes, under the run's lock, and nothing it writes. */
+    private Evaluation evaluate(ExecutionDispatch message) {
+        if (message == null) {
+            throw new IllegalArgumentException("A claim is made about a specific dispatch.");
+        }
+        UUID organizationId = message.organizationId();
+        UUID runId = message.runId();
+
+        // The message has to be one this control plane actually produced. A well-formed dispatch whose identity
+        // is unknown here was minted by somebody else, and every field in it — tenancy included — is therefore
+        // just an assertion. Looking the identity up first is what turns the rest of the checks into
+        // corroboration rather than trust.
+        var published = claims.findDispatch(organizationId, message.messageId());
+        if (published.isEmpty()) {
+            return Evaluation.refused(new ClaimOutcome(ClaimDisposition.NOT_CLAIMABLE, "UNKNOWN_DISPATCH", null));
+        }
+        var trusted = published.orElseThrow();
+        // Every identity is compared against the durable row rather than taken from the body. Cross-tenant and
+        // cross-project substitution both die here: a payload that names another organization's run cannot match
+        // the dispatch that its own message identity resolves to.
+        if (!trusted.payloadDigest().equals(message.payloadDigest())
+                || !trusted.organizationId().equals(organizationId)
+                || !trusted.projectId().equals(message.projectId())
+                || !trusted.runId().equals(runId)
+                || !trusted.attemptId().equals(message.attemptId())
+                || trusted.runVersion() != message.runVersion()
+                || !trusted.runSnapshotId().equals(message.runSnapshotId())
+                || !trusted.runSnapshotDigest().equals(message.runSnapshotDigest())) {
+            return Evaluation.refused(
+                    new ClaimOutcome(ClaimDisposition.NOT_CLAIMABLE, "DISPATCH_IDENTITY_MISMATCH", null));
+        }
+
+        UUID expectedAttemptId = message.attemptId();
+        long expectedRunVersion = message.runVersion();
+        // The next three refusals are not reachable while the database's own constraints hold: the dispatch row
+        // carries a foreign key to its run, and the scheduling bundle binds that run's attempt and snapshot
+        // digest to the dispatch at the moment it was produced. They are kept because this code must not proceed
+        // on an inconsistent read, and a refusal is a better answer than dereferencing an empty result — but no
+        // test claims to exercise them, because none honestly can.
+        var locked = claims.lockClaimable(organizationId, runId);
+        if (locked.isEmpty()) {
+            return Evaluation.refused(new ClaimOutcome(ClaimDisposition.NOT_CLAIMABLE, "RUN_NOT_FOUND", null));
+        }
+        TestRun previous = locked.orElseThrow().run();
+        ExecutionAttempt attempt = locked.orElseThrow().attempt();
+
+        if (!expectedAttemptId.equals(attempt.attemptId())) {
+            return Evaluation.refused(new ClaimOutcome(ClaimDisposition.NOT_CLAIMABLE, "ATTEMPT_MISMATCH", previous));
+        }
+        // Somebody already owns it. That is a duplicate delivery of a message that was already acted on, and it
+        // is checked before the lifecycle so the answer says *why* rather than only that the run moved.
+        if (attempt.state() != ExecutionAttemptState.WAITING_FOR_CLAIM) {
+            return Evaluation.refused(
+                    new ClaimOutcome(ClaimDisposition.ALREADY_CLAIMED, "ATTEMPT_ALREADY_ASSIGNED", previous));
+        }
+        if (previous.lifecycleState() != RunLifecycle.QUEUED) {
+            // Cancelled, expired, or never queued. The broker had no way to know.
+            return Evaluation.refused(new ClaimOutcome(ClaimDisposition.STALE, "RUN_NOT_QUEUED", previous));
+        }
+        if (previous.runVersion() != expectedRunVersion) {
+            return Evaluation.refused(new ClaimOutcome(ClaimDisposition.STALE, "RUN_VERSION_MOVED", previous));
+        }
+        if (!previous.snapshotDigest().equals(message.runSnapshotDigest())) {
+            return Evaluation.refused(
+                    new ClaimOutcome(ClaimDisposition.NOT_CLAIMABLE, "SNAPSHOT_MISMATCH", previous));
+        }
+
+        Instant at = claimInstant(previous);
+        if (at.isAfter(previous.queueDeadlineAt())) {
+            // The reaper is entitled to end this run. Claiming now would leave the two of us each believing we
+            // hold it, and the database would reject the write anyway.
+            return Evaluation.refused(new ClaimOutcome(ClaimDisposition.STALE, "QUEUE_DEADLINE_PASSED", previous));
+        }
+
+        return new Evaluation(null, previous, attempt, at);
+    }
+
+    /**
      * The claim instant is owned by the database clock, which is the same authority that stamped the queue
      * deadline it is checked against. It is clamped so it can never precede the run's own last update.
      */
@@ -163,4 +199,11 @@ public class RunClaimService {
 
     /** What a claim attempt decided, and the run as it stood. Reason codes are bounded and low-cardinality. */
     public record ClaimOutcome(ClaimDisposition disposition, String reason, TestRun run) {}
+
+    /** A refusal, or the locked run and attempt a claim may proceed on and the instant it would take effect. */
+    private record Evaluation(ClaimOutcome refusal, TestRun previous, ExecutionAttempt attempt, Instant at) {
+        static Evaluation refused(ClaimOutcome outcome) {
+            return new Evaluation(outcome, null, null, null);
+        }
+    }
 }

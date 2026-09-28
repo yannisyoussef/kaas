@@ -10,6 +10,11 @@ package com.kaas.api.controlplane.domain;
 public enum ClaimDisposition {
     /** This call took ownership. Exactly one caller ever sees this for a given assignment. */
     CLAIMED,
+    /**
+     * The dispatch is corroborated and its run is claimable, and nothing was claimed. What the broker's consumer
+     * learns about a delivery: the run now waits for a worker to claim it for itself.
+     */
+    DELIVERABLE,
     /** Somebody already owns it. The message is a duplicate of one that was already acted on. */
     ALREADY_CLAIMED,
     /** The run moved on — cancelled, expired, or already finished — so there is nothing left to claim. */

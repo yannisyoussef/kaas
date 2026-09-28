@@ -8,7 +8,15 @@ package com.kaas.api.consumer.domain;
  * that already exists rather than producing a second, different decision.
  */
 public enum InboxDisposition {
-    /** The message was valid, the run was claimable, and a claim committed. */
+    /**
+     * The message was valid and corroborated, and its run now waits for a worker to claim it for itself. What
+     * this consumer records today: it no longer assigns work, because it cannot name who will run it.
+     */
+    DELIVERED(true),
+    /**
+     * The message was valid, the run was claimable, and a claim committed. Recorded by the previous release,
+     * which claimed every delivered run for one configured worker id; kept so its decisions still read back.
+     */
     CLAIMED(true),
     /**
      * The message was valid but the work it describes is over or has moved on. Expected distributed-system

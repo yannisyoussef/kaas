@@ -6,6 +6,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.reset;
 
 import com.kaas.api.consumer.application.DispatchConsumptionService;
+import com.kaas.api.consumer.application.WorkerAssignmentService;
 import com.kaas.api.consumer.application.DispatchInboxRepository;
 import com.kaas.api.consumer.application.DispatchMessage;
 import com.kaas.api.consumer.domain.InboxDisposition;
@@ -132,6 +133,15 @@ class DispatchConsumerInboxTests {
     @Autowired
     private DispatchConsumptionService consumption;
 
+    @Autowired
+    private WorkerAssignmentService assignments;
+
+    /** An authenticated worker's id, as the claim endpoint would pass it. */
+    private static final String WORKER = "kaas.worker.inbox-test";
+
+    /** A scheduled run's version: created at 1, scheduled at 2. A claim is the next write. */
+    private static final long QUEUED_VERSION = 2L;
+
     /** Spied rather than mocked, so consumption really works unless a test deliberately breaks it. */
     @MockitoSpyBean
     private DispatchInboxRepository inbox;
@@ -185,22 +195,35 @@ class DispatchConsumerInboxTests {
         UUID runId = createRun(tenant);
         scheduler.scheduleDue();
 
-        // The relay publishes; the production consumer does the rest on its own thread.
+        // The relay publishes; the production consumer corroborates and records the delivery on its own thread.
         assertThat(relay.drainOnce()).isEqualTo(1);
 
         Awaitility.await()
                 .atMost(Duration.ofSeconds(60))
                 .pollInterval(Duration.ofMillis(100))
-                .until(() -> "CLAIMED".equals(lifecycleOf(runId)));
+                .until(() -> "DELIVERED".equals(dispositionOf(runId)));
 
+        // Delivered is not claimed (KAAS-DEPLOY-001). The consumer cannot name who will run the work, so it
+        // assigns it to nobody: the run still waits, and its attempt has no owner.
+        assertThat(lifecycleOf(runId)).isEqualTo("QUEUED");
+        Map<String, Object> waiting = jdbc.queryForMap("select * from execution_attempts where run_id = ?", runId);
+        assertThat(waiting.get("attempt_state")).isEqualTo("WAITING_FOR_CLAIM");
+        assertThat(waiting.get("assigned_worker_id")).isNull();
+
+        // The worker that asks claims it, in its own name.
+        assertThat(assignments.claimNext(WORKER)).hasValueSatisfying(assignment -> {
+            assertThat(assignment.runId()).isEqualTo(runId);
+            assertThat(assignment.assignmentEpoch()).isEqualTo(1);
+        });
+        assertThat(lifecycleOf(runId)).isEqualTo("CLAIMED");
         Map<String, Object> attempt = jdbc.queryForMap("select * from execution_attempts where run_id = ?", runId);
         assertThat(attempt.get("attempt_state")).isEqualTo("CLAIMED");
         assertThat(attempt.get("assignment_epoch")).isEqualTo(1);
-        // The worker identity is the server's configuration, never anything the message carried.
-        assertThat(attempt.get("assigned_worker_id")).isEqualTo("kaas.worker.local");
+        // The worker identity is the authenticated caller's, never anything the message carried.
+        assertThat(attempt.get("assigned_worker_id")).isEqualTo(WORKER);
 
         Map<String, Object> inbox = jdbc.queryForMap("select * from dispatch_inbox where run_id = ?", runId);
-        assertThat(inbox.get("disposition")).isEqualTo("CLAIMED");
+        assertThat(inbox.get("disposition")).isEqualTo("DELIVERED");
         assertThat(inbox.get("delivery_count")).isEqualTo(1);
         assertThat(inbox.get("consumer")).isEqualTo("kaas.dispatch-consumer");
 
@@ -234,11 +257,12 @@ class DispatchConsumerInboxTests {
         Awaitility.await()
                 .atMost(Duration.ofSeconds(60))
                 .pollInterval(Duration.ofMillis(100))
-                .until(() -> "CLAIMED".equals(lifecycleOf(runId)));
+                .until(() -> "DELIVERED".equals(dispositionOf(runId)));
 
-        // The work survived the failure and was done exactly once.
-        assertThat(versionOf(runId)).isEqualTo(3L);
-        assertThat(count("run_lifecycle_events", runId)).isEqualTo(2);
+        // The work survived the failure and was recorded exactly once, still waiting for a worker.
+        assertThat(lifecycleOf(runId)).isEqualTo("QUEUED");
+        assertThat(versionOf(runId)).isEqualTo(QUEUED_VERSION);
+        assertThat(count("run_lifecycle_events", runId)).isEqualTo(1);
         assertThat(jdbc.queryForObject(
                         "select count(*) from dispatch_inbox where run_id = ?", Integer.class, runId))
                 .isEqualTo(1);
@@ -261,7 +285,8 @@ class DispatchConsumerInboxTests {
         Awaitility.await()
                 .atMost(Duration.ofSeconds(60))
                 .pollInterval(Duration.ofMillis(100))
-                .until(() -> "CLAIMED".equals(lifecycleOf(runId)));
+                .until(() -> "DELIVERED".equals(dispositionOf(runId)));
+        assertThat(assignments.claimNext(WORKER)).isPresent();
 
         // Exactly what the broker does after a consumer dies between commit and acknowledgement: the same bytes
         // under the same identity, arriving again through the real listener rather than an in-process loop.
@@ -276,9 +301,11 @@ class DispatchConsumerInboxTests {
                                 "select delivery_count from dispatch_inbox where run_id = ?",
                                 Integer.class, runId)
                         == 2);
-        // One claim, one version, one event — and the redelivery acknowledged, not dead-lettered.
-        assertThat(versionOf(runId)).isEqualTo(3L);
+        // One claim, one version, one event — and the redelivery acknowledged, not dead-lettered. Nor does the
+        // redelivery make the run claimable a second time.
+        assertThat(versionOf(runId)).isEqualTo(QUEUED_VERSION + 1);
         assertThat(count("run_lifecycle_events", runId)).isEqualTo(2);
+        assertThat(assignments.claimNext("kaas.worker.second")).isEmpty();
         Awaitility.await()
                 .atMost(Duration.ofSeconds(30))
                 .pollInterval(Duration.ofMillis(100))
@@ -293,23 +320,23 @@ class DispatchConsumerInboxTests {
         scheduler.scheduleDue();
         DispatchMessage delivery = deliveryFor(runId);
 
-        assertThat(consumption.consume(delivery)).isEqualTo(InboxDisposition.CLAIMED);
-        long claimedVersion = versionOf(runId);
+        assertThat(consumption.consume(delivery)).isEqualTo(InboxDisposition.DELIVERED);
+        long deliveredVersion = versionOf(runId);
 
         // This is the crash window: the database committed and the broker was never acknowledged, so RabbitMQ
-        // redelivers. The inbox is what turns that into a no-op instead of a second claim.
-        assertThat(consumption.consume(delivery)).isEqualTo(InboxDisposition.CLAIMED);
-        assertThat(consumption.consume(delivery)).isEqualTo(InboxDisposition.CLAIMED);
+        // redelivers. The inbox is what turns that into a no-op instead of a second decision.
+        assertThat(consumption.consume(delivery)).isEqualTo(InboxDisposition.DELIVERED);
+        assertThat(consumption.consume(delivery)).isEqualTo(InboxDisposition.DELIVERED);
 
-        assertThat(versionOf(runId)).isEqualTo(claimedVersion);
-        assertThat(count("run_lifecycle_events", runId)).isEqualTo(2);
+        assertThat(versionOf(runId)).isEqualTo(deliveredVersion);
+        assertThat(count("run_lifecycle_events", runId)).isEqualTo(1);
         assertThat(jdbc.queryForObject(
                         "select count(*) from dispatch_inbox where run_id = ?", Integer.class, runId))
                 .isEqualTo(1);
         // The decision is untouched; only the count of times the broker offered it moves.
         Map<String, Object> inbox = jdbc.queryForMap("select * from dispatch_inbox where run_id = ?", runId);
         assertThat(inbox.get("delivery_count")).isEqualTo(3);
-        assertThat(inbox.get("disposition")).isEqualTo("CLAIMED");
+        assertThat(inbox.get("disposition")).isEqualTo("DELIVERED");
         assertThat(inbox.get("last_received_at")).isNotNull();
     }
 
@@ -319,7 +346,7 @@ class DispatchConsumerInboxTests {
         UUID runId = createRun(tenant);
         scheduler.scheduleDue();
         DispatchMessage delivery = deliveryFor(runId);
-        assertThat(consumption.consume(delivery)).isEqualTo(InboxDisposition.CLAIMED);
+        assertThat(consumption.consume(delivery)).isEqualTo(InboxDisposition.DELIVERED);
         String recordedDigest = jdbc.queryForObject(
                 "select payload_digest from dispatch_inbox where run_id = ?", String.class, runId);
 
@@ -336,8 +363,8 @@ class DispatchConsumerInboxTests {
         // The recorded decision is not overwritten to accommodate the newcomer.
         Map<String, Object> inbox = jdbc.queryForMap("select * from dispatch_inbox where run_id = ?", runId);
         assertThat(inbox.get("payload_digest")).isEqualTo(recordedDigest);
-        assertThat(inbox.get("disposition")).isEqualTo("CLAIMED");
-        assertThat(versionOf(runId)).isEqualTo(3L);
+        assertThat(inbox.get("disposition")).isEqualTo("DELIVERED");
+        assertThat(versionOf(runId)).isEqualTo(QUEUED_VERSION);
     }
 
     @Test
@@ -419,7 +446,7 @@ class DispatchConsumerInboxTests {
         Tenant tenant = tenant();
         UUID runId = createRun(tenant);
         scheduler.scheduleDue();
-        assertThat(consumption.consume(deliveryFor(runId))).isEqualTo(InboxDisposition.CLAIMED);
+        assertThat(consumption.consume(deliveryFor(runId))).isEqualTo(InboxDisposition.DELIVERED);
 
         // Deleting a decision turns the next redelivery of that message back into an undecided one — which is a
         // second claim. The guard is load-bearing and was previously asserted nowhere.
@@ -607,6 +634,15 @@ class DispatchConsumerInboxTests {
 
     private String lifecycleOf(UUID runId) {
         return jdbc.queryForObject("select lifecycle_state from test_runs where run_id = ?", String.class, runId);
+    }
+
+    /** The inbox decision for the run's dispatch, or null until one is recorded. */
+    private String dispositionOf(UUID runId) {
+        return jdbc.query("select disposition from dispatch_inbox where run_id = ?",
+                        (row, index) -> row.getString(1), runId)
+                .stream()
+                .findFirst()
+                .orElse(null);
     }
 
     private long versionOf(UUID runId) {

@@ -42,7 +42,6 @@ public class DispatchConsumptionService {
     private final Clock clock;
     private final MeterRegistry meters;
     private final String consumerName;
-    private final String workerInstanceId;
 
     public DispatchConsumptionService(
             DispatchInboxRepository inbox,
@@ -50,13 +49,9 @@ public class DispatchConsumptionService {
             RunClaimService claims,
             Clock clock,
             MeterRegistry meters,
-            @Value("${kaas.consumer.name}") String consumerName,
-            @Value("${kaas.consumer.worker-instance-id}") String workerInstanceId) {
+            @Value("${kaas.consumer.name}") String consumerName) {
         if (consumerName == null || consumerName.isBlank() || consumerName.length() > 64) {
             throw new IllegalArgumentException("The consumer needs a bounded configured name.");
-        }
-        if (workerInstanceId == null || workerInstanceId.isBlank() || workerInstanceId.length() > 255) {
-            throw new IllegalArgumentException("The consumer needs a bounded configured worker instance id.");
         }
         this.inbox = inbox;
         this.validator = validator;
@@ -64,7 +59,11 @@ public class DispatchConsumptionService {
         this.clock = clock;
         this.meters = meters;
         this.consumerName = consumerName;
-        this.workerInstanceId = workerInstanceId;
+    }
+
+    /** The logical consumer this service records decisions as; the assignment endpoint claims its deliveries. */
+    public String consumerName() {
+        return consumerName;
     }
 
     /**
@@ -131,7 +130,9 @@ public class DispatchConsumptionService {
             return decide(messageId, digest, null, InboxDisposition.REJECTED, reason, receivedAt);
         }
 
-        var outcome = claims.claim(dispatch, workerInstanceId);
+        // Corroborated and recorded as delivered; not claimed. A worker claims it for itself later, through the
+        // assignment endpoint, so the attempt names the worker that actually runs it rather than a placeholder.
+        var outcome = claims.admit(dispatch);
         InboxDisposition disposition = dispositionOf(outcome.disposition());
         return decide(messageId, digest, dispatch, disposition, outcome.reason(), receivedAt);
     }
@@ -144,7 +145,8 @@ public class DispatchConsumptionService {
             String reason,
             Instant receivedAt) {
         boolean corroborated = dispatch != null
-                && (disposition == InboxDisposition.CLAIMED || disposition == InboxDisposition.STALE);
+                && (disposition == InboxDisposition.DELIVERED || disposition == InboxDisposition.CLAIMED
+                        || disposition == InboxDisposition.STALE);
         inbox.record(new InboxRecord(
                 UUID.randomUUID(),
                 consumerName,
@@ -170,6 +172,7 @@ public class DispatchConsumptionService {
 
     private static InboxDisposition dispositionOf(ClaimDisposition claim) {
         return switch (claim) {
+            case DELIVERABLE -> InboxDisposition.DELIVERED;
             case CLAIMED -> InboxDisposition.CLAIMED;
             // Already claimed is a duplicate that raced rather than repeated, and a stale run is expected: the
             // broker had no way to know what the control plane decided after it handed the message over.
@@ -181,6 +184,7 @@ public class DispatchConsumptionService {
 
     private static String metricFor(InboxDisposition disposition) {
         return switch (disposition) {
+            case DELIVERED -> "kaas.dispatch.delivered";
             case CLAIMED -> "kaas.dispatch.claimed";
             case STALE -> "kaas.dispatch.stale";
             case REJECTED -> "kaas.dispatch.rejected";
