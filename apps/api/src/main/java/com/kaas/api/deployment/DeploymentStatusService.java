@@ -48,6 +48,9 @@ public class DeploymentStatusService {
     private final javax.sql.DataSource dataSource;
     private final SecretTransit secrets;
     private final Duration attestationMaxAge;
+    private final com.kaas.api.outbox.application.DispatchRecovery recovery;
+    private final Duration recoveryStallAfter;
+    private final Instant startedAt = Instant.now();
 
     public DeploymentStatusService(
             SubmittedAttestationRepository attestations,
@@ -55,13 +58,21 @@ public class DeploymentStatusService {
             ObjectProvider<Flyway> migrations,
             javax.sql.DataSource dataSource,
             SecretTransit secrets,
-            @Value("${kaas.execution.attestation-max-age}") Duration attestationMaxAge) {
+            @Value("${kaas.execution.attestation-max-age}") Duration attestationMaxAge,
+            com.kaas.api.outbox.application.DispatchRecovery recovery,
+            @Value("${kaas.dispatch.recovery.interval}") Duration recoveryInterval,
+            @Value("${kaas.dispatch.recovery.initial-delay}") Duration recoveryInitialDelay,
+            @Value("${kaas.dispatch.recovery.claim-ttl}") Duration recoveryClaimTtl) {
         this.attestations = attestations;
         this.broker = broker;
         this.migrations = migrations;
         this.dataSource = dataSource;
         this.secrets = secrets;
         this.attestationMaxAge = attestationMaxAge;
+        this.recovery = recovery;
+        // Three missed ticks, plus the longest a single pass may legitimately take (one lease), plus the initial
+        // delay the first pass waits. Past that with no completed pass, the recovery loop is not running.
+        this.recoveryStallAfter = recoveryInterval.multipliedBy(3).plus(recoveryClaimTtl).plus(recoveryInitialDelay);
     }
 
     public Map<String, Object> status() {
@@ -86,18 +97,40 @@ public class DeploymentStatusService {
                 database = "DOWN";
             }
         }
+        String recoveryState = recoveryState(now);
         boolean operational = "UP".equals(database)
                 && "CURRENT".equals(schema)
                 && "UP".equals(brokerState)
-                && ready > 0;
+                && ready > 0
+                // A dead recovery loop means a dispatch the broker loses would be lost again. Dispatches merely
+                // WAITING for recovery are not a failure and do not affect the verdict.
+                && ("DISABLED".equals(recoveryState) || "UP".equals(recoveryState) || "STARTING".equals(recoveryState));
         report.put("status", operational ? "READY" : "NOT_READY");
         report.put("database", database);
         report.put("schema", schema);
         report.put("broker", brokerState);
         report.put("runnersPolling", seen);
         report.put("runnersWithCurrentEvidence", ready);
+        report.put("dispatchRecovery", recoveryState);
+        report.put("dispatchesAwaitingRecovery", now == null ? -1 : recovery.eligibleNow());
         report.put("secretProvider", secrets.state().name());
         return report;
+    }
+
+    /**
+     * DISABLED, STARTING (no pass yet, still inside the initial window), UP (a pass completed recently), or STALLED.
+     * Judged on this instance: recovery runs in every API instance, so a stalled one is this one.
+     */
+    private String recoveryState(Instant databaseNow) {
+        if (!recovery.enabled()) {
+            return "DISABLED";
+        }
+        var last = recovery.lastPass();
+        if (last.isEmpty()) {
+            return Duration.between(startedAt, Instant.now()).compareTo(recoveryStallAfter) > 0 ? "STALLED" : "STARTING";
+        }
+        Instant reference = databaseNow != null ? databaseNow : Instant.now();
+        return Duration.between(last.orElseThrow(), reference).compareTo(recoveryStallAfter) > 0 ? "STALLED" : "UP";
     }
 
     private String schema() {
