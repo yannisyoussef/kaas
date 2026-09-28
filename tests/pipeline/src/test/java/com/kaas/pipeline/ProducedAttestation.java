@@ -119,6 +119,11 @@ final class ProducedAttestation {
         return KEY_ID + "=" + keys().get(KEY_ID).get("publicKeySpki").stringValue();
     }
 
+    /** The published test private key, PKCS#8, for a suite whose RUNNER signs its own evidence. */
+    static String privateKeyPkcs8() {
+        return keys().get(KEY_ID).get("privateKeyPkcs8").stringValue();
+    }
+
     private static AttestationSigner signer() {
         try {
             Path file = Files.createTempFile("kaas-pipeline-test-key", ".pk8");

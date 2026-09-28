@@ -55,6 +55,8 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:testcontainers-junit-jupiter")
     testImplementation("org.testcontainers:testcontainers-postgresql")
+    // The deployment pipeline suite runs the broker for real: the production consumer, not a test, delivers.
+    testImplementation("org.testcontainers:testcontainers-rabbitmq")
     testImplementation("org.postgresql:postgresql")
 
     // The container-runtime client, declared explicitly rather than leaned on transitively. :services:runner
@@ -161,6 +163,21 @@ val secretExecutionPipelineTest = tasks.register<Test>("secretExecutionPipelineT
     filter { includeTestsMatching("com.kaas.pipeline.SecretExecutionPipelineTests") }
 }
 
+/**
+ * The deployed shape end to end (KAAS-DEPLOY-001): the production runner composition taking work from the
+ * production control plane through the internal claim API, RabbitMQ on the control-plane side only, Karate under
+ * the mediating runtime. Part of the deployment-readiness gate; excluded from `test` for the same reason as the
+ * secret pipeline -- it needs runsc.
+ */
+val deploymentPipelineTest = tasks.register<Test>("deploymentPipelineTest") {
+    group = "verification"
+    description = "Production runner composition claiming through the internal API and running Karate under runsc."
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    filter { includeTestsMatching("com.kaas.pipeline.DeploymentPipelineTests") }
+}
+
 tasks.named<Test>("test") {
     filter { excludeTestsMatching("com.kaas.pipeline.SecretExecutionPipelineTests") }
+    filter { excludeTestsMatching("com.kaas.pipeline.DeploymentPipelineTests") }
 }
