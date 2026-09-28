@@ -36,14 +36,19 @@ fi
 ./gradlew --no-daemon -q :apps:api:apiImageContext :services:runner:runnerImageContext \
   :services:karate-engine:engineImageContext :services:egress-proxy:proxyImageContext
 
-declare -A context=(
-  [api]=apps/api/build/api-image-context
-  [runner]=services/runner/build/runner-image-context
-  [karate-engine]=services/karate-engine/build/engine-image-context
-  [egress-proxy]=services/egress-proxy/build/proxy-image-context
-  [security-probe]=services/runner/src/main/docker/probe
-)
-declare -A digest
+# Plain functions and variables rather than associative arrays, so this runs on any bash an operator has --
+# including the 3.2 macOS still ships.
+context_of() {
+  case "$1" in
+    api) echo apps/api/build/api-image-context ;;
+    runner) echo services/runner/build/runner-image-context ;;
+    karate-engine) echo services/karate-engine/build/engine-image-context ;;
+    egress-proxy) echo services/egress-proxy/build/proxy-image-context ;;
+    security-probe) echo services/runner/src/main/docker/probe ;;
+    *) return 1 ;;
+  esac
+}
+digests=()
 
 for component in api runner karate-engine egress-proxy security-probe; do
   repository="$prefix/kaas-$component"
@@ -53,7 +58,7 @@ for component in api runner karate-engine egress-proxy security-probe; do
     --label "org.opencontainers.image.revision=$revision" \
     --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY:-local/kaas}" \
     --label "org.opencontainers.image.title=kaas-$component" \
-    -t "$repository:$revision" "${context[$component]}" >/dev/null
+    -t "$repository:$revision" "$(context_of "$component")" >/dev/null
   docker push --quiet "$repository:$revision" >/dev/null
   pushed="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$repository:$revision" \
     | grep -F "$repository@sha256:" | head -1)"
@@ -61,12 +66,11 @@ for component in api runner karate-engine egress-proxy security-probe; do
     echo "no registry digest recorded for $component" >&2
     exit 1
   fi
-  digest[$component]="$pushed"
+  digests+=("$pushed")
   echo "image $component=$pushed"
 done
 
-python3 - "$out" "$revision" "${digest[api]}" "${digest[runner]}" "${digest[karate-engine]}" \
-  "${digest[egress-proxy]}" "${digest[security-probe]}" <<'PY'
+python3 - "$out" "$revision" "${digests[@]}" <<'PY'
 import json, sys
 out, revision, api, runner, engine, proxy, probe = sys.argv[1:]
 manifest = {
