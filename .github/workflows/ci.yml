@@ -1237,3 +1237,14 @@ jobs:
       - uses: actions/checkout@v6
       - run: docker compose -f infrastructure/local/docker-compose.yml config
       - run: bash -n infrastructure/release/build-release.sh
+      # The release workflow's one guarantee -- only a full commit sha with green CI is released -- checked on every
+      # push: no expression reaches shell source, the revision is validated first and strictly, and the lookup,
+      # checkout and build use the validated value. actionlint is pinned by digest.
+      - name: Check the release workflow treats its input as data
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --user pyyaml==6.0.2
+          python3 .github/scripts/check-release-workflow.py .github/workflows/release-images.yml
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
+            -no-color .github/workflows/release-images.yml
